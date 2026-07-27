@@ -17,7 +17,7 @@ setup_logging()
 from telegram import BotCommand, BotCommandScopeChat, BotCommandScopeAllPrivateChats, BotCommandScopeAllGroupChats, BotCommandScopeDefault, BotCommandScopeAllChatAdministrators
 from telegram.ext import ApplicationBuilder
 
-from config import TELEGRAM_TOKEN, ADMIN_IDS, GEMINI_API_KEY, RAG_ENABLED, IS_DOCKER, DB_PATH
+from config import TELEGRAM_TOKEN, ADMIN_IDS, GEMINI_API_KEY, RAG_ENABLED, IS_DOCKER, DB_PATH, BOT_VERSION
 from database.history import init_db
 from handlers import setup_handlers
 from utils import register_and_clean_bot_message
@@ -315,7 +315,7 @@ async def post_init(application):
 
     # Сообщаем админам, что бот поднялся (после обычного старта И после перезапуска
     # кнопкой — новый процесс всегда проходит через post_init).
-    await _notify_admins(application.bot, "✅ Бот запущен и готов к работе.")
+    await _notify_admins(application.bot, f"✅ Бот запущен и готов к работе · v{BOT_VERSION}")
 
     # Сразу за этим автоматически показываем каждому из персонала его панель.
     # Панель отправляется через тот же механизм очистки, поэтому она УДАЛЯЕТ
@@ -333,7 +333,7 @@ async def post_init(application):
     except Exception as e:
         logger.warning("⚠️ Не удалось автоматически показать /adm при запуске: %s", e)
 
-    logger.info("🚀 Бот запущен и готов к работе")
+    logger.info("🚀 Бот запущен и готов к работе — версия v%s", BOT_VERSION)
 
 
 async def post_stop(application):

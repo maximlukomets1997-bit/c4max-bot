@@ -41,6 +41,28 @@ load_dotenv(override=True)
 _MANAGED_BY_DEFAULT = "false" if sys.platform == "win32" else "true"
 IS_DOCKER = os.getenv("IS_DOCKER", _MANAGED_BY_DEFAULT).lower() == "true"
 
+# ─────────────────────────────────────────────
+#  Номер версии бота
+# ─────────────────────────────────────────────
+# Хранится в файле VERSION рядом с кодом — ЕДИНСТВЕННОЕ место, где он записан;
+# всё остальное только читает отсюда. Последняя цифра поднимается САМА при
+# отправке правок на GitHub (это делает «Отправить изменения на GitHub.bat»),
+# первая — вручную, по случаю крупного изменения.
+# ⚠️ Путь считается ОТ САМОГО config.py, а не от рабочей папки: у службы
+# systemd на сервере и у заданий планировщика она своя, и относительный путь
+# молча дал бы «версия неизвестна».
+def _read_version() -> str:
+    try:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "VERSION")
+        with open(path, encoding="utf-8") as f:
+            return f.read().strip() or "?"
+    except Exception:
+        # Файла нет или он испорчен — это не повод не запускать бота.
+        return "?"
+
+
+BOT_VERSION = _read_version()
+
 # Telegram
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")          # Получить у @BotFather
 
