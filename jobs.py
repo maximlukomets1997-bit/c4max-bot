@@ -151,23 +151,45 @@ async def news_polling_loop(application):
 
                 # Рассылаем всем подписчикам
                 chat_ids = get_subscribed_chats()
+                delivered = 0
                 if chat_ids:
                     logger.info("📰 Рассылаю сводку %d подписчикам", len(chat_ids))
                     for chat_id in chat_ids:
-                        await send_news_to_chat(
-                            bot=application.bot,
-                            chat_id=chat_id,
-                            text=formatted_news,
-                            # Главная — крупная картинка из статьи; если её нет,
-                            # откат на обложку-превью из списка новостей.
-                            image_url=article.get("main_image") or item["image_url"],
-                            url=url,
-                            stat_images=article["stat_images"][:1],  # одна карточка ТТХ
-                        )
+                        # ⚠️ Отправка КАЖДОМУ чату защищена отдельно (2026-07-27).
+                        # Раньше защиты не было, и один недоступный чат (бота
+                        # выгнали, группу удалили, отобрали право писать) ронял
+                        # ВЕСЬ цикл: остальные подписчики новость не получали,
+                        # отметки «разослано» не было, статья не попадала в
+                        # папку ожидания базы знаний — и всё это повторялось
+                        # каждые 10 минут, заново тратя запрос к модели.
+                        try:
+                            await send_news_to_chat(
+                                bot=application.bot,
+                                chat_id=chat_id,
+                                text=formatted_news,
+                                # Главная — крупная картинка из статьи; если её нет,
+                                # откат на обложку-превью из списка новостей.
+                                image_url=article.get("main_image") or item["image_url"],
+                                url=url,
+                                stat_images=article["stat_images"][:1],  # одна карточка ТТХ
+                            )
+                            delivered += 1
+                        except Exception as send_err:
+                            logger.warning("📰 Не удалось отправить новость в чат %s: %s",
+                                           chat_id, send_err)
                         await asyncio.sleep(0.1)
 
+                # Отметка ставится ДАЖЕ если не доставили никому: иначе бот
+                # будет вечно перезапускать разбор одной и той же новости.
                 mark_news_as_sent(url)
-                logger.info("📰 Новость разослана и зафиксирована в БД: %s", url)
+                if chat_ids and delivered == 0:
+                    logger.error("📰 Новость не дошла НИ ОДНОМУ подписчику (%d чатов) — "
+                                 "проверь права бота: %s", len(chat_ids), url)
+                elif delivered < len(chat_ids):
+                    logger.warning("📰 Новость доставлена %d из %d подписчиков: %s",
+                                   delivered, len(chat_ids), url)
+                else:
+                    logger.info("📰 Новость разослана и зафиксирована в БД: %s", url)
 
                 # Сохраняем ИСХОДНЫЙ текст статьи (не сводку модели) в папку
                 # ожидания базы знаний — админ решит в панели, добавлять ли
