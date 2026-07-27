@@ -257,10 +257,24 @@ def _fmt_mod_time(ts: float) -> str:
 
 
 # ─────────────────────────────────────────────
-#  Чтение и упаковка логов для кнопки «📜 Логи бота» (роутер: adm_logs / adm_logs_file)
+#  Чтение и упаковка логов для кнопки «📜 Логи бота»
+#  (роутер: adm_logs / adm_logs_file / adm_logs_archive)
 # ─────────────────────────────────────────────
 
 _LOG_TEXT_LIMIT = 4096        # лимит Telegram на обычное текстовое сообщение
+
+
+def _log_files_row():
+    """Ряд из ДВУХ кнопок скачивания логов: текущий запуск и архив прошлых.
+
+    ЕДИНСТВЕННОЕ место, где этот ряд собран — его ставят и экран логов,
+    и подпись к уже присланному файлу (чтобы второй файл можно было забрать
+    сразу, не открывая логи заново).
+    """
+    return [
+        InlineKeyboardButton("💾 Текущий лог", callback_data="adm_logs_file"),
+        InlineKeyboardButton("🗄 Архив логов", callback_data="adm_logs_archive"),
+    ]
 
 
 def _read_current_log():
@@ -277,6 +291,39 @@ def _read_current_log():
         except Exception as e:
             logger.warning("⚠️ Не удалось прочитать файл лога %s: %s", log_path, e)
     return log_path, raw
+
+
+def _read_archive_log():
+    """Читает общий архив логов ПРОШЛЫХ запусков. Возвращает (путь, байты).
+
+    Путь берётся у logging_setup — там он и складывается из папки и имени
+    файла; вторую сборку пути заводить нельзя, иначе после переименования
+    архива кнопка молча начнёт искать не тот файл.
+    """
+    log_path = logging_setup._archive_path()
+    raw = b""
+    if os.path.exists(log_path):
+        try:
+            with open(log_path, "rb") as f:
+                raw = f.read()
+        except Exception as e:
+            logger.warning("⚠️ Не удалось прочитать архив логов %s: %s", log_path, e)
+    return log_path, raw
+
+
+def _count_archive_sessions(raw: bytes) -> int:
+    """Сколько запусков лежит в архиве — считается по строкам-заголовкам,
+    которыми logging_setup разделяет сессии («════ СЕССИЯ 27.07 22-44 ════»).
+
+    Цифра честная: показываем реально склеенное, а не потолок
+    ARCHIVE_SESSIONS_TO_KEEP (архив бывает и короче — сразу после чистки).
+    """
+    try:
+        text = raw.decode("utf-8", errors="replace")
+        return sum(1 for ln in text.splitlines()
+                   if ln.startswith(logging_setup._SESSION_MARK_PREFIX))
+    except Exception:
+        return 0
 
 
 def _build_log_text(fname: str, raw: bytes) -> str:

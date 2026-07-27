@@ -109,17 +109,24 @@ def _run_blocking() -> dict:
     return result
 
 
-async def update() -> dict:
+async def update(quiet_nochange: bool = False) -> dict:
     """
     Обновить код с GitHub. Возвращает разобранный ответ сценария:
       STATUS  — UPDATED | NOCHANGE | ROLLBACK | NETFAIL | FAIL | BUSY
       VERSION — версия, на которой бот остался
       MSG     — готовая человеческая строка
     Бота НЕ перезапускает: это дело того, кто позвал.
+
+    quiet_nochange=True — не писать в лог исход NOCHANGE («нового кода нет»).
+    Его ставит автоматический цикл самообновления: он спрашивает GitHub каждые
+    10 минут, и одна и та же строка 144 раза в сутки забивала лог, пряча в нём
+    настоящие события (решение Максима 2026-07-27). Все ПРОЧИЕ исходы пишутся
+    всегда — молчать о неудаче нельзя.
     """
     loop = asyncio.get_running_loop()
     res = await loop.run_in_executor(None, _run_blocking)
-    logger.info("⬇️ Обновление: %s — %s", res.get("STATUS"), res.get("MSG"))
+    if not (quiet_nochange and res.get("STATUS") == "NOCHANGE"):
+        logger.info("⬇️ Обновление: %s — %s", res.get("STATUS"), res.get("MSG"))
     if res.get("ERR"):
         logger.warning("⚠️ Обновление, текст ошибки: %s", res["ERR"])
     return res
