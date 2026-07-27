@@ -63,6 +63,17 @@ def _read_version() -> str:
 
 BOT_VERSION = _read_version()
 
+# Номер версии показывается СИНЕЙ ССЫЛКОЙ (просьба Максима 2026-07-27): в
+# Телеграме синим рисуется только ссылка, обычный текст покрасить нельзя.
+# Ведёт на код именно этой версии — метку `vX.YZ` ставит на GitHub
+# «Отправить изменения на GitHub.bat» при каждой отправке.
+# ⚠️ Отправляя это в чат, не забудь parse_mode=HTML И отключение превью
+# (LinkPreviewOptions(is_disabled=True)) — иначе под сообщением развернётся
+# карточка GitHub.
+GITHUB_REPO_URL = "https://github.com/maximlukomets1997-bit/c4max-bot"
+BOT_VERSION_URL = f"{GITHUB_REPO_URL}/tree/v{BOT_VERSION}"
+BOT_VERSION_HTML = f'<a href="{BOT_VERSION_URL}">v{BOT_VERSION}</a>'
+
 # Telegram
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")          # Получить у @BotFather
 

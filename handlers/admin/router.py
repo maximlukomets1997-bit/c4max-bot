@@ -207,13 +207,42 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         context.application.bot_data["shutdown_reason"] = "restart"
         # Плашка-уведомление: тот же текст, что и в сообщении (без жирного/курсива —
         # всплывающие плашки Telegram не поддерживают форматирование).
+        # Отвечаем СРАЗУ: у Telegram около 15 секунд на ответ кнопке, а
+        # обновление кода может занять дольше.
         await query.answer(
             "🔄 Выполняется перезапуск бота...\n\n"
             "Бот перезапустится автоматически через несколько секунд.",
             show_alert=True
         )
+
+        # ── Обновление кода с GitHub (2026-07-27) ───────────────────────
+        # На СЕРВЕРЕ кнопка сначала забирает свежий код, и только потом
+        # перезапускается — иначе она поднимала бы бота на том же старом коде
+        # (ровно на это Максим и напоролся 27.07). Дома проверка can_update()
+        # возвращает False, и всё работает как раньше.
+        # Что бы ни случилось с обновлением, ПЕРЕЗАПУСК ВСЁ РАВНО ПРОИСХОДИТ:
+        # человек нажал «перезапустить», и это его просьба, а не следствие
+        # удачного обновления.
+        from services import deploy
+
+        update_line = ""
+        if deploy.can_update():
+            try:
+                await query.edit_message_text(
+                    "🔄 <b>Проверяю, есть ли новый код...</b>",
+                    parse_mode=ParseMode.HTML
+                )
+            except Exception:
+                pass
+            try:
+                update_line = deploy.describe(await deploy.update()) + "\n\n"
+            except Exception as e:
+                logger.warning("⚠️ Обновление сорвалось: %s", e)
+                update_line = "⚠️ Обновить код не удалось, перезапускаюсь на прежнем.\n\n"
+
         try:
             await query.edit_message_text(
+                f"{update_line}"
                 "🔄 <b>Выполняется перезапуск бота...</b>\n\n"
                 "<i>Бот перезапустится автоматически через несколько секунд.</i>",
                 parse_mode=ParseMode.HTML

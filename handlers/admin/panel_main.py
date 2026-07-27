@@ -10,7 +10,7 @@ import logging_setup
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
-from config import AVAILABLE_MODELS, AVAILABLE_IMAGE_MODELS, ADMIN_IDS, GEMINI_MODEL, PROVIDER_ICONS, BOT_VERSION
+from config import AVAILABLE_MODELS, AVAILABLE_IMAGE_MODELS, ADMIN_IDS, GEMINI_MODEL, PROVIDER_ICONS, BOT_VERSION_HTML
 from database.history import set_setting, get_setting, delete_setting, append_prompt_addition, get_active_system_prompt, get_bot_stats, get_news_system_prompt, get_rag_instruction, get_qwen_tokens
 from utils import register_and_clean_bot_message, delete_user_message_safe
 from utils import mention, schedule_delete
@@ -792,23 +792,27 @@ async def send_adm_panel(bot, chat_id: int, user_id: int | None = None):
 
     # Версия в заголовке — способ увидеть, какая сборка РЕАЛЬНО работает
     # (на сервере она меняется только после того, как он забрал правки).
+    # Синей ссылкой на код этой версии — обычный текст в Телеграме покрасить
+    # нельзя, синим рисуются только ссылки.
     if owner:
-        text = (f"🎛 <b>АДМИН-ПАНЕЛЬ</b> · <code>v{BOT_VERSION}</code>\n"
+        text = (f"🎛 <b>АДМИН-ПАНЕЛЬ</b> · {BOT_VERSION_HTML}\n"
                 "───────────────────────────\n"
                 "<i>Выберите раздел управления:</i>")
     elif keyboard:
-        text = (f"🛡 <b>ПАНЕЛЬ МОДЕРАТОРА</b> · <code>v{BOT_VERSION}</code>\n"
+        text = (f"🛡 <b>ПАНЕЛЬ МОДЕРАТОРА</b> · {BOT_VERSION_HTML}\n"
                 "───────────────────────────\n"
                 "<i>Доступны разделы по твоим правам:</i>")
     else:
         # Модератор, у которого сняли все галочки: не молчим, чтобы человек
         # понимал, что дело в правах, а не в поломке бота.
-        text = (f"🛡 <b>ПАНЕЛЬ МОДЕРАТОРА</b> · <code>v{BOT_VERSION}</code>\n"
+        text = (f"🛡 <b>ПАНЕЛЬ МОДЕРАТОРА</b> · {BOT_VERSION_HTML}\n"
                 "───────────────────────────\n"
                 "<i>Прав пока не выдано — обратись к владельцу бота.</i>")
 
     sent_msg = await bot.send_message(
         chat_id=chat_id, text=text, parse_mode=ParseMode.HTML,
+        # Без этого под панелью развернётся карточка GitHub со ссылки версии.
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
         reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None,
     )
     if sent_msg:

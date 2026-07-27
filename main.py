@@ -17,7 +17,7 @@ setup_logging()
 from telegram import BotCommand, BotCommandScopeChat, BotCommandScopeAllPrivateChats, BotCommandScopeAllGroupChats, BotCommandScopeDefault, BotCommandScopeAllChatAdministrators
 from telegram.ext import ApplicationBuilder
 
-from config import TELEGRAM_TOKEN, ADMIN_IDS, GEMINI_API_KEY, RAG_ENABLED, IS_DOCKER, DB_PATH, BOT_VERSION
+from config import TELEGRAM_TOKEN, ADMIN_IDS, GEMINI_API_KEY, RAG_ENABLED, IS_DOCKER, DB_PATH, BOT_VERSION, BOT_VERSION_HTML
 from database.history import init_db
 from handlers import setup_handlers
 from utils import register_and_clean_bot_message
@@ -232,7 +232,7 @@ def _friendly_error(err: Exception) -> str:
     return msg
 
 
-async def _notify_admins(bot, text: str):
+async def _notify_admins(bot, text: str, html: bool = False):
     """
     Шлёт короткое служебное сообщение всему персоналу в личку (chat_id == их user_id).
     Идёт через register_and_clean_bot_message — поэтому новое служебное сообщение
@@ -240,10 +240,26 @@ async def _notify_admins(bot, text: str):
     «🛑 остановлен», «✅ запущен» сменяют друг друга, не копясь). Хранилище в SQLite,
     поэтому работает и между перезапусками (разными процессами).
     Любая ошибка по отдельному человеку не должна мешать запуску/остановке — глушим.
+
+    html=True — текст содержит разметку (сейчас это только синяя ссылка с номером
+    версии в сообщении о запуске). Заодно гасим превью, иначе Телеграм развернёт
+    под сообщением карточку GitHub. Остальные служебные тексты уходят как есть:
+    включать разметку всем подряд нельзя — символ «<» в чужом тексте сломает
+    отправку.
     """
+    from telegram import LinkPreviewOptions
+    from telegram.constants import ParseMode
+
+    extra = {}
+    if html:
+        extra = {
+            "parse_mode": ParseMode.HTML,
+            "link_preview_options": LinkPreviewOptions(is_disabled=True),
+        }
+
     for admin_id in _staff_recipients():
         try:
-            sent = await bot.send_message(chat_id=admin_id, text=text)
+            sent = await bot.send_message(chat_id=admin_id, text=text, **extra)
             if sent:
                 await register_and_clean_bot_message(bot, admin_id, sent.message_id)
         except Exception as e:
@@ -315,7 +331,11 @@ async def post_init(application):
 
     # Сообщаем админам, что бот поднялся (после обычного старта И после перезапуска
     # кнопкой — новый процесс всегда проходит через post_init).
-    await _notify_admins(application.bot, f"✅ Бот запущен и готов к работе · v{BOT_VERSION}")
+    await _notify_admins(
+        application.bot,
+        f"✅ Бот запущен и готов к работе · {BOT_VERSION_HTML}",
+        html=True,
+    )
 
     # Сразу за этим автоматически показываем каждому из персонала его панель.
     # Панель отправляется через тот же механизм очистки, поэтому она УДАЛЯЕТ
