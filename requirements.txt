@@ -1,0 +1,6 @@
+python-telegram-bot>=21.0
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+python-dotenv>=1.0.0
+telegramify-markdown>=1.1.0
+tzdata>=2024.1

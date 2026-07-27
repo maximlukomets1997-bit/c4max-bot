@@ -1,0 +1,39 @@
+# --- Секреты: НИКОГДА не коммитить ---
+.env
+*.env
+!.env.example
+
+# --- Данные пользователей ---
+history.db
+history.db-shm
+history.db-wal
+*.sqlite
+*.sqlite3
+
+# --- Служебные файлы запуска ---
+bot.pid
+bot.alive
+watchdog.state
+watchdog.log
+
+# --- Логи ---
+logs/
+*.log
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# --- Редакторы и ОС ---
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# --- Локальные настройки Claude Code ---
+.claude/settings.local.json
