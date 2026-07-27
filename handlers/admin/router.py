@@ -17,7 +17,8 @@ from utils import mention, schedule_delete
 
 
 logger = logging.getLogger(__name__)
-from .common import _adm_back_row, _audit, _build_log_text, _read_current_log
+from .common import (_adm_back_row, _audit, _build_log_text, _count_archive_sessions,
+                     _log_files_row, _read_archive_log, _read_current_log)
 from .panel_main import (_build_api_keyboard, _handle_balance_callback, build_adm_keyboard,
                          send_adm_panel, send_api_panel,
                          send_daily_report_panel, send_weekly_report_panel,
@@ -155,7 +156,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         logger.info("🔧 Админ %s запросил логи текущей сессии", user_id)
         fname = os.path.basename(log_path)
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("💾 Скачать файл", callback_data="adm_logs_file")],
+            _log_files_row(),
             _adm_back_row(),
         ])
         sent_msg = await context.bot.send_message(
@@ -168,7 +169,9 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             await register_and_clean_bot_message(context.bot, chat_id, sent_msg.message_id)
         return
 
-    # ── Кнопка «💾 Скачать файл»: полный файл лога документом ─────────────
+    # ── Кнопка «💾 Текущий лог»: полный файл лога документом ──────────────
+    # Ряд из двух кнопок повторяется и под присланным файлом — чтобы второй
+    # файл можно было забрать сразу, не открывая логи заново.
     if data == "adm_logs_file":
         log_path, raw = _read_current_log()
         if not raw:
@@ -187,7 +190,42 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 f"<code>{html.escape(fname)}</code> · {size_kb} КБ"
             ),
             parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([_adm_back_row()]),
+            reply_markup=InlineKeyboardMarkup([_log_files_row(), _adm_back_row()]),
+        )
+        if sent_msg:
+            await register_and_clean_bot_message(context.bot, chat_id, sent_msg.message_id)
+        return
+
+    # ── Кнопка «🗄 Архив логов»: логи прошлых запусков документом ─────────
+    # Архив (logs/archive.log) собирает logging_setup при каждом старте:
+    # логи прошлых сессий склеиваются подряд, хранятся последние 7.
+    if data == "adm_logs_archive":
+        log_path, raw = _read_archive_log()
+        if not raw:
+            await query.answer(
+                "🗄 Архив пуст: логов прошлых запусков ещё нет.\n"
+                "Он соберётся сам при следующем запуске бота.",
+                show_alert=True
+            )
+            return
+        await query.answer()
+        logger.info("🔧 Админ %s скачал архив логов прошлых запусков", user_id)
+        fname = os.path.basename(log_path)
+        size_kb = max(1, round(len(raw) / 1024))
+        sessions = _count_archive_sessions(raw)
+        # Число сессий считаем по заголовкам в самом файле, а не по потолку
+        # ARCHIVE_SESSIONS_TO_KEEP: архив бывает и короче потолка.
+        sessions_part = f" · сессий: {sessions}" if sessions else ""
+        sent_msg = await context.bot.send_document(
+            chat_id=chat_id,
+            document=raw,
+            filename=fname,
+            caption=(
+                f"🗄 <b>Архив логов прошлых запусков</b>\n"
+                f"<code>{html.escape(fname)}</code> · {size_kb} КБ{sessions_part}"
+            ),
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([_log_files_row(), _adm_back_row()]),
         )
         if sent_msg:
             await register_and_clean_bot_message(context.bot, chat_id, sent_msg.message_id)

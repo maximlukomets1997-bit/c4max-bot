@@ -768,10 +768,17 @@ def _adm_rows():
         # на GitHub новой версии, и забирает её в тишине. Тумблер нужен, чтобы
         # можно было спокойно отправлять правки пачками, не выкатывая каждую.
         # Надпись — только через _onoff (стандарт тумблеров, см. раздел 4 карты).
-        [InlineKeyboardButton(
-            f"⬇️ САМООБНОВЛЕНИЕ: {_onoff(get_setting('auto_update_enabled', AUTO_UPDATE_ENABLED_DEFAULT) == '1')}",
-            callback_data="adm_autoupdate")],
-        [InlineKeyboardButton("🔄 ПЕРЕЗАПУСТИТЬ БОТА", callback_data="system_restart")],
+        # Оба — управление самим ботом, поэтому стоят одним рядом в два столбца
+        # (решение Максима 2026-07-27). Надпись перезапуска укорочена с
+        # «ПЕРЕЗАПУСТИТЬ БОТА»: в половину ширины длинная не влезает.
+        # Обе кнопки владельческие (в _CALLBACK_RULES их нет) — у модератора
+        # ряд пропадает целиком, заглушек в нём нет.
+        [
+            InlineKeyboardButton(
+                f"⬇️ САМООБНОВЛЕНИЕ: {_onoff(get_setting('auto_update_enabled', AUTO_UPDATE_ENABLED_DEFAULT) == '1')}",
+                callback_data="adm_autoupdate"),
+            InlineKeyboardButton("🔄 ПЕРЕЗАПУСК", callback_data="system_restart"),
+        ],
     ]
 
 

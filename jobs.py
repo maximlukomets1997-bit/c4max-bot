@@ -559,7 +559,10 @@ async def auto_update_loop(application):
                 continue  # в чатах разговор — подождём, перезапуск его оборвёт
 
             last_check = time.monotonic()
-            res = await deploy.update()
+            # quiet_nochange: «нового кода нет» в лог не пишем — проверка идёт
+            # каждые 10 минут, и эта строка забивала бы лог целиком. Все прочие
+            # исходы (обновился, откатился, не достучался) пишутся как обычно.
+            res = await deploy.update(quiet_nochange=True)
             status = res.get("STATUS")
 
             if status == "UPDATED":
