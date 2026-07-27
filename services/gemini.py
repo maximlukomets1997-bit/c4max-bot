@@ -1149,14 +1149,10 @@ def ask_gemini(chat_id: int, user_id: int, user_text: str, image_base64: str = N
 
     # RAG работает независимо от тумблера «PROMPT ВЫКЛ» админа: база знаний —
     # источник фактов, а не часть «личности» бота (решение 2026-07-05).
-    # Но у админа есть СВОЙ тумблер в панели /rag («RAG в моей личке»):
-    # он глушит базу только в личке админа; группы и других пользователей
-    # не затрагивает. В личке chat_id == user_id — по этому и отличаем.
-    rag_muted_for_admin = (
-        is_admin and chat_id == user_id
-        and hist.get_setting(f"admin_no_rag_{user_id}", "0") == "1"
-    )
-    if RAG_ENABLED and not rag_muted_for_admin:
+    # Общий тумблер базы знаний («📖 База знаний» в панели /rag) проверяется
+    # ВНУТРИ retrieve_relevant_context — там единственная точка входа поиска,
+    # и её слушаются все пути сразу. Здесь его дублировать не надо.
+    if RAG_ENABLED:
         try:
             import services.rag as rag_module
             rag_context = rag_module.retrieve_relevant_context(user_text)
@@ -1482,8 +1478,8 @@ def _build_proactive_parts(chat_id: int, bot_id: int, trigger_text: str,
         system_parts.append(persona)
 
     # RAG по последнему сообщению (триггеру) — как в ask_gemini: если чат
-    # обсуждает игру, бот подтянет факты из базы знаний. Персональный тумблер
-    # «RAG в моей личке» не действует — он только для лички админа.
+    # обсуждает игру, бот подтянет факты из базы знаний. Общий тумблер базы
+    # знаний действует и здесь — он проверяется внутри поиска (services/rag.py).
     if RAG_ENABLED and trigger_text:
         try:
             import services.rag as rag_module

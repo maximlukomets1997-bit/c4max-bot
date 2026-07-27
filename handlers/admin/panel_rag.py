@@ -84,12 +84,13 @@ async def _end_kb_test(bot, chat_id: int, context) -> None:
 
 def _build_rag_panel(context, admin_id: int):
     """
-    Собирает текст и клавиатуру панели базы знаний: статусы RAG (глобальный
-    и персональный), журнал, список статей-кнопок, кнопку проверки поиска,
-    тумблер «RAG в моей личке» и настройки ➖/➕ (порог сходства и число
-    фрагментов — живут в settings). Используется и при отправке панели,
-    и при перерисовке после кнопок. admin_id — чей персональный тумблер
-    показывать (панель живёт только в личке, так что это её владелец).
+    Собирает текст и клавиатуру панели базы знаний: статус модуля RAG и общий
+    тумблер базы, журнал, список статей-кнопок, кнопку проверки поиска и
+    настройки ➖/➕ (порог сходства и число фрагментов — живут в settings).
+    Используется и при отправке панели, и при перерисовке после кнопок.
+
+    admin_id остаётся в подписи для совместимости с вызовами: персональных
+    настроек в панели больше нет — тумблер базы знаний стал общим (2026-07-27).
     """
     from config import RAG_ENABLED
     from services.knowledge_store import list_articles, ARTICLE_KINDS
@@ -152,14 +153,14 @@ def _build_rag_panel(context, admin_id: int):
         InlineKeyboardButton(f"📈 Запас над фоном: {margin_pct}%", callback_data="kb_noop"),
         InlineKeyboardButton("➕", callback_data="kb_margin_inc"),
     ])
-    # Персональный тумблер: глушит базу знаний только в личке этого админа
-    # (ключ admin_no_rag_<id>; группы и другие пользователи не затрагиваются).
-    # Метка показывает СОСТОЯНИЕ (общий _onoff, 2026-07-20). ВНИМАНИЕ: ключ
-    # хранится НАОБОРОТ — "1" значит «база в личке ВЫКЛЮЧЕНА», поэтому
-    # значение переворачивается перед передачей в _onoff.
-    my_rag_off = get_setting(f"admin_no_rag_{admin_id}", "0") == "1"
-    my_rag_btn = f"📖 RAG в моей личке: {_onoff(not my_rag_off)}"
-    rows.append([InlineKeyboardButton(my_rag_btn, callback_data="kb_myrag")])
+    # ОБЩИЙ тумблер базы знаний (2026-07-27, просьба Максима — был персональным,
+    # только для лички админа). Выключен — база не подмешивается никому и нигде:
+    # ни в личке, ни в группах, ни в режиме «Сам в разговор». Проверяется в
+    # единственной точке — services/rag.py::retrieve_relevant_context.
+    # Ключ хранится ПРЯМО ("1" = включена), переворачивать не надо.
+    kb_on = get_setting("rag_enabled", "1") == "1"
+    kb_btn = f"📖 База знаний: {_onoff(kb_on)}"
+    rows.append([InlineKeyboardButton(kb_btn, callback_data="kb_myrag")])
     rows.append([
         InlineKeyboardButton("➕ Добавить RAG", callback_data="kb_add"),
         InlineKeyboardButton("🔄 Пересобрать RAG", callback_data="kb_rebuild"),
@@ -168,13 +169,13 @@ def _build_rag_panel(context, admin_id: int):
     context.application.bot_data["kb_file_map"] = file_map
 
     rag_status = "🟢 включён" if RAG_ENABLED else "🔴 выключен (RAG_ENABLED в .env)"
-    my_status = "🔴 выключена (тумблер ниже)" if my_rag_off else "🟢 включена"
+    kb_status = "🟢 ВКЛЮЧЕНА" if kb_on else "🔴 ВЫКЛЮЧЕНА (тумблер ниже)"
     hidden = len(articles) - _KB_LIST_LIMIT
     text = (
         "📚 <b>База знаний (RAG)</b>\n"
         "───────────────────────────\n"
-        f"🌐 RAG для всего бота: <b>{rag_status}</b>\n"
-        f"📖 База в моей личке: <b>{my_status}</b>\n"
+        f"🌐 Модуль RAG: <b>{rag_status}</b>\n"
+        f"📖 База знаний для всех: <b>{kb_status}</b>\n"
         f"🕐 Ждут одобрения: <b>{pending_count}</b>\n"
         f"✅ В базе знаний: <b>{approved_count}</b>"
         + _kb_recent_actions_block()
@@ -350,15 +351,17 @@ async def _handle_kb_callback(query, context, data: str, chat_id: int, user_id: 
         return
 
     if action == "kb_myrag":
-        # Персональный тумблер: глушит подмешивание базы знаний в ответы ИИ
-        # ТОЛЬКО в личке этого админа (проверяется в services/gemini.py).
+        # ОБЩИЙ тумблер базы знаний (2026-07-27): выключен — статьи не
+        # подмешиваются НИКОМУ и НИГДЕ (личка, группы, «Сам в разговор»).
+        # Проверяется в services/rag.py::retrieve_relevant_context — в одной
+        # точке на всех путях сразу.
         # На кнопку «🔍 Проверить поиск» не влияет — диагностика работает всегда.
-        cur_off = get_setting(f"admin_no_rag_{user_id}", "0") == "1"
-        new_val = "0" if cur_off else "1"
-        set_setting(f"admin_no_rag_{user_id}", new_val)
-        state = "включена" if new_val == "0" else "выключена"
-        logger.info("📚 /rag: база знаний в личке админа %s %s", user_id, state)
-        await query.answer(f"📖 База знаний в твоей личке {state}", show_alert=False)
+        cur_on = get_setting("rag_enabled", "1") == "1"
+        new_val = "0" if cur_on else "1"
+        set_setting("rag_enabled", new_val)
+        state = "включена" if new_val == "1" else "выключена"
+        logger.info("📚 /rag: база знаний %s для ВСЕХ (переключил админ %s)", state, user_id)
+        await query.answer(f"📖 База знаний {state} для всех", show_alert=False)
         text, markup = _build_rag_panel(context, user_id)
         try:
             await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
