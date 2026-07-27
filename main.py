@@ -129,8 +129,11 @@ def _seed_db_if_missing() -> None:
         # Сначала убеждаемся, что заготовка вообще похожа на базу: битый или
         # обрезанный файл иначе доедет до init_db и уронит бота на старте
         # сообщением про «malformed database» — на чужом сервере это больно.
+        # immutable=1 — читаем, ничего не создавая рядом. Без него SQLite у
+        # базы в режиме WAL заводит файлы -shm/-wal просто на чтении, и они
+        # мусорят в папке проекта (наступили 2026-07-27: уехали на GitHub).
         import sqlite3
-        probe = sqlite3.connect("file:%s?mode=ro" % seed.replace("?", "%3f"), uri=True)
+        probe = sqlite3.connect("file:%s?immutable=1" % seed.replace("?", "%3f"), uri=True)
         try:
             probe.execute("SELECT COUNT(*) FROM settings").fetchone()
         finally:

@@ -5,10 +5,13 @@
 
 # --- Данные пользователей ---
 history.db
-history.db-shm
-history.db-wal
 *.sqlite
 *.sqlite3
+
+# --- Служебные файлы SQLite: у любой базы, включая заготовку seed.db ---
+*.db-shm
+*.db-wal
+*.db-journal
 
 # --- Служебные файлы запуска ---
 bot.pid
