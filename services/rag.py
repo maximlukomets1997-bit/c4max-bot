@@ -669,11 +669,13 @@ def retrieve_relevant_context(query: str, top_k: int = None, min_similarity: flo
     margin = _live_peak_margin()  # один раз на запрос, не на каждую статью
 
     relevant_contexts = []
+    chosen_titles = []
     for score, sim, lex, chunk in scored[:top_k]:
         ok, reason = _chunk_passes(score, baseline, min_similarity, margin)
         if ok:
             logger.info("%s Найдена статья (балл %.3f = смысл %.3f + слова %.3f, %s): %s",
                         RAG_ICON, score, sim, lex, reason, chunk["title"])
+            chosen_titles.append(chunk["title"])
             relevant_contexts.append(
                 f"=== РАЗДЕЛ: {chunk['title']} ===\n{chunk['content']}"
             )
@@ -683,6 +685,12 @@ def retrieve_relevant_context(query: str, top_k: int = None, min_similarity: flo
 
     if not relevant_contexts:
         return ""
+
+    # Итоговая строка: ЧТО именно уехало модели. «Найдена статья» выше говорит
+    # лишь о том, что статья прошла отбор, — а по этой строке видно готовый
+    # состав подсказки, без гадания (просьба Максима 2026-07-27).
+    logger.info("%s Модели отправлены статьи (%d): %s",
+                RAG_ICON, len(chosen_titles), ", ".join(chosen_titles))
 
     return "\n\n".join(relevant_contexts)
 

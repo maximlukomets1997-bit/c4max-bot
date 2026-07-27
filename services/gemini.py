@@ -514,6 +514,75 @@ def _err_body(exc) -> str:
         return ""
 
 
+def _err_short(exc) -> str:
+    """
+    Короткий текст ошибки для лога.
+
+    У requests сообщение начинается с того же кода, который в строке лога уже
+    напечатан рядом («код 503: 503 Server Error: …»), а заканчивается полным
+    URL, где ЕЩЁ РАЗ повторяется имя модели — тоже уже напечатанное. Остаётся
+    голое дублирование, за которым теряется суть. Убираем оба хвоста и
+    оставляем причину: «Service Unavailable».
+
+    Тело ответа сервера этим НЕ трогается — оно приходит отдельно, через
+    _err_body, и там самое ценное для разбора (см. его докстринг).
+    """
+    text = str(exc).strip()
+    text = re.sub(r'^\d{3}\s+(?:Client|Server)\s+Error:\s*', '', text)
+    text = re.sub(r'\s+for url:\s*\S+$', '', text)
+    return text or exc.__class__.__name__
+
+
+def _native_thinking_config(model_name: str) -> dict:
+    """
+    Кусок generationConfig для НАТИВНЫХ запросов (аудио, видео): просим модель
+    вернуть сводку рассуждений.
+
+    ⚠️ Формат отличается от текстового пути. Там запрос идёт через
+    OpenAI-совместимый эндпоинт и настройка едет в extra_body["google"]
+    (см. _gemini_chat_request); здесь — обычным полем generationConfig.
+    Из-за этого различия аудио и видео до 2026-07-27 отвечали БЕЗ мыслей:
+    настройку туда просто не передавали.
+
+    thinkingBudget: -1 — динамический максимум, как в текстовых запросах.
+    Гемма шлёт <thought> сама (native_thinking) — её не просим.
+    """
+    info = AVAILABLE_MODELS.get(model_name, {})
+    if _is_thinking(model_name) and not info.get("native_thinking"):
+        return {"thinkingConfig": {"includeThoughts": True, "thinkingBudget": -1}}
+    return {}
+
+
+def _native_answer_with_thoughts(data: dict) -> str:
+    """
+    Собирает ответ нативного API (аудио, видео) из частей.
+
+    Мысли приходят ОТДЕЛЬНЫМИ частями с флагом "thought": true. Старый разбор
+    брал parts[0] — то есть при включённых размышлениях вернул бы первую мысль
+    вместо ответа. Здесь части раскладываются по флагу, мысли заворачиваются
+    в <thought>…</thought> и ставятся ПЕРЕД ответом — ровно как в текстовом
+    пути (_openai_stream_request), чтобы send_formatted показал их свёрнутой
+    цитатой «Мысли».
+
+    Бросает KeyError/IndexError при неожиданном формате — вызывающий их ловит.
+    """
+    parts = data["candidates"][0]["content"]["parts"]
+
+    thoughts, answer = [], []
+    for part in parts:
+        text = part.get("text")
+        if not text:
+            continue
+        (thoughts if part.get("thought") else answer).append(text)
+
+    body = "".join(answer).strip()
+    reasoning = "".join(thoughts).strip()
+    if not body and not reasoning:
+        raise KeyError("в ответе нет ни текста, ни мыслей")
+
+    return f"<thought>{reasoning}</thought>\n{body}" if reasoning else body
+
+
 def _gemini_chat_request(messages: list, kind: str = "текст", has_image: bool = False,
                          thinking_override: bool | None = None,
                          chain_override: list[str] | None = None):
@@ -595,7 +664,7 @@ def _gemini_chat_request(messages: list, kind: str = "текст", has_image: bo
             except Exception as e:
                 logger.warning(
                     "⚠️ Модель %s не ответила (попытка %s из %s, %s): %s%s",
-                    model_name, attempt + 1, attempts, _err_code(e), e, _err_body(e),
+                    model_name, attempt + 1, attempts, _err_code(e), _err_short(e), _err_body(e),
                 )
                 # Таймаут (модель «зависла» на GEMINI_TIMEOUT сек): вторая попытка
                 # почти всегда тоже упрётся в таймаут — не тратим ещё столько же
@@ -817,15 +886,21 @@ def ask_gemini_audio(chat_id: int, user_id: int, audio_base64: str) -> str:
 
     def _try_audio(model_name: str, attempts: int = 2):
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+        # Просьба о размышлениях зависит от МОДЕЛИ, а payload общий на всю
+        # цепочку — поэтому конфиг добавляется в копию, на каждое звено своё.
+        req = dict(payload)
+        thinking = _native_thinking_config(model_name)
+        if thinking:
+            req["generationConfig"] = thinking
         for attempt in range(attempts):
             try:
-                response = _http().post(url, json=payload, headers=headers, timeout=GEMINI_TIMEOUT)
+                response = _http().post(url, json=req, headers=headers, timeout=GEMINI_TIMEOUT)
                 response.raise_for_status()
                 return response.json()
             except Exception as e:
                 logger.warning(
                     "⚠️ Модель %s не ответила (попытка %s из %s, %s): %s%s",
-                    model_name, attempt + 1, attempts, _err_code(e), e, _err_body(e),
+                    model_name, attempt + 1, attempts, _err_code(e), _err_short(e), _err_body(e),
                 )
                 if attempt < attempts - 1:
                     time.sleep((attempt + 1) * 2)
@@ -874,7 +949,7 @@ def ask_gemini_audio(chat_id: int, user_id: int, audio_base64: str) -> str:
     if active_model in AUDIO_FALLBACK_CHAIN and used_model != active_model:
         _notify_admins_fallback(active_model, used_model)
     try:
-        raw_answer = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        raw_answer = _native_answer_with_thoughts(data)
     except (KeyError, IndexError):
         logger.error("⚠️ Неожиданный формат аудио-ответа Gemini API: %s", str(data)[:300])
         return SOFT_FAIL_MESSAGE
@@ -883,11 +958,15 @@ def ask_gemini_audio(chat_id: int, user_id: int, audio_base64: str) -> str:
     usage = data.get("usageMetadata", {})
     prompt_tokens = usage.get("promptTokenCount", 0)
     total_tokens = usage.get("totalTokenCount", 0)
-    # Модель + время ответа + токены в одной строке (у аудио только контекст и всего).
-    logger.info("%s Ответ от %s за %.1f с | контекст=%s | всего=%s",
-                _icon_of(used_model), used_model, elapsed, prompt_tokens, total_tokens)
+    thought_tokens = usage.get("thoughtsTokenCount", 0)
+    # Модель + время ответа + токены в одной строке.
+    logger.info("%s Ответ от %s за %.1f с (аудио) | контекст=%s | размышления=%s | всего=%s",
+                _icon_of(used_model), used_model, elapsed, prompt_tokens, thought_tokens, total_tokens)
 
-    hist.add_messages(chat_id, user_id, "[Голосовое сообщение]", answer, prompt_tokens, used_model, total_tokens)
+    # В историю — без блока мыслей: он нужен только на экране, а в контексте
+    # диалога занимал бы место (тот же порядок, что в ask_gemini).
+    db_answer = re.sub(r'<thought>.*?</thought>', '', answer, flags=re.DOTALL | re.IGNORECASE).strip()
+    hist.add_messages(chat_id, user_id, "[Голосовое сообщение]", db_answer, prompt_tokens, used_model, total_tokens)
     return answer
 
 
@@ -955,15 +1034,20 @@ def ask_gemini_video(chat_id: int, user_id: int, video_base64: str,
 
     def _try_video(model_name: str, attempts: int = 1):
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+        # Конфиг размышлений — свой на каждое звено цепочки (см. _try_audio).
+        req = dict(payload)
+        thinking = _native_thinking_config(model_name)
+        if thinking:
+            req["generationConfig"] = thinking
         for attempt in range(attempts):
             try:
-                response = _http().post(url, json=payload, headers=headers, timeout=VIDEO_TIMEOUT)
+                response = _http().post(url, json=req, headers=headers, timeout=VIDEO_TIMEOUT)
                 response.raise_for_status()
                 return response.json()
             except Exception as e:
                 logger.warning(
                     "⚠️ Модель %s не ответила на видео (попытка %s из %s, %s): %s%s",
-                    model_name, attempt + 1, attempts, _err_code(e), e, _err_body(e),
+                    model_name, attempt + 1, attempts, _err_code(e), _err_short(e), _err_body(e),
                 )
                 if attempt < attempts - 1:
                     time.sleep((attempt + 1) * 2)
@@ -1014,7 +1098,7 @@ def ask_gemini_video(chat_id: int, user_id: int, video_base64: str,
         _notify_admins_fallback(active_model, used_model)
 
     try:
-        raw_answer = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        raw_answer = _native_answer_with_thoughts(data)
     except (KeyError, IndexError):
         logger.error("⚠️ Неожиданный формат видео-ответа Gemini API: %s", str(data)[:300])
         return SOFT_FAIL_MESSAGE
@@ -1023,13 +1107,16 @@ def ask_gemini_video(chat_id: int, user_id: int, video_base64: str,
     usage = data.get("usageMetadata", {})
     prompt_tokens = usage.get("promptTokenCount", 0)
     total_tokens = usage.get("totalTokenCount", 0)
-    logger.info("%s Ответ от %s за %.1f с (видео) | контекст=%s | всего=%s",
-                _icon_of(used_model), used_model, elapsed, prompt_tokens, total_tokens)
+    thought_tokens = usage.get("thoughtsTokenCount", 0)
+    logger.info("%s Ответ от %s за %.1f с (видео) | контекст=%s | размышления=%s | всего=%s",
+                _icon_of(used_model), used_model, elapsed, prompt_tokens, thought_tokens, total_tokens)
 
     # В контекст диалога пишем пометку с подписью пользователя, если она была, —
     # иначе в истории останется голое «[Видео]» без вопроса, к которому был ответ.
+    # Блок мыслей в историю не идёт — он только для экрана (как в ask_gemini).
     context_note = f"[Видео] {caption}".strip() if caption else "[Видео]"
-    hist.add_messages(chat_id, user_id, context_note, answer, prompt_tokens, used_model, total_tokens)
+    db_answer = re.sub(r'<thought>.*?</thought>', '', answer, flags=re.DOTALL | re.IGNORECASE).strip()
+    hist.add_messages(chat_id, user_id, context_note, db_answer, prompt_tokens, used_model, total_tokens)
     return answer
 
 
@@ -1082,7 +1169,9 @@ def ask_gemini(chat_id: int, user_id: int, user_text: str, image_base64: str = N
                 current_system_prompt = (
                     f"{current_system_prompt}\n\n{rag_block}" if current_system_prompt else rag_block
                 )
-                logger.info("%s Контекст RAG добавлен в системный промпт", RAG_ICON)
+                # Состав подсказки печатает сам поиск (services/rag.py) — там
+                # известны названия статей. Вторая строка «контекст добавлен»
+                # только путала: непонятно, добавили в базу или в промпт.
         except Exception as rag_err:
             logger.error("⚠️ Не удалось добавить контекст RAG: %s", rag_err)
 
