@@ -2,6 +2,7 @@ import logging
 import asyncio
 import sys
 import os
+import shutil
 import atexit
 import subprocess
 import traceback
@@ -16,7 +17,7 @@ setup_logging()
 from telegram import BotCommand, BotCommandScopeChat, BotCommandScopeAllPrivateChats, BotCommandScopeAllGroupChats, BotCommandScopeDefault, BotCommandScopeAllChatAdministrators
 from telegram.ext import ApplicationBuilder
 
-from config import TELEGRAM_TOKEN, ADMIN_IDS, GEMINI_API_KEY, RAG_ENABLED, IS_DOCKER
+from config import TELEGRAM_TOKEN, ADMIN_IDS, GEMINI_API_KEY, RAG_ENABLED, IS_DOCKER, DB_PATH
 from database.history import init_db
 from handlers import setup_handlers
 from utils import register_and_clean_bot_message
@@ -101,6 +102,50 @@ def _kill_existing_instance() -> None:
         logger.error(f"⚠️ Не удалось закрыть старый процесс PID {old_pid} (нет прав): {e} — PID-файл НЕ удалён")
     except Exception as e:
         logger.warning(f"⚠️ Не удалось остановить старый процесс: {e}")
+
+
+def _seed_db_if_missing() -> None:
+    """
+    Первый запуск на новом месте: базы ещё нет, но рядом лежит seed.db из
+    репозитория. Копируем её — и бот стартует сразу с характером: промпты,
+    настройки, права персонала, подписки на новости, карточки участников.
+
+    Личных переписок в seed.db нет — только настройки и справочные данные
+    (её собирает отдельный скрипт, а не бот).
+
+    ⚠️ Если база УЖЕ есть — не трогаем ничего. Накопленное на сервере важнее
+    заготовки из репозитория, и «обновить настройки из seed.db» здесь не
+    делается специально: это молча затирало бы правки, сделанные через
+    админ-панель.
+    """
+    if os.path.exists(DB_PATH):
+        return
+
+    seed = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seed.db")
+    if not os.path.exists(seed):
+        return
+
+    try:
+        # Сначала убеждаемся, что заготовка вообще похожа на базу: битый или
+        # обрезанный файл иначе доедет до init_db и уронит бота на старте
+        # сообщением про «malformed database» — на чужом сервере это больно.
+        import sqlite3
+        probe = sqlite3.connect("file:%s?mode=ro" % seed.replace("?", "%3f"), uri=True)
+        try:
+            probe.execute("SELECT COUNT(*) FROM settings").fetchone()
+        finally:
+            probe.close()
+    except Exception as e:
+        logger.warning("⚠️ Заготовка seed.db повреждена или это не база (%s) — "
+                       "стартую с пустой базой", e)
+        return
+
+    try:
+        shutil.copyfile(seed, DB_PATH)
+        logger.info("🚀 База не найдена — развёрнута заготовка из seed.db "
+                    "(промпты, настройки, персонал, подписки)")
+    except Exception as e:
+        logger.warning("⚠️ Не удалось развернуть seed.db: %s — стартую с пустой базой", e)
 
 
 def _restart_self() -> None:
@@ -393,6 +438,10 @@ def main():
     # Логи прошлых запусков → в общий архив logs/archive.log. ИМЕННО ЗДЕСЬ:
     # старая копия уже остановлена и свой файл дописала до конца.
     archive_old_logs()
+
+    # Новое место (свежий сервер) — развернуть заготовку базы из репозитория.
+    # ОБЯЗАТЕЛЬНО до init_db(): та создаёт пустую базу, и заготовка бы не пригодилась.
+    _seed_db_if_missing()
 
     init_db()
 

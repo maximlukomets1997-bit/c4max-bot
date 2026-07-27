@@ -504,8 +504,9 @@ def _build_balance_panel(flash: str = ""):
                   for m in _qwen_model_keys()]
     rows += [qw_buttons[i:i + 2] for i in range(0, len(qw_buttons), 2)]
     rows.append([InlineKeyboardButton("♻️ Обнулить «потрачено»", callback_data="bal:zero")])
-    rows.append([InlineKeyboardButton("⬅️ Настройки API", callback_data="adm_open_api")])
-    rows.append(_adm_back_row())
+    # Обе кнопки возврата — ОДНИМ рядом (решение Максима 2026-07-27).
+    rows.append([InlineKeyboardButton("⬅️ Настройки API", callback_data="adm_open_api")]
+                + _adm_back_row())
     return "".join(parts), InlineKeyboardMarkup(rows)
 
 
