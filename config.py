@@ -70,6 +70,22 @@ BOT_VERSION = _read_version()
 # ⚠️ Отправляя это в чат, не забудь parse_mode=HTML И отключение превью
 # (LinkPreviewOptions(is_disabled=True)) — иначе под сообщением развернётся
 # карточка GitHub.
+# ─────────────────────────────────────────────
+#  Самообновление (2026-07-27, решения Максима)
+# ─────────────────────────────────────────────
+# Бот сам заглядывает на GitHub и, если там новая версия, забирает её и
+# перезапускается. Живое значение тумблера — в settings `auto_update_enabled`.
+# ⚠️ Работает ТОЛЬКО на сервере: дома проверка services.deploy.can_update()
+# возвращает False, иначе скачивание дралось бы с ещё не отправленными
+# правками Максима.
+AUTO_UPDATE_ENABLED_DEFAULT = "1"
+AUTO_UPDATE_INTERVAL_SEC = 600      # как часто спрашивать GitHub (10 минут)
+# ⚠️ Перезапуск обрывает разговоры: тот, кто ждал ответа, его не получит.
+# Поэтому обновляемся только когда в чатах ТИХО столько секунд (решение
+# Максима: минута). Шумно — откладываем до следующего круга.
+AUTO_UPDATE_QUIET_SEC = 60
+AUTO_UPDATE_TICK_SEC = 30           # шаг цикла: с ним пауза ловится точнее
+
 GITHUB_REPO_URL = "https://github.com/maximlukomets1997-bit/c4max-bot"
 BOT_VERSION_URL = f"{GITHUB_REPO_URL}/tree/v{BOT_VERSION}"
 BOT_VERSION_HTML = f'<a href="{BOT_VERSION_URL}">v{BOT_VERSION}</a>'

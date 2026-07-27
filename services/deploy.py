@@ -15,8 +15,31 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 
 logger = logging.getLogger(__name__)
+
+# ── Когда в чатах последний раз кто-то писал ──────────────────────────────
+# Нужно самообновлению: перезапуск обрывает разговор, и тот, кто ждал ответа,
+# его не получит. Поэтому обновляемся только в тишине.
+# Метку ставит отдельный лёгкий обработчик (handlers/__init__.py, группа -2),
+# который видит ВСЕ входящие сообщения и больше ничего не делает.
+# В памяти, а не в базе: цена — одно присваивание на сообщение, а после
+# перезапуска «тишина» и так начинается заново.
+_last_activity = 0.0
+
+
+def note_activity() -> None:
+    """Запомнить, что в чатах только что кто-то написал."""
+    global _last_activity
+    _last_activity = time.monotonic()
+
+
+def quiet_for() -> float:
+    """Сколько секунд в чатах тихо. Сразу после запуска — очень много."""
+    if not _last_activity:
+        return float("inf")
+    return time.monotonic() - _last_activity
 
 # Папка проекта = на уровень выше этого файла.
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

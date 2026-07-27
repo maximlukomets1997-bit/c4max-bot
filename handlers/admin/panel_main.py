@@ -10,14 +10,14 @@ import logging_setup
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
-from config import AVAILABLE_MODELS, AVAILABLE_IMAGE_MODELS, ADMIN_IDS, GEMINI_MODEL, PROVIDER_ICONS, BOT_VERSION_HTML
+from config import AVAILABLE_MODELS, AVAILABLE_IMAGE_MODELS, ADMIN_IDS, GEMINI_MODEL, PROVIDER_ICONS, BOT_VERSION_HTML, AUTO_UPDATE_ENABLED_DEFAULT
 from database.history import set_setting, get_setting, delete_setting, append_prompt_addition, get_active_system_prompt, get_bot_stats, get_news_system_prompt, get_rag_instruction, get_qwen_tokens
 from utils import register_and_clean_bot_message, delete_user_message_safe
 from utils import mention, schedule_delete
 
 
 logger = logging.getLogger(__name__)
-from .common import (_adm_back_row, _audit, _filter_keyboard, _is_group_chat, _reject_non_admin,
+from .common import (_adm_back_row, _audit, _filter_keyboard, _is_group_chat, _onoff, _reject_non_admin,
                      _require, _send_panel_message)
 from .panel_rag import _end_kb_test
 
@@ -764,6 +764,13 @@ def _adm_rows():
             InlineKeyboardButton("🧹 Очистить РАЗГОВОРЫ", callback_data="adm:wipe"),
             InlineKeyboardButton("🗑 Очистить мой диалог", callback_data="clear_history_btn"),
         ],
+        # Самообновление (2026-07-27): бот сам раз в 10 минут смотрит, нет ли
+        # на GitHub новой версии, и забирает её в тишине. Тумблер нужен, чтобы
+        # можно было спокойно отправлять правки пачками, не выкатывая каждую.
+        # Надпись — только через _onoff (стандарт тумблеров, см. раздел 4 карты).
+        [InlineKeyboardButton(
+            f"⬇️ САМООБНОВЛЕНИЕ: {_onoff(get_setting('auto_update_enabled', AUTO_UPDATE_ENABLED_DEFAULT) == '1')}",
+            callback_data="adm_autoupdate")],
         [InlineKeyboardButton("🔄 ПЕРЕЗАПУСТИТЬ БОТА", callback_data="system_restart")],
     ]
 

@@ -17,7 +17,7 @@ from utils import mention, schedule_delete
 
 
 logger = logging.getLogger(__name__)
-from .common import _adm_back_row, _build_log_text, _read_current_log
+from .common import _adm_back_row, _audit, _build_log_text, _read_current_log
 from .panel_main import (_build_api_keyboard, _handle_balance_callback, build_adm_keyboard,
                          send_adm_panel, send_api_panel,
                          send_daily_report_panel, send_weekly_report_panel,
@@ -196,6 +196,29 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     # ── Панель базы знаний: карточка статьи и действия ──────────────────
     if data.startswith("kb_"):
         await _handle_kb_callback(query, context, data, chat_id, user_id)
+        return
+
+    # ── Тумблер самообновления ──────────────────────────────────────────
+    # Выключенный тумблер не мешает обновляться вручную (кнопка перезапуска
+    # и .bat) — он гасит только автоматический цикл.
+    if data == "adm_autoupdate":
+        from config import AUTO_UPDATE_ENABLED_DEFAULT
+        from handlers.admin.panel_main import build_adm_keyboard
+
+        now_on = get_setting("auto_update_enabled", AUTO_UPDATE_ENABLED_DEFAULT) == "1"
+        set_setting("auto_update_enabled", "0" if now_on else "1")
+        logger.info("🔧 Админ %s %s самообновление", user_id, "выключил" if now_on else "включил")
+        _audit(user_id, "autoupdate", None, "выключено" if now_on else "включено")
+        await query.answer(
+            "⬇️ Самообновление выключено — правки с GitHub бот сам забирать не будет."
+            if now_on else
+            "⬇️ Самообновление включено — раз в 10 минут бот проверяет GitHub.",
+            show_alert=True
+        )
+        try:
+            await query.edit_message_reply_markup(reply_markup=build_adm_keyboard(user_id))
+        except Exception as e:
+            logger.warning("⚠️ Не удалось перерисовать панель после тумблера самообновления: %s", e)
         return
 
     # ── Кнопка перезапуска бота ─────────────────────────────────────────

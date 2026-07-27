@@ -5,6 +5,23 @@ from .media import cmd_imagine
 from .messages import handle_message, handle_photo, handle_voice, handle_video, collect_group_message
 from .quiz import cmd_rank, handle_poll_answer
 
+
+async def _note_chat_activity(update, context):
+    """
+    Отмечает, что в чатах только что кто-то написал. Один из самых частых
+    обработчиков бота (срабатывает на КАЖДОЕ сообщение), поэтому внутри —
+    одно присваивание и ничего больше: ни базы, ни сети, ни логов.
+    Читает эту отметку самообновление (jobs.auto_update_loop), чтобы не
+    перезапускать бота посреди разговора.
+    Ошибки глушим: отметка активности не тот повод, чтобы ронять обработку.
+    """
+    try:
+        from services import deploy
+        deploy.note_activity()
+    except Exception:
+        pass
+
+
 def setup_handlers(application):
     application.add_handler(CommandHandler('start', cmd_start))
     application.add_handler(CommandHandler('help', cmd_help))
@@ -60,3 +77,12 @@ def setup_handlers(application):
     # обработчиков. Отдельная группа: на обработку команды в group=0 не влияет.
     # Выключить лог команд = закомментировать одну эту строку.
     application.add_handler(MessageHandler(filters.COMMAND, log_incoming_command), group=-1)
+
+    # Handler group=-2: отметка «в чатах кто-то пишет». Нужна САМООБНОВЛЕНИЮ
+    # (jobs.auto_update_loop): перезапуск обрывает разговор, поэтому бот
+    # обновляется только в тишину. Обработчик предельно дешёвый — одно
+    # присваивание, никаких походов в базу.
+    # ⚠️ ОТДЕЛЬНАЯ ГРУППА, а не -1: внутри одной группы срабатывает только
+    # ПЕРВЫЙ подходящий обработчик, и filters.ALL рядом с регистратором команд
+    # отобрал бы у него все команды — лог команд молча опустел бы.
+    application.add_handler(MessageHandler(filters.ALL, _note_chat_activity), group=-2)

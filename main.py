@@ -26,6 +26,7 @@ from jobs import cleanup_loop
 from jobs import rag_catchup_loop
 from jobs import daily_report_loop
 from jobs import watchdog_loop
+from jobs import auto_update_loop
 
 logger = logging.getLogger(__name__)
 
@@ -327,6 +328,10 @@ async def post_init(application):
         # владелец узнаёт о выключенном компьютере, пропавшем интернете или
         # умершем боте. WATCHDOG_URL не задан в .env — задача завершается сразу.
         asyncio.create_task(watchdog_loop(application)),
+        # Самообновление: раз в 10 минут смотрит, нет ли на GitHub новой
+        # версии, и забирает её в тишине (см. jobs.auto_update_loop).
+        # Дома завершается сразу — там код с GitHub не забирается.
+        asyncio.create_task(auto_update_loop(application)),
     ]
 
     # Сообщаем админам, что бот поднялся (после обычного старта И после перезапуска
