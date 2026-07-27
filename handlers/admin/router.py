@@ -17,8 +17,9 @@ from utils import mention, schedule_delete
 
 
 logger = logging.getLogger(__name__)
-from .common import (_adm_back_row, _audit, _build_log_text, _count_archive_sessions,
-                     _log_files_row, _read_archive_log, _read_current_log)
+from .common import (_LOG_FILE_TTL, _adm_back_row, _audit, _build_log_text,
+                     _count_archive_sessions, _log_files_row, _read_archive_log,
+                     _read_current_log)
 from .panel_main import (_build_api_keyboard, _handle_balance_callback, build_adm_keyboard,
                          send_adm_panel, send_api_panel,
                          send_daily_report_panel, send_weekly_report_panel,
@@ -186,16 +187,19 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         logger.info("🔧 Админ %s скачал файл лога текущей сессии", user_id)
         fname = os.path.basename(log_path)
         size_kb = max(1, round(len(raw) / 1024))
-        await context.bot.send_document(
+        sent_msg = await context.bot.send_document(
             chat_id=chat_id,
             document=raw,
             filename=fname,
             caption=(
                 f"📜 <b>Полный лог текущей сессии</b>\n"
-                f"<code>{html.escape(fname)}</code> · {size_kb} КБ"
+                f"<code>{html.escape(fname)}</code> · {size_kb} КБ\n"
+                f"<i>Сообщение исчезнет через минуту — успейте открыть или сохранить.</i>"
             ),
             parse_mode=ParseMode.HTML,
         )
+        if sent_msg:
+            schedule_delete(context.bot, chat_id, sent_msg.message_id, _LOG_FILE_TTL)
         return
 
     # ── Кнопка «🗄 Архив логов»: логи прошлых запусков документом ─────────
@@ -219,16 +223,19 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         # Число сессий считаем по заголовкам в самом файле, а не по потолку
         # ARCHIVE_SESSIONS_TO_KEEP: архив бывает и короче потолка.
         sessions_part = f" · сессий: {sessions}" if sessions else ""
-        await context.bot.send_document(
+        sent_msg = await context.bot.send_document(
             chat_id=chat_id,
             document=raw,
             filename=fname,
             caption=(
                 f"🗄 <b>Архив логов прошлых запусков</b>\n"
-                f"<code>{html.escape(fname)}</code> · {size_kb} КБ{sessions_part}"
+                f"<code>{html.escape(fname)}</code> · {size_kb} КБ{sessions_part}\n"
+                f"<i>Сообщение исчезнет через минуту — успейте открыть или сохранить.</i>"
             ),
             parse_mode=ParseMode.HTML,
         )
+        if sent_msg:
+            schedule_delete(context.bot, chat_id, sent_msg.message_id, _LOG_FILE_TTL)
         return
 
     # ── Панель базы знаний: карточка статьи и действия ──────────────────
