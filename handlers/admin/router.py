@@ -170,8 +170,13 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     # ── Кнопка «💾 Текущий лог»: полный файл лога документом ──────────────
-    # Ряд из двух кнопок повторяется и под присланным файлом — чтобы второй
-    # файл можно было забрать сразу, не открывая логи заново.
+    # ⚠️ ФАЙЛ ИДЁТ МИМО ГИГИЕНЫ ПАНЕЛЕЙ и БЕЗ клавиатуры (решение Максима
+    # 2026-07-28). Раньше он отправлялся как панель: затирал собой экран логов
+    # и приносил те же две кнопки — получался лишний переход и дубль кнопок.
+    # Теперь экран логов остаётся на месте со своими кнопками, а файл просто
+    # падает в чат следующим сообщением: нажал — скачал, второй файл берётся
+    # тем же экраном сверху. Не «чинить» возвратом register_and_clean_bot_message:
+    # он удалил бы экран, из которого нажали.
     if data == "adm_logs_file":
         log_path, raw = _read_current_log()
         if not raw:
@@ -181,7 +186,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         logger.info("🔧 Админ %s скачал файл лога текущей сессии", user_id)
         fname = os.path.basename(log_path)
         size_kb = max(1, round(len(raw) / 1024))
-        sent_msg = await context.bot.send_document(
+        await context.bot.send_document(
             chat_id=chat_id,
             document=raw,
             filename=fname,
@@ -190,15 +195,13 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 f"<code>{html.escape(fname)}</code> · {size_kb} КБ"
             ),
             parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([_log_files_row(), _adm_back_row()]),
         )
-        if sent_msg:
-            await register_and_clean_bot_message(context.bot, chat_id, sent_msg.message_id)
         return
 
     # ── Кнопка «🗄 Архив логов»: логи прошлых запусков документом ─────────
     # Архив (logs/archive.log) собирает logging_setup при каждом старте:
     # логи прошлых сессий склеиваются подряд, хранятся последние 7.
+    # Отправка — как у «Текущего лога»: мимо гигиены панелей и без кнопок.
     if data == "adm_logs_archive":
         log_path, raw = _read_archive_log()
         if not raw:
@@ -216,7 +219,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         # Число сессий считаем по заголовкам в самом файле, а не по потолку
         # ARCHIVE_SESSIONS_TO_KEEP: архив бывает и короче потолка.
         sessions_part = f" · сессий: {sessions}" if sessions else ""
-        sent_msg = await context.bot.send_document(
+        await context.bot.send_document(
             chat_id=chat_id,
             document=raw,
             filename=fname,
@@ -225,10 +228,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 f"<code>{html.escape(fname)}</code> · {size_kb} КБ{sessions_part}"
             ),
             parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([_log_files_row(), _adm_back_row()]),
         )
-        if sent_msg:
-            await register_and_clean_bot_message(context.bot, chat_id, sent_msg.message_id)
         return
 
     # ── Панель базы знаний: карточка статьи и действия ──────────────────
