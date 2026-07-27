@@ -775,7 +775,7 @@ def _adm_rows():
         # ряд пропадает целиком, заглушек в нём нет.
         [
             InlineKeyboardButton(
-                f"⬇️ САМООБНОВЛЕНИЕ: {_onoff(get_setting('auto_update_enabled', AUTO_UPDATE_ENABLED_DEFAULT) == '1')}",
+                f"⬇️ ОБНОВЛЕНИЕ: {_onoff(get_setting('auto_update_enabled', AUTO_UPDATE_ENABLED_DEFAULT) == '1')}",
                 callback_data="adm_autoupdate"),
             InlineKeyboardButton("🔄 ПЕРЕЗАПУСК", callback_data="system_restart"),
         ],
