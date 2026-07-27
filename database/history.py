@@ -852,6 +852,22 @@ def set_setting(key: str, value: str):
         conn.commit()
 
 
+def delete_setting(key: str) -> None:
+    """Удаляет настройку ЦЕЛИКОМ (строку из settings), а не обнуляет её.
+
+    Нужна там, где «значение не задано» и «значение равно нулю» — РАЗНЫЕ вещи:
+    остаток счёта и остаток квоты Qwen. Пока ключа нет, вычитающие UPDATE
+    в add_*_cost и spend_qwen_tokens молча не находят строку и ничего не портят;
+    если же вместо удаления записать пустоту или ноль, CAST('' AS REAL) даст 0
+    и остаток начнёт уходить в минус с первого же запроса.
+    Зовётся из кнопки «убрать значение» на экране «💰 Счета и квоты».
+    """
+    with _lock:
+        conn = _get_connection()
+        conn.execute("DELETE FROM settings WHERE key=?", (key,))
+        conn.commit()
+
+
 def add_deepseek_cost(delta_usd: float):
     """Прибавляет стоимость одного запроса DeepSeek (доллары) к накопительному
     счётчику в settings (ключ deepseek_cost_usd) и на ту же сумму уменьшает

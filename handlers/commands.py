@@ -214,6 +214,11 @@ async def log_incoming_command(update: Update, context: ContextTypes.DEFAULT_TYP
         else:
             where = "чат неизвестен"
         logger.info("⌨️ Команда: %s | от %s | %s", cmd_text, who, where)
+        # Заодно снимаем ожидание числа для экрана «💰 Счета и квоты»: человек
+        # набрал команду — значит, вводить остаток или квоту он передумал.
+        # Единственное место, где это ловится для ВСЕХ команд сразу (кнопки
+        # гасят ожидание в router.py). Ни на что больше не влияет.
+        context.user_data.pop("balance_edit", None)
     except Exception as e:
         logger.debug("⌨️ Не удалось записать команду в лог: %s", e)
 

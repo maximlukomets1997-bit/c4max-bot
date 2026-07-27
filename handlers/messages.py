@@ -305,6 +305,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_kb_test_query(update, context, user_text)
         return
 
+    # Экран «💰 Счета и квоты» (панель API) ждёт число — остаток на счету или
+    # квоту токенов. Сообщение уходит туда, а не в ИИ. Как и проверка поиска,
+    # это часть панели владельца, поэтому стоит до тумблера «ответы ИИ».
+    # Ожидание снимается кнопкой «Отмена», любой другой кнопкой (router.py)
+    # и любой командой (log_incoming_command).
+    if not is_group and is_owner(user.id) and context.user_data.get("balance_edit"):
+        from handlers.admin import handle_balance_input
+        if await handle_balance_input(update, context, user_text):
+            return
+
     # Игнор проверяем ПОСЛЕ режима «Проверить поиск» (он для админа и к ИИ
     # отношения не имеет) и до всего остального.
     if _ai_ignored(user.id):

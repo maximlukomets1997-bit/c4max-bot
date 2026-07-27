@@ -18,7 +18,8 @@ from utils import mention, schedule_delete
 
 logger = logging.getLogger(__name__)
 from .common import _adm_back_row, _build_log_text, _read_current_log
-from .panel_main import (_build_api_keyboard, build_adm_keyboard, send_adm_panel, send_api_panel,
+from .panel_main import (_build_api_keyboard, _handle_balance_callback, build_adm_keyboard,
+                         send_adm_panel, send_api_panel,
                          send_daily_report_panel, send_weekly_report_panel,
                          send_stats_panel)
 from .panel_mod import _handle_mod_callback, send_mod_panel
@@ -63,6 +64,14 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         else:
             await query.answer("Пошел нахуй❗️ Эта команда доступна только Администрации.", show_alert=True)
         return
+
+    # ── Ожидание числа для экрана «💰 Счета и квоты» ─────────────────────
+    # Пока владелец вводит остаток счёта или квоту, его следующее сообщение в
+    # личке перехватывается (handlers/messages.py). Ушёл с экрана любой другой
+    # кнопкой — ожидание гаснет ЗДЕСЬ, одной проверкой на все кнопки бота:
+    # иначе следующий вопрос боту был бы съеден как «не число».
+    if not data.startswith("bal:"):
+        context.user_data.pop("balance_edit", None)
 
     # ── Кнопка «⬅️ Назад к панели» (из служебных сообщений промптов) ─────
     # Удаляет текущее сообщение с кнопкой и заново открывает панель промптов
@@ -391,6 +400,13 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             await query.edit_message_reply_markup(reply_markup=_build_api_keyboard(user_id))
         except Exception as e:
             logger.warning("⚠️ Не удалось обновить клавиатуру выбора модели картинок: %s", e)
+        return
+
+    # ── Экран «💰 Счета и квоты» (остатки на счетах и квоты Qwen) ─────────
+    # Префикс bal:<действие> — обработчик в panel_main.py (экран живёт внутри
+    # панели «📡 Настройки API», рядом со счётчиками, которые он правит).
+    if data.startswith("bal:"):
+        await _handle_balance_callback(query, context, data, chat_id, user_id)
         return
 
     # ── Панель модерации (/mod) ─────────────────────────────────────────
