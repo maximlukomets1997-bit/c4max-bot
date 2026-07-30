@@ -266,6 +266,47 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             logger.warning("⚠️ Не удалось перерисовать панель после тумблера самообновления: %s", e)
         return
 
+    # ── Тумблер слежения за воздушной тревогой (2026-07-30) ─────────────
+    # Выключенный тумблер гасит опрос целиком (не тратим лимит запросов) и
+    # ЗАБЫВАЕТ состояние: следующее включение доложит обстановку заново —
+    # иначе тревога, объявленная при выключенном слежении, осталась бы
+    # незамеченной навсегда. Само забывание делает цикл в jobs.py.
+    if data == "adm_airalert":
+        from config import AIRALERT_ENABLED_DEFAULT
+        from handlers.admin.panel_main import build_adm_keyboard
+        from services import airalert
+
+        # Без ключа включать нечего: цикл в jobs.py в этом случае даже не
+        # стартовал. Честно говорим об этом вместо тумблера, который горит
+        # зелёным и ничего не делает.
+        if not airalert.can_watch():
+            await query.answer(
+                "🚨 Не задан ключ alerts.in.ua.\n\n"
+                "Получи бесплатный токен на devs.alerts.in.ua и впиши его "
+                "в .env на сервере строкой ALERTS_TOKEN=..., затем перезапусти бота.",
+                show_alert=True
+            )
+            return
+
+        now_on = get_setting("airalert_enabled", AIRALERT_ENABLED_DEFAULT) == "1"
+        set_setting("airalert_enabled", "0" if now_on else "1")
+        logger.info("🔧 Админ %s %s слежение за воздушной тревогой", user_id,
+                    "выключил" if now_on else "включил")
+        _audit(user_id, "airalert", None, "выключено" if now_on else "включено")
+        await query.answer(
+            "🚨 Слежение за тревогой выключено — сообщений больше не будет."
+            if now_on else
+            "🚨 Слежение за тревогой включено. Слежу за Днепром и областью, "
+            "сообщения приходят только тебе в личку. Если тревога идёт прямо "
+            "сейчас — скажу об этом в течение минуты.",
+            show_alert=True
+        )
+        try:
+            await query.edit_message_reply_markup(reply_markup=build_adm_keyboard(user_id))
+        except Exception as e:
+            logger.warning("⚠️ Не удалось перерисовать панель после тумблера тревоги: %s", e)
+        return
+
     # ── Кнопка перезапуска бота ─────────────────────────────────────────
     if data == "system_restart":
         logger.info("🔧 Админ %s запросил перезапуск бота", user_id)

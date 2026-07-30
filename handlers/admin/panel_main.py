@@ -10,7 +10,7 @@ import logging_setup
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
-from config import AVAILABLE_MODELS, AVAILABLE_IMAGE_MODELS, ADMIN_IDS, GEMINI_MODEL, PROVIDER_ICONS, BOT_VERSION_HTML, AUTO_UPDATE_ENABLED_DEFAULT
+from config import AVAILABLE_MODELS, AVAILABLE_IMAGE_MODELS, ADMIN_IDS, GEMINI_MODEL, PROVIDER_ICONS, BOT_VERSION_HTML, AUTO_UPDATE_ENABLED_DEFAULT, AIRALERT_ENABLED_DEFAULT
 from database.history import set_setting, get_setting, delete_setting, append_prompt_addition, get_active_system_prompt, get_bot_stats, get_news_system_prompt, get_rag_instruction, get_qwen_tokens
 from utils import register_and_clean_bot_message, delete_user_message_safe
 from utils import mention, schedule_delete
@@ -763,6 +763,17 @@ def _adm_rows():
         [
             InlineKeyboardButton("🧹 Очистить РАЗГОВОРЫ", callback_data="adm:wipe"),
             InlineKeyboardButton("🗑 Очистить мой диалог", callback_data="clear_history_btn"),
+        ],
+        # Воздушная тревога (2026-07-30, просьба Максима): слежение за
+        # обстановкой в Днепре и области, сообщения ТОЛЬКО владельцу в личку.
+        # Стоит отдельным рядом: это не управление ботом, а личное уведомление.
+        # Кнопка владельческая (в _CALLBACK_RULES её нет) — у модератора ряда
+        # не будет. Ключа в .env нет — кнопка честно говорит об этом при
+        # нажатии (ветка adm_airalert в router.py), а не включается впустую.
+        [
+            InlineKeyboardButton(
+                f"🚨 ТРЕВОГА (Днепр): {_onoff(get_setting('airalert_enabled', AIRALERT_ENABLED_DEFAULT) == '1')}",
+                callback_data="adm_airalert"),
         ],
         # Самообновление (2026-07-27): бот сам раз в 10 минут смотрит, нет ли
         # на GitHub новой версии, и забирает её в тишине. Тумблер нужен, чтобы
