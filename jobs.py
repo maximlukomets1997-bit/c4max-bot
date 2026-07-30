@@ -741,7 +741,7 @@ def _airalert_now_kyiv() -> str:
 
 async def air_alert_loop(application):
     """
-    Раз в AIRALERT_POLL_SEC спрашивает у alerts.in.ua, объявлена ли воздушная
+    Раз в `airalert.poll_interval()` спрашивает у сервиса тревог, объявлена ли
     тревога в Днепре или по Днепропетровской области, и на КАЖДОМ ПЕРЕЛОМЕ
     пишет ВЛАДЕЛЬЦУ в личку: «🚨 тревога» и «✅ отбой» с длительностью.
     Рассылка только в ADMIN_IDS — это личное уведомление, подписки нет
@@ -770,17 +770,21 @@ async def air_alert_loop(application):
     """
     import time as _time
     from telegram.constants import ParseMode
-    from config import ADMIN_IDS, AIRALERT_ENABLED_DEFAULT, AIRALERT_POLL_SEC, AIRALERT_SILENCE_SEC
+    from config import ADMIN_IDS, AIRALERT_ENABLED_DEFAULT, AIRALERT_SILENCE_SEC
     from database.history import delete_setting, get_setting, set_setting
     from services import airalert
 
-    if not airalert.can_watch():
-        logger.info("🚨 Тревога Днепра: ключ alerts.in.ua не задан (ALERTS_TOKEN в .env) — слежение не запускается")
-        return
-
     await asyncio.sleep(15)  # даём боту подняться (как у остальных циклов)
-    logger.info("🚨 Запущено слежение за воздушной тревогой (Днепр + область, опрос раз в %d сек)",
-                AIRALERT_POLL_SEC)
+
+    poll_sec = airalert.poll_interval()
+    logger.info("🚨 Запущено слежение за воздушной тревогой · источник: %s · опрос раз в %d сек",
+                airalert.source_name(), poll_sec)
+    if not airalert.precise():
+        # Это должно быть видно в логе с первой строки: на запасном источнике
+        # тревога по одной громаде до владельца не дойдёт, и «бот молчал»
+        # объясняется именно этим, а не поломкой.
+        logger.warning("🚨 Работаем на ЗАПАСНОМ источнике без ключа: видны только тревоги "
+                       "по области целиком. Появится ALERTS_TOKEN в .env — переключимся сами")
 
     async def _tell_owner(text: str) -> None:
         # Сообщение НЕ регистрируется в гигиене панелей — тревоги должны
@@ -808,7 +812,7 @@ async def air_alert_loop(application):
                     delete_setting("airalert_active")
                     delete_setting("airalert_since")
                 blind_since, blind_told = 0.0, False
-                await asyncio.sleep(AIRALERT_POLL_SEC)
+                await asyncio.sleep(poll_sec)
                 continue
 
             try:
@@ -839,7 +843,7 @@ async def air_alert_loop(application):
                     blind_told = True
                     logger.error("🚨 Сервис тревог молчит дольше %d сек — владелец предупреждён",
                                  AIRALERT_SILENCE_SEC)
-                await asyncio.sleep(AIRALERT_POLL_SEC)
+                await asyncio.sleep(poll_sec)
                 continue
 
             if blind_since:
@@ -899,4 +903,4 @@ async def air_alert_loop(application):
         except Exception as e:
             logger.error("🚨 Сбой в слежении за тревогой: %s", e)
 
-        await asyncio.sleep(AIRALERT_POLL_SEC)
+        await asyncio.sleep(poll_sec)

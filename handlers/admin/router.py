@@ -276,31 +276,29 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         from handlers.admin.panel_main import build_adm_keyboard
         from services import airalert
 
-        # Без ключа включать нечего: цикл в jobs.py в этом случае даже не
-        # стартовал. Честно говорим об этом вместо тумблера, который горит
-        # зелёным и ничего не делает.
-        if not airalert.can_watch():
-            await query.answer(
-                "🚨 Не задан ключ alerts.in.ua.\n\n"
-                "Получи бесплатный токен на devs.alerts.in.ua и впиши его "
-                "в .env на сервере строкой ALERTS_TOKEN=..., затем перезапусти бота.",
-                show_alert=True
-            )
-            return
-
         now_on = get_setting("airalert_enabled", AIRALERT_ENABLED_DEFAULT) == "1"
         set_setting("airalert_enabled", "0" if now_on else "1")
-        logger.info("🔧 Админ %s %s слежение за воздушной тревогой", user_id,
-                    "выключил" if now_on else "включил")
+        logger.info("🔧 Админ %s %s слежение за воздушной тревогой (источник: %s)", user_id,
+                    "выключил" if now_on else "включил", airalert.source_name())
         _audit(user_id, "airalert", None, "выключено" if now_on else "включено")
-        await query.answer(
-            "🚨 Слежение за тревогой выключено — сообщений больше не будет."
-            if now_on else
-            "🚨 Слежение за тревогой включено. Слежу за Днепром и областью, "
-            "сообщения приходят только тебе в личку. Если тревога идёт прямо "
-            "сейчас — скажу об этом в течение минуты.",
-            show_alert=True
-        )
+
+        # ⚠️ ВСПЛЫВАЮЩЕЕ ОКНО — МАКСИМУМ 200 СИМВОЛОВ (раздел 4 карты): длиннее
+        # Telegram не покажет ВООБЩЕ, и кнопка будет выглядеть мёртвой. Тексты
+        # ниже отмерены под этот потолок — дописывать в них нельзя, только
+        # переписывать целиком, проверяя длину.
+        if now_on:
+            popup = "🚨 Слежение за тревогой выключено — сообщений больше не будет."
+        elif airalert.precise():
+            popup = ("🚨 Слежение включено: Днепр и область, сообщения только тебе в личку. "
+                     "Если тревога идёт сейчас — скажу в течение минуты.")
+        else:
+            # На запасном источнике честно предупреждаем, ЧЕГО бот не увидит:
+            # иначе молчание на тревоге по одной громаде выглядит поломкой,
+            # а не заранее известным ограничением.
+            popup = ("🚨 Слежение включено, сообщения только тебе в личку.\n\n"
+                     "⚠️ Ключа пока нет — работаю на запасном источнике: видны только "
+                     "тревоги по ОБЛАСТИ целиком.")
+        await query.answer(popup, show_alert=True)
         try:
             await query.edit_message_reply_markup(reply_markup=build_adm_keyboard(user_id))
         except Exception as e:
