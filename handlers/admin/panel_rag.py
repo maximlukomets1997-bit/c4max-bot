@@ -32,10 +32,22 @@ from .common import _adm_back_row, _fmt_mod_time, _is_group_chat, _onoff, _rejec
 #  файл) живёт в bot_data["kb_file_map"] и пересобирается при каждом
 #  открытии панели. После перезапуска бота токены из старых сообщений
 #  протухают — обработчик тогда просто заново открывает панель.
+#
+#  Статей больше, чем влезает кнопок в одно сообщение, поэтому список
+#  ЛИСТАЕТСЯ страницами по _KB_PAGE_SIZE (2026-07-31). Карта токенов при этом
+#  собирается по ВСЕМУ списку, а не по видимой странице: иначе кнопка из
+#  предыдущего, ещё не затёртого сообщения показала бы чужую статью или
+#  сказала бы «список устарел». Номер текущей страницы живёт в
+#  user_data["kb_page"] — у каждого владельца свой.
 # ─────────────────────────────────────────────
 
-_KB_LIST_LIMIT = 81  # максимум статей-кнопок: потолок Telegram ~100 кнопок на сообщение, 15 из них — служебные
-#                      (было 84 при 12 служебных; регулятор «Запас над фоном» 2026-07-19 добавил ряд из трёх)
+_KB_PAGE_SIZE = 80  # статей-кнопок НА ОДНОЙ СТРАНИЦЕ (2026-07-31: список стал листаться)
+#   Арифметика потолка Telegram (~100 кнопок на сообщение): 80 статей
+#   + 15 служебных + 3 кнопки листания = 98. Добавляешь новый ряд кнопок в
+#   панель — уменьшай размер страницы на столько же, иначе панель с полной
+#   страницей просто не отправится.
+#   (Раньше был жёсткий потолок _KB_LIST_LIMIT = 81 и статьи сверх него
+#   не показывались вовсе — только надписью «скрыто ещё N».)
 
 
 _KB_ACTION_ICONS = (
@@ -100,11 +112,25 @@ def _build_rag_panel(context, admin_id: int):
     pending_count = sum(1 for a in articles if a["folder"] == "pending")
     approved_count = len(articles) - pending_count
 
-    file_map = {}
+    # Карта токенов — по ВСЕМУ списку статей, а не по видимой странице:
+    # кнопка из старого сообщения обязана вести к своей статье, а не к соседке.
+    file_map = {str(i): (art["folder"], art["fname"]) for i, art in enumerate(articles)}
+
+    # Страница списка. Номер живёт в user_data, но проверяется здесь: статьи
+    # могли удалить, и запомненная третья страница стала бы пустым экраном.
+    total_pages = max(1, (len(articles) + _KB_PAGE_SIZE - 1) // _KB_PAGE_SIZE)
+    try:
+        page = int(context.user_data.get("kb_page", 0))
+    except (TypeError, ValueError):
+        page = 0
+    page = max(0, min(total_pages - 1, page))
+    context.user_data["kb_page"] = page
+    first = page * _KB_PAGE_SIZE
+    page_articles = articles[first:first + _KB_PAGE_SIZE]
+
     article_buttons = []
-    for i, art in enumerate(articles[:_KB_LIST_LIMIT]):
+    for i, art in enumerate(page_articles, start=first):
         token = str(i)
-        file_map[token] = (art["folder"], art["fname"])
         # Ожидающие одобрения — часики (тип у сырых новостей не определить).
         # Одобренные — галочка + смысловой значок типа техники (🚜 наземная,
         # ✈️ авиация, 🛥️ корабли, ⚓ подлодки, 📘 механики, 📄 тип не опознан);
@@ -126,6 +152,18 @@ def _build_rag_panel(context, admin_id: int):
         article_buttons.append(InlineKeyboardButton(f"{icon} {title}", callback_data=f"kb_view:{token}"))
     # Статьи — в три столбца (решение владельца 2026-07-18: главное — вместить все)
     rows = [article_buttons[i:i + 3] for i in range(0, len(article_buttons), 3)]
+    # Листание. Ряд появляется только когда страниц больше одной — иначе
+    # он был бы полосой с надписью «1 / 1», которая никуда не ведёт.
+    # Крайние кнопки на границах списка становятся «пустышками» (kb_noop):
+    # так ряд не «прыгает» по ширине при переходе со страницы на страницу.
+    if total_pages > 1:
+        prev_data = f"kb_page:{page - 1}" if page > 0 else "kb_noop"
+        next_data = f"kb_page:{page + 1}" if page < total_pages - 1 else "kb_noop"
+        rows.append([
+            InlineKeyboardButton("⬅️" if page > 0 else "▫️", callback_data=prev_data),
+            InlineKeyboardButton(f"📄 Страница {page + 1} из {total_pages}", callback_data="kb_noop"),
+            InlineKeyboardButton("➡️" if page < total_pages - 1 else "▫️", callback_data=next_data),
+        ])
     # Кнопка-переключатель: пока проверка идёт, показывает «Завершить» —
     # чтобы админ всегда видел, что находится в режиме теста, и как выйти.
     test_on = bool(context.user_data.get("kb_test_mode"))
@@ -170,7 +208,13 @@ def _build_rag_panel(context, admin_id: int):
 
     rag_status = "🟢 включён" if RAG_ENABLED else "🔴 выключен (RAG_ENABLED в .env)"
     kb_status = "🟢 ВКЛЮЧЕНА" if kb_on else "🔴 ВЫКЛЮЧЕНА (тумблер ниже)"
-    hidden = len(articles) - _KB_LIST_LIMIT
+    # Подпись страницы показывается только при листании — при одной странице
+    # она была бы шумом («статьи 1–80 из 80»).
+    page_note = ""
+    if total_pages > 1:
+        page_note = (f"\n\n<i>Страница {page + 1} из {total_pages}: "
+                     f"статьи {first + 1}–{first + len(page_articles)} из {len(articles)}. "
+                     f"Остальные — кнопками ⬅️ ➡️.</i>")
     text = (
         "📚 <b>База знаний (RAG)</b>\n"
         "───────────────────────────\n"
@@ -180,7 +224,7 @@ def _build_rag_panel(context, admin_id: int):
         f"✅ В базе знаний: <b>{approved_count}</b>"
         + _kb_recent_actions_block()
         + "\n\nНажми на статью, чтобы открыть её карточку."
-        + (f"\n\n<i>Показаны первые {_KB_LIST_LIMIT}, скрыто ещё {hidden}.</i>" if hidden > 0 else "")
+        + page_note
     )
     return text, InlineKeyboardMarkup(rows)
 
@@ -269,15 +313,34 @@ async def _handle_kb_callback(query, context, data: str, chat_id: int, user_id: 
     # персональный тумблер (удобно крутить настройки между тестовыми
     # вопросами), остальные действия панели его выключают — с уборкой
     # накопленных тестовых сообщений.
+    # Листание списка (kb_page) режим теста тоже переживает: со страницы на
+    # страницу — то же «смотрю панель», а не выход из неё; удалять на этом
+    # накопленные тестовые сообщения было бы неожиданно.
     if action not in ("kb_test", "kb_noop", "kb_thr_dec", "kb_thr_inc",
                       "kb_topk_dec", "kb_topk_inc", "kb_myrag",
-                      "kb_margin_dec", "kb_margin_inc"):
+                      "kb_margin_dec", "kb_margin_inc", "kb_page"):
         await _end_kb_test(context.bot, chat_id, context)
 
     # ── Кнопки без токена (не привязаны к конкретному файлу) ────────────
     if action == "kb_noop":
         # «Пустышка» — кнопка-значение между ➖ и ➕
         await query.answer()
+        return
+
+    if action == "kb_page":
+        # Листание списка статей. Номер страницы проверяет и подрезает сам
+        # сборщик панели (_build_rag_panel) — статьи могли удалить, пока
+        # сообщение висело в чате, и запрошенной страницы уже нет.
+        try:
+            context.user_data["kb_page"] = max(0, int(token))
+        except (TypeError, ValueError):
+            context.user_data["kb_page"] = 0
+        await query.answer()
+        text, markup = _build_rag_panel(context, user_id)
+        try:
+            await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+        except Exception as e:
+            logger.debug("📚 Не удалось перелистнуть список статей: %s", e)
         return
 
     if action == "kb_test":
@@ -574,6 +637,10 @@ async def cmd_rag(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await _end_kb_test(context.bot, update.effective_chat.id, context)  # выход из проверки поиска — с уборкой
+    # Команда — осознанное открытие раздела заново, поэтому список начинается
+    # с первой страницы. Возврат из карточки статьи («⬅️ К списку») и
+    # перерисовка после одобрения/удаления страницу, наоборот, сохраняют.
+    context.user_data["kb_page"] = 0
     await send_rag_panel(context.bot, update.effective_chat.id, context)
 
 
