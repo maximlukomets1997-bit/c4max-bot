@@ -2,6 +2,7 @@
 #  handlers/admin/router.py — handle_callback_query — ЕДИНСТВЕННЫЙ роутер ВСЕХ callback-кнопок бота.
 #  Выделен из монолитного admin.py 2026-07-13 разрезом БЕЗ изменения логики.
 # ───────────────────────────────────────────────
+import asyncio
 import html
 import logging
 import os
@@ -236,6 +237,49 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         )
         if sent_msg:
             schedule_delete(context.bot, chat_id, sent_msg.message_id, _LOG_FILE_TTL)
+        return
+
+    # ── Кнопка «💾 Копия базы»: снять копию прямо сейчас ─────────────────
+    # Та же копия, что уходит владельцу каждую ночь (jobs.nightly_backup),
+    # только по требованию: перед правкой настроек, перед выкаткой, «просто
+    # чтобы была свежая». Ночной метки НЕ трогает — ручная копия не отменяет
+    # ночную и не приближает её.
+    # ⚠️ Файл идёт МИМО гигиены панелей и БЕЗ таймера самоудаления, в отличие
+    # от логов: это последняя копия базы, она обязана остаться в переписке.
+    if data == "adm_backup":
+        # Отвечаем ДО работы: у Telegram ~15 секунд на ответ callback, а тут
+        # диск — снимок базы и сжатие.
+        await query.answer("⏳ Делаю копию базы…")
+        from services import backup
+        loop = asyncio.get_running_loop()
+        try:
+            path, size = await loop.run_in_executor(None, backup.make_backup)
+        except Exception as e:
+            logger.error("⚠️ Копия базы по кнопке не сделана: %s", e)
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"⚠️ Не удалось сделать копию базы: <code>{html.escape(str(e))}</code>",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        logger.info("🔧 Админ %s сделал копию базы вручную", user_id)
+        with open(path, "rb") as f:
+            blob = f.read()
+        fname = os.path.basename(path)
+        kept = len(backup.list_backups())
+        await context.bot.send_document(
+            chat_id=chat_id,
+            document=blob,
+            filename=fname,
+            caption=(
+                f"💾 <b>Копия базы бота</b>\n"
+                f"<code>{html.escape(fname)}</code> · {backup.human_size(size)}\n"
+                f"<i>Сохрани у себя: промпты, настройки, счета и квоты, личные "
+                f"дела, звания и журналы — этого нет на GitHub. "
+                f"На сервере хранится копий: {kept}.</i>"
+            ),
+            parse_mode=ParseMode.HTML,
+        )
         return
 
     # ── Панель базы знаний: карточка статьи и действия ──────────────────
