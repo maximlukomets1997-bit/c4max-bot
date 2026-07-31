@@ -27,7 +27,6 @@ from jobs import rag_catchup_loop
 from jobs import daily_report_loop
 from jobs import watchdog_loop
 from jobs import auto_update_loop
-from jobs import air_alert_loop
 
 logger = logging.getLogger(__name__)
 
@@ -333,10 +332,6 @@ async def post_init(application):
         # версии, и забирает её в тишине (см. jobs.auto_update_loop).
         # Дома завершается сразу — там код с GitHub не забирается.
         asyncio.create_task(auto_update_loop(application)),
-        # Воздушная тревога в Днепре: опрос alerts.in.ua, сообщения ВЛАДЕЛЬЦУ
-        # в личку на каждом переломе. ALERTS_TOKEN не задан в .env — задача
-        # завершается сразу (как watchdog_loop без адреса сторожа).
-        asyncio.create_task(air_alert_loop(application)),
     ]
 
     # Сообщаем админам, что бот поднялся (после обычного старта И после перезапуска

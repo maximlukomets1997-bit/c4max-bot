@@ -310,44 +310,6 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             logger.warning("⚠️ Не удалось перерисовать панель после тумблера самообновления: %s", e)
         return
 
-    # ── Тумблер слежения за воздушной тревогой (2026-07-30) ─────────────
-    # Выключенный тумблер гасит опрос целиком (не тратим лимит запросов) и
-    # ЗАБЫВАЕТ состояние: следующее включение доложит обстановку заново —
-    # иначе тревога, объявленная при выключенном слежении, осталась бы
-    # незамеченной навсегда. Само забывание делает цикл в jobs.py.
-    if data == "adm_airalert":
-        from config import AIRALERT_ENABLED_DEFAULT
-        from handlers.admin.panel_main import build_adm_keyboard
-        from services import airalert
-
-        now_on = get_setting("airalert_enabled", AIRALERT_ENABLED_DEFAULT) == "1"
-        set_setting("airalert_enabled", "0" if now_on else "1")
-        logger.info("🔧 Админ %s %s слежение за воздушной тревогой (источник: %s)", user_id,
-                    "выключил" if now_on else "включил", airalert.source_name())
-        _audit(user_id, "airalert", None, "выключено" if now_on else "включено")
-
-        # ⚠️ ВСПЛЫВАЮЩЕЕ ОКНО — МАКСИМУМ 200 СИМВОЛОВ (раздел 4 карты): длиннее
-        # Telegram не покажет ВООБЩЕ, и кнопка будет выглядеть мёртвой. Тексты
-        # ниже отмерены под этот потолок — дописывать в них нельзя, только
-        # переписывать целиком, проверяя длину.
-        if now_on:
-            popup = "🚨 Слежение за тревогой выключено — сообщений больше не будет."
-        elif airalert.precise():
-            popup = ("🚨 Слежение включено: Днепр и область, сообщения только тебе в личку. "
-                     "Если тревога идёт сейчас — скажу в течение минуты.")
-        else:
-            # На запасном источнике честно предупреждаем, ЧЕГО бот не увидит:
-            # иначе молчание на тревоге по одной громаде выглядит поломкой,
-            # а не заранее известным ограничением.
-            popup = ("🚨 Слежение включено, сообщения только тебе в личку.\n\n"
-                     "⚠️ Ключа пока нет — работаю на запасном источнике: видны только "
-                     "тревоги по ОБЛАСТИ целиком.")
-        await query.answer(popup, show_alert=True)
-        try:
-            await query.edit_message_reply_markup(reply_markup=build_adm_keyboard(user_id))
-        except Exception as e:
-            logger.warning("⚠️ Не удалось перерисовать панель после тумблера тревоги: %s", e)
-        return
 
     # ── Кнопка перезапуска бота ─────────────────────────────────────────
     if data == "system_restart":
