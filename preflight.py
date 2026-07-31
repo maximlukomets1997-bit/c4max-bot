@@ -393,7 +393,8 @@ def check_panels():
                                            _build_model_panel_text_and_keyboard,
                                            _build_zero_panel, build_adm_keyboard)
     from handlers.admin.panel_mod import _build_mod_panel_text_and_keyboard
-    from handlers.admin.panel_prompts import _build_prompt_panel_text_and_keyboard
+    from handlers.admin.panel_prompts import (_build_proactive_stats_panel,
+                                              _build_prompt_panel_text_and_keyboard)
     from handlers.admin.panel_rag import _build_rag_panel
     from handlers.admin.panel_users import _build_staff_log_panel, _build_users_panel
     import config
@@ -413,6 +414,7 @@ def check_panels():
         "счета и квоты": _build_balance_panel,
         "обнуление счётчиков": _build_zero_panel,
         "промпты": lambda: _build_prompt_panel_text_and_keyboard(owner, "c4max_bot"),
+        "итоги участия": _build_proactive_stats_panel,
         "модерация": lambda: _build_mod_panel_text_and_keyboard(owner),
         "список пользователей": lambda: _build_users_panel(owner, 999),
         "журнал персонала": _build_staff_log_panel,

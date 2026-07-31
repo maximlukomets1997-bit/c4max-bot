@@ -290,6 +290,27 @@ def init_db():
                 called_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
 
+            -- Журнал проактивных проверок (2026-07-31): по строке на КАЖДЫЙ
+            -- запрос к модели в режиме «Сам в разговор» — вступил бот или
+            -- промолчал. Нужен, чтобы порог настраивался по цифрам, а не по
+            -- ощущению «тараторит / молчит»: одно число «сколько раз написал»
+            -- не отличает «проверок мало» от «модель не умеет молчать»,
+            -- а лечатся эти две беды противоположно (порогом и промптом).
+            -- ⚠️ Пишутся ТОЛЬКО дошедшие до модели проверки — их единицы
+            -- в минуту. Отсев дешёвыми фильтрами живёт в памяти
+            -- (services/proactive.py): он идёт на КАЖДОЕ сообщение группы,
+            -- и поход в базу на этом пути недопустим.
+            CREATE TABLE IF NOT EXISTS proactive_log (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts           TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                chat_id      INTEGER,
+                outcome      TEXT,      -- reply | reply_mute | silent | empty | error
+                model        TEXT,      -- активная модель на момент проверки
+                seconds      REAL,      -- сколько модель думала
+                reply_len    INTEGER,   -- длина видимой реплики (0 у молчания)
+                trigger_kind TEXT       -- text | photo | voice | video
+            );
+
             CREATE TABLE IF NOT EXISTS group_messages (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
                 chat_id    INTEGER NOT NULL,
@@ -438,6 +459,7 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_evidence_log ON mute_evidence(log_id);
             CREATE INDEX IF NOT EXISTS idx_kblog_ts ON knowledge_log(ts);
             CREATE INDEX IF NOT EXISTS idx_stafflog_ts ON staff_log(ts);
+            CREATE INDEX IF NOT EXISTS idx_proactive_log_ts ON proactive_log(ts);
             -- Индекс стенограммы чата для проактивного участия в разговоре
             -- (get_recent_group_messages — выборка последних сообщений чата)
             CREATE INDEX IF NOT EXISTS idx_group_messages_chat ON group_messages(chat_id, id);
@@ -2066,6 +2088,129 @@ def delete_old_moderation_log(days: int = 7) -> int:
     deleted = len(old_ids)
     if deleted:
         logger.info("🛡 Очистка журнала модерации: удалено %d записей старше %d дней", deleted, days)
+    return deleted
+
+
+# ───────────────────────────────────────────────
+#  Журнал проактивных проверок (2026-07-31)
+# ─────────────────────────────────────────────
+
+def log_proactive_check(chat_id: int, outcome: str, model: str = "",
+                        seconds: float = 0.0, reply_len: int = 0,
+                        trigger_kind: str = "text") -> None:
+    """
+    Записывает ОДНУ проактивную проверку — то есть один запрос к модели
+    в режиме «Сам в разговор» и его исход.
+
+    Исходы (`outcome`), их ровно пять и они соответствуют веткам
+    services/proactive.py::_run_proactive — новый исход добавлять И ТАМ, И
+    в подписи `_OUTCOME_TITLES` панели, иначе он покажется голым кодом:
+      reply      — бот вступил в разговор;
+      reply_mute — вступил и заодно сам выдал мут («руки»);
+      silent     — модель решила промолчать (вернула «ПРОПУСК»);
+      empty      — ответ состоял из одной пометки мута, говорить было нечего;
+      error      — запрос сорвался (сеть, отказ всех моделей цепочки).
+
+    ⚠️ Зовётся ТОЛЬКО из фоновой задачи проверки — не с горячего пути
+    архиватора групп: там на каждое сообщение и походов в базу быть не должно.
+    """
+    with _lock:
+        conn = _get_connection()
+        conn.execute(
+            "INSERT INTO proactive_log (chat_id, outcome, model, seconds, reply_len, trigger_kind) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (chat_id, outcome, model, round(float(seconds), 2), int(reply_len), trigger_kind),
+        )
+        conn.commit()
+
+
+def proactive_stats(start_utc: str, end_utc: str | None = None) -> dict:
+    """
+    Итоги проактивных проверок за промежуток. Границы — строки UTC
+    «ГГГГ-ММ-ДД ЧЧ:ММ:СС», как у остальных счётчиков по времени; правая
+    граница строго меньше (как в суточном отчёте), пустая — «по сейчас».
+
+    Возвращает словарь: сколько проверок всего, сколько каких исходов,
+    среднее время ответа модели и разбивку по виду триггера.
+    """
+    where = "ts >= ?"
+    params = [start_utc]
+    if end_utc:
+        where += " AND ts < ?"
+        params.append(end_utc)
+
+    with _lock:
+        conn = _get_connection()
+        rows = conn.execute(
+            f"SELECT outcome, COUNT(*) AS n, AVG(seconds) AS avg_sec "
+            f"FROM proactive_log WHERE {where} GROUP BY outcome", params,
+        ).fetchall()
+        kinds = conn.execute(
+            f"SELECT trigger_kind, COUNT(*) AS n FROM proactive_log "
+            f"WHERE {where} GROUP BY trigger_kind", params,
+        ).fetchall()
+
+    out = {"checks": 0, "reply": 0, "reply_mute": 0, "silent": 0, "empty": 0,
+           "error": 0, "avg_sec": 0.0, "by_trigger": {}}
+    total_sec = 0.0
+    for r in rows:
+        n = r["n"] or 0
+        out["checks"] += n
+        out[r["outcome"]] = out.get(r["outcome"], 0) + n
+        total_sec += (r["avg_sec"] or 0.0) * n
+    if out["checks"]:
+        out["avg_sec"] = total_sec / out["checks"]
+    out["by_trigger"] = {r["trigger_kind"] or "text": r["n"] for r in kinds}
+    return out
+
+
+def proactive_by_chat(start_utc: str, limit: int = 10) -> list:
+    """Проверки и вступления по чатам за промежуток, самые бойкие сверху."""
+    with _lock:
+        conn = _get_connection()
+        rows = conn.execute(
+            "SELECT chat_id, COUNT(*) AS checks, "
+            "       SUM(CASE WHEN outcome IN ('reply', 'reply_mute') THEN 1 ELSE 0 END) AS replies "
+            "FROM proactive_log WHERE ts >= ? "
+            "GROUP BY chat_id ORDER BY checks DESC LIMIT ?",
+            (start_utc, limit),
+        ).fetchall()
+    return [(r["chat_id"], r["checks"] or 0, r["replies"] or 0) for r in rows]
+
+
+def proactive_by_day(days: int = 7) -> list:
+    """
+    Проверки и вступления по дням — чтобы видеть, что изменилось после правки
+    порога или промпта. Дни считаются ПО МЕСТНОМУ времени сервера (`localtime`),
+    а он живёт в Europe/Kyiv — то есть по тем же суткам, что и отчёты.
+    ⚠️ На машине с другим часовым поясом границы дней уедут; для показа это
+    терпимо, но считать по ним деньги нельзя.
+    """
+    with _lock:
+        conn = _get_connection()
+        rows = conn.execute(
+            "SELECT date(ts, 'localtime') AS day, COUNT(*) AS checks, "
+            "       SUM(CASE WHEN outcome IN ('reply', 'reply_mute') THEN 1 ELSE 0 END) AS replies "
+            "FROM proactive_log WHERE ts >= datetime('now', ?) "
+            "GROUP BY day ORDER BY day DESC",
+            (f"-{int(days)} days",),
+        ).fetchall()
+    return [(r["day"], r["checks"] or 0, r["replies"] or 0) for r in rows]
+
+
+def delete_old_proactive_log(days: int = 30) -> int:
+    """Чистка журнала проверок (суточный цикл). Возвращает число удалённых."""
+    with _lock:
+        conn = _get_connection()
+        cur = conn.execute(
+            "DELETE FROM proactive_log WHERE ts < datetime('now', ?)",
+            (f"-{int(days)} days",),
+        )
+        deleted = cur.rowcount or 0
+        conn.commit()
+    if deleted:
+        logger.info("🤖 Очистка журнала проактивных проверок: удалено %d записей старше %d дней",
+                    deleted, days)
     return deleted
 
 

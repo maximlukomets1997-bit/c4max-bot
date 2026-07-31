@@ -33,6 +33,17 @@
 #  заводить таймеры заново: их убрали намеренно, дважды.
 #  Метки _last_judge_ts / _last_reply_ts пишутся, но ничего больше не тормозят.
 #
+#  СЧЁТ УЧАСТИЯ (2026-07-31), чтобы порог и промпт правились по цифрам,
+#  а не по ощущению «тараторит / молчит». Считается в ДВУХ местах, и это
+#  намеренно:
+#    • дошедшие до модели проверки и их исход → таблица proactive_log в базе
+#      (их единицы в минуту, история переживает перезапуск);
+#    • отсев дешёвыми фильтрами → счётчик _skipped В ПАМЯТИ. Этот путь
+#      работает на КАЖДОЕ сообщение группы, и походу в базу тут взяться
+#      неоткуда. Не «привести к общему виду».
+#  Показывают цифры панель промптов и её экран «📊 Подробнее об участии»,
+#  плюс блок в суточном отчёте о расходах.
+#
 #  Значок логов: 🤖. Модуль «тихий»: любое исключение глушится, наружу
 #  (в архиватор групп) не бросает НИКОГДА.
 # ───────────────────────────────────────────────
@@ -50,7 +61,7 @@ from config import (
     PROACTIVE_MUTE_PATTERN,
     PROACTIVE_VIDEO_MAX_BYTES,
 )
-from database.history import get_setting, save_group_message
+from database.history import get_setting, log_proactive_check, save_group_message
 from services.gemini import (ask_group_proactive, _proactive_describe_image,
                              _proactive_transcribe_audio, _proactive_describe_video)
 from utils import should_respond_in_group, keep_chat_action
@@ -63,6 +74,32 @@ _msgs_since_check: dict[int, int] = {}    # chat_id → новых сообще�
 _last_judge_ts: dict[int, float] = {}     # chat_id → monotonic последней проверки моделью
 _last_reply_ts: dict[int, float] = {}     # chat_id → monotonic последней реплики бота
 _in_flight: set[int] = set()              # чаты с проверкой «в полёте» (защёлка от гонки)
+
+# ─── счётчик отсева дешёвыми фильтрами (2026-07-31) ──────────────────
+#
+#  Сколько сообщений групп до модели НЕ дошло и почему. Отвечает на вопрос
+#  «почему бот весь вечер молчал»: чаще всего окажется, что он не молчал,
+#  а просто не добирал порог или всё время был «в полёте».
+#
+#  ⚠️ ЖИВЁТ В ПАМЯТИ И ОБНУЛЯЕТСЯ ПЕРЕЗАПУСКОМ — намеренно, как счётчики
+#  антиспама. Этот путь работает на КАЖДОЕ сообщение группы, и походу в базу
+#  тут взяться неоткуда: ради этого же в своё время завели кэш user_settings.
+#  В базу (proactive_log) пишутся только проверки, ДОШЕДШИЕ до модели.
+_skipped: dict[str, int] = {}
+_stats_since: float = time.time()         # с какого момента считаем (для подписи)
+
+
+def _skip(reason: str) -> None:
+    """Отметить, что сообщение отсеяно фильтром. Дешевле некуда — счёт в памяти."""
+    _skipped[reason] = _skipped.get(reason, 0) + 1
+
+
+def skip_counts() -> tuple[dict, float]:
+    """
+    Отсев по причинам и момент начала счёта (unix-время последнего запуска).
+    Читает панель промптов; копию отдаём наружу, чтобы её нельзя было испортить.
+    """
+    return dict(_skipped), _stats_since
 
 
 def _int_setting(key: str, default: int) -> int:
@@ -186,30 +223,39 @@ def consider_message(update, context) -> None:
         _msgs_since_check[chat_id] = _msgs_since_check.get(chat_id, 0) + 1
 
         # ── Дешёвые фильтры (память, без БД) ──
+        # Каждый отсев отмечаем в счётчике: порядок проверок НЕ менялся,
+        # добавились только строчки _skip(...) — они ничего не читают.
         if chat_id in _in_flight:
+            _skip("в полёте")
             return
         if user.is_bot:
             # Сообщения других ботов не триггерят проверку — защита от
             # «пинг-понга» двух авто-отвечающих ботов в одном чате.
+            _skip("другой бот")
             return
         text = message.text or message.caption or ""
         if text.startswith("/"):
+            _skip("команда")
             return
         from services.user_settings import ai_ignored
         if ai_ignored(user.id):
             # В карточке пользователя (/users) стоит «бот игнорирует»: не
             # вступаем в разговор в ответ на его сообщение — иначе игнор
             # обходился бы проактивным режимом.
+            _skip("игнор")
             return
         if should_respond_in_group(update, context.bot.username):
             # Прямое обращение (упоминание/Reply) — ответит основной путь.
+            _skip("прямое обращение")
             return
 
         # ── Фильтры по настройкам (быстрые чтения settings) ──
         if not is_enabled():
+            _skip("режим выключен")
             return
         now = time.monotonic()
         if _msgs_since_check[chat_id] < _int_setting("proactive_min_msgs", PROACTIVE_MIN_MSGS):
+            _skip("недобор порога")
             return
 
         # ── Защёлка ДО запуска задачи (никаких await между проверкой и ней) ──
@@ -266,7 +312,32 @@ async def _run_proactive(bot, chat_id: int, trigger_message_id: int, trigger_tex
     Так бот «видит» и «слышит» контекст перед решением — как в личке.
     Ветки взаимоисключающие (elif): в одном сообщении Telegram может быть
     только одно вложение, а два разбора подряд — лишний расход впустую.
+
+    Каждый исход пишется в журнал проверок (`proactive_log`, 2026-07-31) —
+    вступил бот или промолчал, сколько думала модель, что было триггером.
+    Запись стоит В ТЕХ ЖЕ ветках, что и строки лога, чтобы статистика и лог
+    не могли разъехаться.
     """
+    # Вид триггера — для журнала: медиа-проверка дороже текстовой (сначала
+    # разбор вложения отдельной моделью, потом сам запрос).
+    trigger_kind = ("photo" if has_photo else
+                    "voice" if has_voice else
+                    "video" if has_video else "text")
+    # Модель на момент проверки. Это ИМЕННО активная модель, а не та, что
+    # в итоге ответила: если основная откажет, ответит запасная из цепочки
+    # подстраховки, и в журнале останется активная. Точную модель ответа знает
+    # только gemini.py, а лезть туда ради подписи в статистике не стоило.
+    model_at_check = get_setting("active_model", "")
+    started = time.monotonic()
+
+    def _note(outcome: str, reply_len: int = 0) -> None:
+        """Записать исход проверки. «Тихая»: журнал не должен ломать режим."""
+        try:
+            log_proactive_check(chat_id, outcome, model_at_check,
+                                time.monotonic() - started, reply_len, trigger_kind)
+        except Exception as e:
+            logger.debug("🤖 Не удалось записать проверку в журнал: %s", e)
+
     try:
         loop = asyncio.get_running_loop()
 
@@ -342,6 +413,7 @@ async def _run_proactive(bot, chat_id: int, trigger_message_id: int, trigger_tex
         )
         if not answer:
             logger.info("🤖 Чат %s: решение — промолчать", chat_id)
+            _note("silent")
             return
 
         # ── Пометка мута: вырезаем из текста ДО отправки ──
@@ -357,6 +429,7 @@ async def _run_proactive(bot, chat_id: int, trigger_message_id: int, trigger_tex
             logger.info("🤖 Чат %s: реплика пустая после разбора пометки", chat_id)
             if mute_sec:
                 await _apply_mute(bot, chat_id, trigger_user_id, mute_sec, trigger_text)
+            _note("empty")
             return
 
         # Мут — ДО реплики: между решением и словами человек не должен успеть
@@ -386,7 +459,9 @@ async def _run_proactive(bot, chat_id: int, trigger_message_id: int, trigger_tex
 
         _last_reply_ts[chat_id] = time.monotonic()
         logger.info("🤖 Чат %s: бот сам вступил в разговор (%d символов)", chat_id, len(visible))
+        _note("reply_mute" if mute_sec else "reply", len(visible))
     except Exception as e:
         logger.warning("⚠️ Не удалось выполнить проактивную проверку (чат %s): %s", chat_id, e)
+        _note("error")
     finally:
         _in_flight.discard(chat_id)
