@@ -329,8 +329,52 @@ def period_totals(start_utc: str, end_utc: str,
     }
 
 
+def _proactive_block(start_utc: str, end_utc: str, total_calls: int) -> str:
+    """
+    Блок «Сам в разговор» для суточного отчёта (2026-07-31): сколько раз бот
+    проверялся, сколько раз вступил и какую долю вызовов это съело.
+
+    ⚠️ ДОЛЯ РАСХОДА СЧИТАЕТСЯ ПО ЧИСЛУ ВЫЗОВОВ, а не по деньгам, и об этом
+    сказано прямо в тексте. Точная стоимость живёт в services/gemini.py, и
+    лезть туда ради этой строки не стали (решение 2026-07-31): у активной
+    бесплатной Gemini она всё равно нулевая. Цифра скорее ЗАНИЖЕНА:
+    проактивный запрос длиннее среднего — в нём вся стенограмма, статьи базы
+    знаний и инструкция участия. Переключишься на платную активную модель —
+    тогда и делать точный проброс, будет ради чего.
+
+    Медиа-триггеры считаются отдельно: у них на проверку уходит ДВА запроса
+    (сначала вложение разбирает отдельная модель, потом сам запрос).
+    """
+    try:
+        stats = hist.proactive_stats(start_utc, end_utc)
+    except Exception as e:
+        logger.debug("📊 Не удалось собрать итоги участия для отчёта: %s", e)
+        return ""
+    checks = stats["checks"]
+    if not checks:
+        return ""
+
+    replies = stats["reply"] + stats["reply_mute"]
+    share = f"{round(replies * 100 / checks)}%" if checks else "—"
+    media = sum(n for k, n in stats["by_trigger"].items() if k != "text")
+    # Вызовов на проверки ушло: по одному на каждую + по одному на разбор
+    # каждого вложения.
+    spent_calls = checks + media
+    of_all = f" · это ≈{round(spent_calls * 100 / total_calls)}% вызовов" if total_calls else ""
+
+    line = (f"───────────────────────────\n"
+            f"🗣 <b>Сам в разговор</b>\n"
+            f"проверок <b>{checks}</b> · вступил <b>{replies}</b> ({share}) · "
+            f"промолчал <b>{stats['silent']}</b>\n")
+    if media:
+        line += f"<i>из них по вложениям: {media} (каждая стоит двух вызовов)</i>\n"
+    line += f"<i>потрачено вызовов: {spent_calls}{of_all}</i>\n"
+    return line
+
+
 def render(header: str, period_line: str, note: str,
-           totals: dict, current: dict, extra: str = "") -> str:
+           totals: dict, current: dict, extra: str = "",
+           proactive_period: tuple | None = None) -> str:
     """Рисует текст отчёта по готовым цифрам периода. ОДНА рисовалка на оба
     отчёта — суточный и недельный.
 
@@ -397,6 +441,12 @@ def render(header: str, period_line: str, note: str,
                  f"{PROVIDER_ICON_FALLBACK} <b>Прочие вызовы</b> <i>(модели нет в конфиге)</i>\n"
                  f"{_plain_lines(groups['other'])}")
 
+    # Блок «Сам в разговор» — только у суточного отчёта: недельному пришлось бы
+    # передавать границы периода, а он считается суммой суток, а не по времени.
+    # Понадобится в недельном — это одна строка здесь и одна в weekly_report.
+    if proactive_period:
+        text += _proactive_block(proactive_period[0], proactive_period[1], total_calls)
+
     text += (
         f"───────────────────────────\n"
         f"📡 <b>Всего вызовов: {total_calls}</b>\n"
@@ -415,7 +465,8 @@ def build_report(header: str, start_utc: str, end_utc: str,
     end_dt = _parse_utc(end_utc) or datetime.now(timezone.utc)
     totals = period_totals(start_utc, end_utc, base, current, carry)
     return render(header, _period_label(start_dt, end_dt),
-                  _period_note(start_dt, end_dt), totals, current)
+                  _period_note(start_dt, end_dt), totals, current,
+                  proactive_period=(start_utc, end_utc))
 
 
 # ───────────────────────────────────────────────

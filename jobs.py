@@ -714,6 +714,15 @@ async def cleanup_loop(application):
         except Exception as e:
             logger.error("⚠️ Не удалось очистить журнал персонала: %s", e)
         try:
+            # Журнал проактивных проверок (2026-07-31): месяц истории —
+            # экран подробностей показывает неделю, месяц оставлен на случай
+            # «а как было до правки промпта в прошлом месяце».
+            from database.history import delete_old_proactive_log
+            from config import PROACTIVE_LOG_DAYS
+            delete_old_proactive_log(days=PROACTIVE_LOG_DAYS)
+        except Exception as e:
+            logger.error("⚠️ Не удалось очистить журнал проактивных проверок: %s", e)
+        try:
             # Снимки счётчиков для суточного отчёта: один в сутки, храним ~год.
             # Последний снимок функция не трогает — от него идёт текущий период.
             from database.history import delete_old_stats_snapshots

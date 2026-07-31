@@ -6,6 +6,7 @@ import html
 import json
 import logging
 import os
+import time
 
 import logging_setup
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
@@ -105,6 +106,187 @@ async def _remove_proactive_off_announce(bot):
     logger.info("🔧 Объявлений о выключении удалено: %d из %d", removed, len(items))
 
 
+# ─────────────────────────────────────────────
+#  Итоги участия в разговоре (2026-07-31)
+#
+#  Режим «Сам в разговор» настраивается двумя рычагами — порогом и промптом
+#  (таймеры убраны дважды и не возвращаются). До этих цифр оба крутились
+#  вслепую: «тараторит» и «молчит» — это ощущение, а не число.
+#
+#  Считаются РАЗНЫЕ вещи, и путать их нельзя:
+#    • ПРОВЕРКИ — сколько раз дошло до модели (это расход);
+#    • ВСТУПЛЕНИЯ — сколько раз модель решила заговорить;
+#    • ОТСЕВ — сколько сообщений до модели не дошло и почему.
+#  Ключевое — ДОЛЯ вступлений от проверок: она отличает «модель не умеет
+#  молчать» (лечится промптом) от «проверок слишком много» (лечится порогом).
+# ─────────────────────────────────────────────
+
+# Подписи исходов для экрана подробностей. ⚠️ Новый исход в
+# database/history.py::log_proactive_check добавлять И СЮДА, иначе он
+# покажется голым кодом (те же грабли, что с типами мутов в /mod).
+_OUTCOME_TITLES = {
+    "reply": "💬 вступил в разговор",
+    "reply_mute": "🔇 вступил и выдал мут",
+    "silent": "🤐 промолчал",
+    "empty": "📭 сказать было нечего",
+    "error": "⚠️ запрос сорвался",
+}
+
+_TRIGGER_TITLES = {
+    "text": "текст",
+    "photo": "фото",
+    "voice": "голос",
+    "video": "видео",
+}
+
+
+def _utc_since(hours: int) -> str:
+    """Момент «N часов назад» строкой UTC — в том же виде, что ts в журнале."""
+    from datetime import datetime, timedelta, timezone
+    return (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _share(part: int, whole: int) -> str:
+    """Доля в процентах, без деления на ноль."""
+    return f"{round(part * 100 / whole)}%" if whole else "—"
+
+
+def _proactive_stats_lines() -> str:
+    """
+    Две строки итогов за сутки для панели промптов. Держать КОРОТКИМИ: текст
+    панели уже за три тысячи символов из 4096, подробности живут на своём
+    экране. Своих ошибок наружу не отдаём — статистика не должна мешать
+    открыть панель (без неё панель бесполезна, а без цифр — просто беднее).
+    """
+    try:
+        from database.history import proactive_stats
+        from services.proactive import skip_counts
+
+        day = proactive_stats(_utc_since(24))
+        checks = day["checks"]
+        replies = day["reply"] + day["reply_mute"]
+        skipped, _since = skip_counts()
+        skipped_total = sum(skipped.values())
+
+        if not checks and not skipped_total:
+            return ("\n───────────────────────────\n"
+                    "📊 <b>УЧАСТИЕ ЗА СУТКИ:</b> <i>проверок не было</i>")
+
+        return (
+            "\n───────────────────────────\n"
+            f"📊 <b>УЧАСТИЕ ЗА СУТКИ:</b> проверок {checks} · "
+            f"вступил {replies} ({_share(replies, checks)}) · промолчал {day['silent']}\n"
+            f"<i>Отсеяно до модели: {skipped_total} — подробности по кнопке ниже</i>"
+        )
+    except Exception as e:
+        logger.debug("🔧 Не удалось собрать итоги участия для панели: %s", e)
+        return ""
+
+
+def _build_proactive_stats_panel():
+    """
+    Экран «📊 Подробнее об участии»: сутки и неделя, разбивка по исходам,
+    по дням, по чатам и по виду триггера, плюс отсев дешёвыми фильтрами.
+
+    ⚠️ Две половины экрана живут по РАЗНЫМ правилам, и это сказано прямо
+    в тексте: проверки берутся из журнала в базе (переживают перезапуск),
+    отсев — из счётчиков в памяти (обнуляется перезапуском, как у антиспама).
+    Не «привести к общему виду»: считать отсев в базе значит писать в неё
+    на каждое сообщение группы.
+    """
+    from database.history import proactive_by_chat, proactive_by_day, proactive_stats
+    from services.proactive import skip_counts
+
+    sep = "───────────────────────────\n"
+    day = proactive_stats(_utc_since(24))
+    week = proactive_stats(_utc_since(24 * 7))
+
+    parts = ["📊 <b>УЧАСТИЕ В РАЗГОВОРЕ</b>\n", sep]
+
+    day_replies = day["reply"] + day["reply_mute"]
+    week_replies = week["reply"] + week["reply_mute"]
+    parts.append(
+        f"<b>За сутки:</b> проверок {day['checks']} · "
+        f"вступил {day_replies} ({_share(day_replies, day['checks'])})\n"
+        f"<b>За неделю:</b> проверок {week['checks']} · "
+        f"вступил {week_replies} ({_share(week_replies, week['checks'])})\n"
+    )
+    if day["avg_sec"]:
+        parts.append(f"<i>Модель думает в среднем {day['avg_sec']:.1f} с</i>\n")
+
+    # ── Исходы за неделю ──
+    parts.append(sep + "<b>Чем кончались проверки за неделю</b>\n")
+    for code, title in _OUTCOME_TITLES.items():
+        n = week.get(code, 0)
+        if n:
+            parts.append(f"{title}: <b>{n}</b> ({_share(n, week['checks'])})\n")
+    if not week["checks"]:
+        parts.append("<i>проверок не было</i>\n")
+
+    # ── По дням ──
+    try:
+        by_day = proactive_by_day(7)
+    except Exception:
+        by_day = []
+    if by_day:
+        parts.append(sep + "<b>По дням</b> <i>(проверок → вступлений)</i>\n")
+        for day_label, checks, replies in by_day:
+            parts.append(f"{day_label}: {checks} → <b>{replies}</b> ({_share(replies, checks)})\n")
+
+    # ── По чатам ──
+    try:
+        by_chat = proactive_by_chat(_utc_since(24 * 7), limit=5)
+    except Exception:
+        by_chat = []
+    if by_chat:
+        parts.append(sep + "<b>По чатам за неделю</b>\n")
+        for chat_id, checks, replies in by_chat:
+            title = _chat_title(chat_id)
+            parts.append(f"{title}: {checks} → <b>{replies}</b>\n")
+
+    # ── По виду триггера ──
+    if week["by_trigger"]:
+        kinds = ", ".join(
+            f"{_TRIGGER_TITLES.get(k, k)} {n}"
+            for k, n in sorted(week["by_trigger"].items(), key=lambda kv: -kv[1])
+        )
+        parts.append(sep + f"<b>Триггеры за неделю:</b> {kinds}\n"
+                           "<i>Медиа дороже: вложение сначала разбирает отдельная модель.</i>\n")
+
+    # ── Отсев в памяти ──
+    skipped, since = skip_counts()
+    total = sum(skipped.values())
+    minutes = max(0, (time.time() - since) / 60)
+    uptime = f"{minutes / 60:.0f} ч" if minutes >= 60 else f"{minutes:.0f} мин"
+    parts.append(sep + f"<b>Отсеяно до модели:</b> {total} "
+                       f"<i>(с последнего запуска, {uptime})</i>\n")
+    if total:
+        for reason, n in sorted(skipped.items(), key=lambda kv: -kv[1]):
+            parts.append(f"• {reason}: <b>{n}</b>\n")
+    parts.append("<i>Эти числа живут в памяти и обнуляются перезапуском — "
+                 "на каждое сообщение группы бот в базу не ходит.</i>\n")
+
+    parts.append(sep + "ℹ️ <i>Вступает часто при малом числе проверок — правь "
+                       "PROMPT участия. Проверок много — правь порог.</i>")
+
+    keyboard = [
+        [InlineKeyboardButton("⬅️ К промптам", callback_data="back_to_stats")],
+        _adm_back_row(),
+    ]
+    return "".join(parts), InlineKeyboardMarkup(keyboard)
+
+
+def _chat_title(chat_id: int) -> str:
+    """Название группы из известных боту чатов; не нашлось — голый номер."""
+    try:
+        for chat in get_known_chats():
+            if chat["chat_id"] == chat_id:
+                return html.escape(chat["title"] or str(chat_id))
+    except Exception:
+        pass
+    return str(chat_id)
+
+
 async def _handle_proactive_callback(query, user_id, data):
     """
     Ветки proactive:<действие> — тумблер и регуляторы режима «Сам в разговор»
@@ -120,6 +302,21 @@ async def _handle_proactive_callback(query, user_id, data):
 
     if action in ("wipe", "wipe_yes"):
         await _handle_proactive_wipe(query, user_id, action == "wipe_yes")
+        return
+
+    if action == "stats":
+        # Экран подробностей ЗАМЕНЯЕТ панель в том же сообщении (как экран прав
+        # модератора): возврат — кнопкой «⬅️ К промптам», она соберёт панель
+        # заново со свежими цифрами.
+        await query.answer()
+        try:
+            text, markup = _build_proactive_stats_panel()
+            await query.edit_message_text(
+                text=text, parse_mode=ParseMode.HTML, reply_markup=markup,
+                link_preview_options=LinkPreviewOptions(is_disabled=True),
+            )
+        except Exception as e:
+            logger.warning("⚠️ Не удалось показать итоги участия: %s", e)
         return
 
     if action == "hands":
@@ -386,6 +583,16 @@ def _build_prompt_panel_text_and_keyboard(user_id, bot_username=None):
         f"<i>Постоянная часть (1+3+4): {fixed_total} символов</i>"
     )
 
+    # ── Итог участия за сутки (2026-07-31) ───────────────────────────────
+    # Обратная связь для регулятора «💬 порог», который стоит кнопкой ниже:
+    # без неё режим настраивается вслепую. ГЛАВНОЕ ЧИСЛО — ДОЛЯ ВСТУПЛЕНИЙ,
+    # а не их количество: 38 вступлений из 40 проверок и 3 из 40 выглядят
+    # в чате похоже («бот болтлив»), но лечатся ПРОТИВОПОЛОЖНО — первое
+    # промптом (модель не умеет молчать), второе порогом (проверки редки).
+    # Полная раскладка — на экране «📊 Подробнее», здесь только две строки:
+    # текст панели и так занимает больше трёх тысяч символов из 4096.
+    full_text += _proactive_stats_lines()
+
     # Метка кнопки тумблера ответов ИИ (глобальная настройка, по умолчанию ВКЛ)
     ai_replies_val = get_setting("ai_replies_enabled", "1")
     btn_ai_label = f"💬 ОТВЕТЫ ИИ: {_onoff(ai_replies_val != '0')}"
@@ -427,6 +634,9 @@ def _build_prompt_panel_text_and_keyboard(user_id, bot_username=None):
             InlineKeyboardButton(f"📜 {proactive_ctx} сообщ.", callback_data="proactive:noop"),
             InlineKeyboardButton("➕ контекст", callback_data="proactive:ctx_inc"),
         ],
+        # Подробности участия — своим рядом сразу под регуляторами, которые
+        # эти цифры и настраивают: посмотрел итог, тут же поправил порог.
+        [InlineKeyboardButton("📊 Подробнее об участии", callback_data="proactive:stats")],
         [InlineKeyboardButton("📄 Показать полные PROMPTы", callback_data="prompts_files")],
         _adm_back_row(),
     ]
