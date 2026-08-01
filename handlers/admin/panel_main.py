@@ -34,12 +34,17 @@ from .panel_rag import _end_kb_test
 # Максимом «по столбцам»: слева 3 Flash (v3) и 3.1 Flash-Lite, справа
 # 3.5 Flash и 3.6 Flash — в рядах это даёт пары ниже.
 # 2026-07-25: добавлен ряд Xiaomi MiMo (mimo-v2.5 / mimo-v2.5-pro) — стало 5 рядов.
+# 2026-08-01: добавлена ВРЕМЕННАЯ Ling 3.0 Flash (OpenRouter) — стало 6 рядов.
+# Она одна в своём ряду намеренно: пара ей не нужна, а отдельная строка сразу
+# показывает, что модель тут гостит, а не прописана. Наигрались — удалить
+# и эту строку, и запись из AVAILABLE_MODELS.
 _MODEL_BUTTON_ROWS = [
     ["gemini-3-flash-preview", "gemini-3.5-flash"],
     ["gemini-3.1-flash-lite", "gemini-3.6-flash"],
     ["qwen3.7-plus", "qwen3.7-max"],
     ["deepseek-v4-flash", "deepseek-v4-pro"],
     ["mimo-v2.5", "mimo-v2.5-pro"],
+    ["inclusionai/ling-3.0-flash:free"],
 ]
 
 # Ряд моделей картинок (Nano Banana, gemini-*-image).
@@ -125,7 +130,7 @@ async def send_api_panel(bot, chat_id: int, user_id: int):
     # Модели картинок — в ОТДЕЛЬНУЮ группу "image" (не смешивать с бесплатным
     # текстовым Gemini); модели, которых уже нет в конфиге, попадают только в
     # общий счётчик «Общие вызовы API».
-    groups = {"gemini": "", "qwen": "", "deepseek": "", "xiaomi": "", "image": ""}
+    groups = {"gemini": "", "qwen": "", "deepseek": "", "xiaomi": "", "openrouter": "", "image": ""}
     for model_name, cnt in stats["api_calls_by_model"]:
         if model_name in AVAILABLE_IMAGE_MODELS:
             provider = "image"
@@ -201,6 +206,20 @@ async def send_api_panel(bot, chat_id: int, user_id: int):
     except (TypeError, ValueError):
         xm_balance = 0.0
 
+    # Накопленный расход на OpenRouter (2026-08-01, временная Ling 3.0 Flash):
+    # сумму присылает сам OpenRouter в ответе (services/gemini.py::_openrouter_cost),
+    # остаток кредитов заводится кнопкой «💵 Счёт OpenRouter» на экране
+    # «💰 Счета и квоты» и дальше тает сам. На бесплатном варианте модели обе
+    # цифры нулевые — так и должно быть.
+    try:
+        or_spent = float(get_setting("openrouter_cost_usd", "0") or 0)
+    except (TypeError, ValueError):
+        or_spent = 0.0
+    try:
+        or_balance = float(get_setting("openrouter_balance_usd", "0") or 0)
+    except (TypeError, ValueError):
+        or_balance = 0.0
+
     # Накопленный расход на генерацию картинок (Nano Banana): считается по точным
     # токенам из usageMetadata и ценам IMAGE_PRICES (services/gemini.py::_image_cost).
     try:
@@ -238,6 +257,11 @@ async def send_api_panel(bot, chat_id: int, user_id: int):
         f"{PROVIDER_ICONS['xiaomi']} <b>Вызовы Xiaomi:</b>\n{groups['xiaomi']}"
         # Как у DeepSeek: расход ссылкой на кабинет, после «/» — остаток счёта.
         f"💰 <b>Расход Xiaomi:</b> <a href=\"https://platform.xiaomimimo.com/\">${xm_spent:.6f}</a> / <b>${xm_balance:.6f}</b>\n"
+        f"───────────────────────────\n"
+        f"{PROVIDER_ICONS['openrouter']} <b>Вызовы OpenRouter:</b>\n{groups['openrouter']}"
+        # Как у DeepSeek и Xiaomi: расход ссылкой на кабинет, после «/» — остаток
+        # кредитов. Пока модель на бесплатном варианте, обе цифры нулевые.
+        f"💰 <b>Расход OpenRouter:</b> <a href=\"https://openrouter.ai/credits\">${or_spent:.6f}</a> / <b>${or_balance:.6f}</b>\n"
         f"───────────────────────────\n"
         f"📡 <b>Общие вызовы API:</b>\n"
         f"  • Всего: <b>{stats['api_calls_total']}</b>\n"
@@ -333,18 +357,21 @@ _BALANCE_FIELDS = {
                  "name": "DeepSeek", "btn": "💵 Счёт DeepSeek"},
     "xiaomi":   {"key": "xiaomi_balance_usd", "provider": "xiaomi",
                  "name": "Xiaomi", "btn": "💵 Счёт Xiaomi"},
+    "openrouter": {"key": "openrouter_balance_usd", "provider": "openrouter",
+                   "name": "OpenRouter", "btn": "💵 Счёт OpenRouter"},
     "image":    {"key": "image_balance_usd", "provider": "image",
                  "name": "Картинки", "btn": "💵 Счёт Картинок"},
 }
 
 # Счётчики «потрачено» — их можно обнулить (при смене ключа или рабочего
-# пространства). Все четыре ВЕЧНЫЕ: месячный сброс их не трогает, поэтому
+# пространства). Все пять ВЕЧНЫЕ: месячный сброс их не трогает, поэтому
 # единственный способ начать счёт заново — эта кнопка.
 _COST_FIELDS = {
-    "deepseek": {"key": "deepseek_cost_usd", "provider": "deepseek", "name": "DeepSeek"},
-    "qwen":     {"key": "qwen_cost_usd",     "provider": "qwen",     "name": "Qwen"},
-    "xiaomi":   {"key": "xiaomi_cost_usd",   "provider": "xiaomi",   "name": "Xiaomi"},
-    "image":    {"key": "image_cost_usd",    "provider": "image",    "name": "Картинки"},
+    "deepseek":   {"key": "deepseek_cost_usd",   "provider": "deepseek",   "name": "DeepSeek"},
+    "qwen":       {"key": "qwen_cost_usd",       "provider": "qwen",       "name": "Qwen"},
+    "xiaomi":     {"key": "xiaomi_cost_usd",     "provider": "xiaomi",     "name": "Xiaomi"},
+    "openrouter": {"key": "openrouter_cost_usd", "provider": "openrouter", "name": "OpenRouter"},
+    "image":      {"key": "image_cost_usd",      "provider": "image",      "name": "Картинки"},
 }
 
 _MAX_MONEY = 1_000_000.0          # больше — почти наверняка опечатка
@@ -465,8 +492,8 @@ def _build_balance_panel(flash: str = ""):
     if flash:
         parts.append(f"{flash}\n{sep}")
 
-    # Три денежных блока — в том же порядке, что кнопки ниже.
-    for field_id in ("deepseek", "xiaomi", "image"):
+    # Денежные блоки — в том же порядке, что кнопки ниже.
+    for field_id in ("deepseek", "xiaomi", "openrouter", "image"):
         cfg = _BALANCE_FIELDS[field_id]
         spent, _ = _read_number(_COST_FIELDS[field_id]["key"], "money")
         parts.append(
@@ -497,7 +524,8 @@ def _build_balance_panel(flash: str = ""):
     rows = [
         [InlineKeyboardButton(_BALANCE_FIELDS["deepseek"]["btn"], callback_data="bal:set:deepseek"),
          InlineKeyboardButton(_BALANCE_FIELDS["xiaomi"]["btn"], callback_data="bal:set:xiaomi")],
-        [InlineKeyboardButton(_BALANCE_FIELDS["image"]["btn"], callback_data="bal:set:image")],
+        [InlineKeyboardButton(_BALANCE_FIELDS["openrouter"]["btn"], callback_data="bal:set:openrouter"),
+         InlineKeyboardButton(_BALANCE_FIELDS["image"]["btn"], callback_data="bal:set:image")],
     ]
     # Кнопки квот — по две в ряд, собираются из конфига сами.
     qw_buttons = [InlineKeyboardButton(f"🎫 Квота {m}", callback_data=f"bal:set:qwen:{m}")

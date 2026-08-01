@@ -966,6 +966,32 @@ def add_xiaomi_cost(delta_usd: float):
         conn.commit()
 
 
+def add_openrouter_cost(delta_usd: float):
+    """Как add_deepseek_cost, но для OpenRouter (2026-08-01, временная модель
+    Ling 3.0 Flash): копит стоимость запросов в settings (ключ
+    openrouter_cost_usd) и на ту же сумму уменьшает остаток кредитов
+    (ключ openrouter_balance_usd — в панели «📡 Настройки API» это
+    «расход / остаток»). Остаток заводится кнопкой «💵 Счёт OpenRouter» на
+    экране «💰 Счета и квоты»; ключа нет — уменьшать нечего, UPDATE молча
+    не найдёт строку.
+    ⚠️ На бесплатном варианте модели сюда приходят НУЛИ, и это правильно:
+    счётчик заведётся на нуле и будет виден в панели: значит, счёт ведётся.
+    Перейдём на платный вариант — цифры пойдут в ту же копилку сами."""
+    with _lock:
+        conn = _get_connection()
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('openrouter_cost_usd', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = CAST(value AS REAL) + CAST(excluded.value AS REAL)",
+            (str(delta_usd),),
+        )
+        conn.execute(
+            "UPDATE settings SET value = CAST(value AS REAL) - CAST(? AS REAL) "
+            "WHERE key = 'openrouter_balance_usd'",
+            (str(delta_usd),),
+        )
+        conn.commit()
+
+
 def add_qwen_cost(delta_usd: float):
     """Как add_deepseek_cost, но для Qwen: копит стоимость запросов в settings
     (ключ qwen_cost_usd). Сложение атомарно в SQL — без гонки между потоками."""

@@ -143,17 +143,20 @@ def _money(key: str) -> float:
 
 
 def collect_counters() -> dict:
-    """Текущие значения всех счётчиков панели «📡 Настройки API»: три копилки
-    расходов, два остатка на счетах и остаток квоты по каждой модели Qwen.
+    """Текущие значения всех счётчиков панели «📡 Настройки API»: копилки
+    расходов по каждому провайдеру, остатки на счетах и остаток квоты по каждой
+    модели Qwen.
     Вызовы сюда НЕ входят — они считаются по времени из таблицы api_calls."""
     return {
         "deepseek_cost": _money("deepseek_cost_usd"),
         "qwen_cost": _money("qwen_cost_usd"),
         "image_cost": _money("image_cost_usd"),
         "xiaomi_cost": _money("xiaomi_cost_usd"),
+        "openrouter_cost": _money("openrouter_cost_usd"),
         "deepseek_balance": _money("deepseek_balance_usd"),
         "image_balance": _money("image_balance_usd"),
         "xiaomi_balance": _money("xiaomi_balance_usd"),
+        "openrouter_balance": _money("openrouter_balance_usd"),
         "qwen_tokens": hist.get_qwen_tokens(),
     }
 
@@ -230,11 +233,12 @@ def _spent(current: float, base: float, carried: float = 0.0) -> tuple[float, bo
 
 def _calls_by_group(calls: dict) -> dict:
     """Раскладывает вызовы по блокам панели: gemini / image / qwen / deepseek /
-    xiaomi и «прочие» (модель удалена из конфига, а вызовы за период были).
-    Порядок внутри блока — по числу вызовов, как в панели.
+    xiaomi / openrouter и «прочие» (модель удалена из конфига, а вызовы за
+    период были). Порядок внутри блока — по числу вызовов, как в панели.
     ⚠️ Новый провайдер в AVAILABLE_MODELS → добавь его СЮДА и в render(), иначе
     его вызовы молча уедут в «прочие»."""
-    groups = {"gemini": [], "image": [], "qwen": [], "deepseek": [], "xiaomi": [], "other": []}
+    groups = {"gemini": [], "image": [], "qwen": [], "deepseek": [], "xiaomi": [],
+              "openrouter": [], "other": []}
     seen = set()
 
     for model_name, meta in AVAILABLE_MODELS.items():
@@ -290,8 +294,8 @@ def _plain_lines(rows: list) -> str:
 
 def period_totals(start_utc: str, end_utc: str,
                   base: dict, current: dict, carry: dict) -> dict:
-    """Итог периода В ЦИФРАХ: вызовы по моделям, сожжённые токены Qwen и три
-    расхода. Отдельно от рисования, потому что цифры приходят из ДВУХ разных
+    """Итог периода В ЦИФРАХ: вызовы по моделям, сожжённые токены Qwen и расход
+    по каждому провайдеру. Отдельно от рисования, потому что цифры приходят из ДВУХ разных
     мест: у суточного отчёта — из разницы снимков (эта функция), у недельного —
     сложением уже посчитанных суток из копилки. Рисует их одна и та же
     функция `render` — иначе два отчёта со временем разъехались бы по виду.
@@ -317,6 +321,7 @@ def period_totals(start_utc: str, end_utc: str,
                                  float(carry.get("qwen_cost", 0.0)))
     ds_spent, ds_manual = _spent(current.get("deepseek_cost", 0.0), base.get("deepseek_cost", 0.0))
     xm_spent, xm_manual = _spent(current.get("xiaomi_cost", 0.0), base.get("xiaomi_cost", 0.0))
+    or_spent, or_manual = _spent(current.get("openrouter_cost", 0.0), base.get("openrouter_cost", 0.0))
 
     return {
         "calls": calls,
@@ -326,6 +331,7 @@ def period_totals(start_utc: str, end_utc: str,
         "qwen_cost": qw_spent, "qwen_manual": qw_manual,
         "deepseek_cost": ds_spent, "deepseek_manual": ds_manual,
         "xiaomi_cost": xm_spent, "xiaomi_manual": xm_manual,
+        "openrouter_cost": or_spent, "openrouter_manual": or_manual,
     }
 
 
@@ -401,10 +407,11 @@ def render(header: str, period_line: str, note: str,
     qw_spent = totals.get("qwen_cost", 0.0)
     ds_spent = totals.get("deepseek_cost", 0.0)
     xm_spent = totals.get("xiaomi_cost", 0.0)
+    or_spent = totals.get("openrouter_cost", 0.0)
     manual_note = " <i>(счётчик правили вручную)</i>"
 
     total_calls = sum(calls.values())
-    total_money = img_spent + qw_spent + ds_spent + xm_spent
+    total_money = img_spent + qw_spent + ds_spent + xm_spent + or_spent
 
     text = (
         f"{header}\n"
@@ -434,6 +441,11 @@ def render(header: str, period_line: str, note: str,
         f"{_plain_lines(groups['xiaomi'])}"
         f"💰 <b>Расход Xiaomi:</b> ${xm_spent:.6f}{manual_note if totals.get('xiaomi_manual') else ''}\n"
         f"   Остаток на счету: <b>${current.get('xiaomi_balance', 0.0):.6f}</b>\n"
+        f"───────────────────────────\n"
+        f"{PROVIDER_ICONS['openrouter']} <b>Вызовы OpenRouter: {_sum('openrouter')}</b>\n"
+        f"{_plain_lines(groups['openrouter'])}"
+        f"💰 <b>Расход OpenRouter:</b> ${or_spent:.6f}{manual_note if totals.get('openrouter_manual') else ''}\n"
+        f"   Остаток на счету: <b>${current.get('openrouter_balance', 0.0):.6f}</b>\n"
     )
 
     if groups["other"]:
@@ -557,7 +569,8 @@ def _open_day_totals() -> tuple[int, float, datetime | None]:
     carry = _carry_read()
     totals = period_totals(last["taken_at_utc"], _utc_str(now), base, current, carry)
     money = (totals.get("image_cost", 0.0) + totals.get("qwen_cost", 0.0)
-             + totals.get("deepseek_cost", 0.0) + totals.get("xiaomi_cost", 0.0))
+             + totals.get("deepseek_cost", 0.0) + totals.get("xiaomi_cost", 0.0)
+             + totals.get("openrouter_cost", 0.0))
     return sum((totals.get("calls") or {}).values()), money, start_dt
 
 
@@ -650,9 +663,10 @@ def week_add_day(start_utc: str, end_utc: str, totals: dict) -> None:
     acc["burned"] = burned
     acc["qwen_reset"] = sorted(reset)
 
-    for key in ("image_cost", "qwen_cost", "deepseek_cost", "xiaomi_cost"):
+    for key in ("image_cost", "qwen_cost", "deepseek_cost", "xiaomi_cost", "openrouter_cost"):
         acc[key] = float(acc.get(key, 0.0)) + float(totals.get(key, 0.0))
-    for key in ("image_manual", "qwen_manual", "deepseek_manual", "xiaomi_manual"):
+    for key in ("image_manual", "qwen_manual", "deepseek_manual", "xiaomi_manual",
+                "openrouter_manual"):
         acc[key] = bool(acc.get(key)) or bool(totals.get(key))
 
     _week_write(acc)
@@ -707,7 +721,8 @@ def _week_average(totals: dict, days: int) -> str:
         return ""
     calls = sum((totals.get("calls") or {}).values())
     money = (totals.get("image_cost", 0.0) + totals.get("qwen_cost", 0.0)
-             + totals.get("deepseek_cost", 0.0) + totals.get("xiaomi_cost", 0.0))
+             + totals.get("deepseek_cost", 0.0) + totals.get("xiaomi_cost", 0.0)
+             + totals.get("openrouter_cost", 0.0))
     return f"📈 <b>В среднем в день:</b> вызовов {round(calls / days)} · ≈${money / days:.6f}"
 
 
@@ -732,10 +747,12 @@ def weekly_report(header: str = "📅 <b>РАСХОД ЗА НЕДЕЛЮ</b>") ->
         "qwen_cost": float(acc.get("qwen_cost", 0.0)),
         "deepseek_cost": float(acc.get("deepseek_cost", 0.0)),
         "xiaomi_cost": float(acc.get("xiaomi_cost", 0.0)),
+        "openrouter_cost": float(acc.get("openrouter_cost", 0.0)),
         "image_manual": bool(acc.get("image_manual")),
         "qwen_manual": bool(acc.get("qwen_manual")),
         "deepseek_manual": bool(acc.get("deepseek_manual")),
         "xiaomi_manual": bool(acc.get("xiaomi_manual")),
+        "openrouter_manual": bool(acc.get("openrouter_manual")),
     }
 
     text = render(header,
@@ -758,6 +775,7 @@ def week_so_far() -> str:
     total = sum((acc.get("calls") or {}).values()) + open_calls
     money = (float(acc.get("image_cost", 0.0)) + float(acc.get("qwen_cost", 0.0))
              + float(acc.get("deepseek_cost", 0.0)) + float(acc.get("xiaomi_cost", 0.0))
+             + float(acc.get("openrouter_cost", 0.0))
              + open_money)
 
     start_dt = _parse_utc(acc.get("start_utc") or "") or snapshot_dt

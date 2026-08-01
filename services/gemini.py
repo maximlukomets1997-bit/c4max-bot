@@ -47,6 +47,9 @@ from config import (
     XIAOMI_API_URL,
     XIAOMI_API_KEY,
     XIAOMI_PRICES,
+    OPENROUTER_API_URL,
+    OPENROUTER_API_KEY,
+    OPENROUTER_PRICES,
     QWEN_PRICES,
     IMAGE_PRICES,
     FALLBACK_MODEL,
@@ -135,7 +138,8 @@ def _notify_admins_fallback(active_model: str, used_model: str) -> None:
 # ───────────────────────────────────────────────
 
 def _provider_of(model_name: str) -> str:
-    """Какому сервису принадлежит модель: 'gemini' (по умолчанию), 'qwen' или 'deepseek'."""
+    """Какому сервису принадлежит модель: 'gemini' (по умолчанию), 'qwen',
+    'deepseek', 'xiaomi' или 'openrouter'."""
     return AVAILABLE_MODELS.get(model_name, {}).get("provider", "gemini")
 
 
@@ -379,7 +383,11 @@ def _openai_stream_request(model_name: str, messages: list, api_url: str,
                 usage = obj["usage"]
             for choice in (obj.get("choices") or []):
                 delta = choice.get("delta") or {}
-                rc = delta.get("reasoning_content")
+                # Мысли называются по-разному: Qwen, DeepSeek и Xiaomi шлют их
+                # в reasoning_content, OpenRouter — в reasoning (он приводит
+                # ответы разных вендоров к своему виду). Берём то, что пришло;
+                # прислать оба поля разом никто не может, так что удвоения нет.
+                rc = delta.get("reasoning_content") or delta.get("reasoning")
                 if rc:
                     reasoning_parts.append(rc)
                 c = delta.get("content")
@@ -432,6 +440,60 @@ def _xiaomi_chat_request(model_name: str, messages: list, thinking_override: boo
     return _openai_stream_request(
         model_name, messages, XIAOMI_API_URL, XIAOMI_API_KEY, extra,
     )
+
+
+def _openrouter_chat_request(model_name: str, messages: list, thinking_override: bool | None = None):
+    """Запрос к OpenRouter (2026-08-01, ради временной модели Ling 3.0 Flash).
+
+    Управление размышлениями у OpenRouter СВОЁ, третье по счёту: не
+    enable_thinking (Qwen) и не thinking (DeepSeek/Xiaomi), а поле reasoning —
+    единый вид, к которому он приводит параметры всех вендоров сразу.
+    effort="high" — самая глубокая из его ступеней, то же решение о максимуме,
+    что у DeepSeek и Xiaomi (там оно называется reasoning_effort="xhigh").
+    ⚠️ Для ГИБРИДНОЙ модели (Ling 3.0 Flash) это именно ПРОСЬБА, а не приказ:
+    над простым вопросом она может не думать вовсе, и пустых размышлений
+    в логе пугаться не надо.
+
+    "usage": {"include": True} просит OpenRouter вернуть ФАКТИЧЕСКИ списанную
+    сумму (usage.cost). Ради неё всё и затевается: один и тот же слаг у него
+    обслуживают разные поставщики по разной цене, и зашитая в config таблица
+    была бы средним по больнице — она остаётся лишь запасным путём."""
+    if _is_thinking(model_name, thinking_override):
+        extra = {"reasoning": {"enabled": True, "effort": "high"}}
+    else:
+        extra = {"reasoning": {"enabled": False}}
+    extra["usage"] = {"include": True}
+    return _openai_stream_request(
+        model_name, messages, OPENROUTER_API_URL, OPENROUTER_API_KEY, extra,
+    )
+
+
+def _openrouter_cost(model_name: str, usage: dict):
+    """Стоимость запроса OpenRouter в долларах.
+
+    ДВА источника, именно в этом порядке:
+      1. usage.cost — сколько списано на самом деле (приходит благодаря
+         "usage": {"include": True} в запросе). Точнее не бывает.
+      2. Таблица OPENROUTER_PRICES — если поле не пришло (старый ответ,
+         сбой на их стороне). Кэш вход приходит как у Qwen и Xiaomi,
+         в prompt_tokens_details.cached_tokens.
+    None — ни того, ни другого: модели нет в таблице цен, а сумму не прислали.
+    У бесплатного варианта модели честный ноль, а не отсутствие цены."""
+    cost = usage.get("cost")
+    if cost is not None:
+        try:
+            return float(cost)
+        except (TypeError, ValueError):
+            pass
+    prices = OPENROUTER_PRICES.get(model_name)
+    if not prices:
+        return None
+    total_in = usage.get("prompt_tokens", 0) or 0
+    hit = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0) or 0
+    hit = min(hit, total_in)
+    miss = max(0, total_in - hit)
+    out = usage.get("completion_tokens", 0) or 0
+    return (hit * prices["cache_hit"] + miss * prices["cache_miss"] + out * prices["output"]) / 1_000_000
 
 
 def _xiaomi_cost(model_name: str, usage: dict):
@@ -609,8 +671,9 @@ def _gemini_chat_request(messages: list, kind: str = "текст", has_image: bo
     пользователю, принимает вызывающий код (мягкое сообщение, без деталей ошибки).
 
     Маршрутизация по провайдеру: модели Gemini идут на GEMINI_API_URL с ключом
-    GEMINI_API_KEY (нестриминговый JSON), модели Qwen, DeepSeek и Xiaomi — каждая
-    на свой адрес со своим ключом (потоковый разбор в _openai_stream_request).
+    GEMINI_API_KEY (нестриминговый JSON), модели Qwen, DeepSeek, Xiaomi и
+    OpenRouter — каждая на свой адрес со своим ключом (потоковый разбор
+    в _openai_stream_request).
     Цепочка фолбэка может смешивать провайдеров: каждая модель сама знает свой
     адрес и ключ.
 
@@ -637,6 +700,11 @@ def _gemini_chat_request(messages: list, kind: str = "текст", has_image: bo
                     data = _xiaomi_chat_request(model_name, messages, thinking_override)
                     if data is None:
                         raise ValueError("пустой ответ Xiaomi")
+                    return data
+                if provider == "openrouter":
+                    data = _openrouter_chat_request(model_name, messages, thinking_override)
+                    if data is None:
+                        raise ValueError("пустой ответ OpenRouter")
                     return data
                 # provider == "gemini"
                 payload = {
@@ -719,16 +787,20 @@ def _gemini_chat_request(messages: list, kind: str = "текст", has_image: bo
         # чтобы пережить сбой целого сервиса и не жечь зря токены думающих моделей.
         #   • активная Gemini        → Gemini-lite, ещё одна Gemini-lite, и в самом
         #     конце Qwen (последний рубеж на случай падения всего Google);
-        #   • активная Qwen/DeepSeek/Xiaomi → сразу бесплатные Gemini-lite (другой провайдер).
+        #   • активная Qwen/DeepSeek/Xiaomi/OpenRouter → сразу бесплатные Gemini-lite
+        #     (другой провайдер).
         # Модели Xiaomi MiMo сами в подстраховку НЕ ставятся (решение Максима
         # 2026-07-25 — сначала посмотреть их в деле), но подстраховываются как все.
+        # Ling 3.0 Flash (OpenRouter, 2026-08-01) — тем более: она взята ВРЕМЕННО
+        # и на бесплатном тарифе с ограничением частоты запросов. Упрётся в лимит
+        # (429) — цепочка сама уведёт запрос на Gemini, человек этого не заметит.
         # active_model НЕ меняется — фолбэк временный, на один запрос.
         # 2026-07-24: вторым звеном была gemini-2.5-flash-lite — удалена вместе
         # со всей 2.5-серией; её место заняла gemini-3.1-flash-lite (решение
         # Максима: «3.1 Flash-Lite оставить в цепочке следующей за 3.6 Flash»).
         if _provider_of(active_model) == "gemini":
             fallback_candidates = [FALLBACK_MODEL, "gemini-3.1-flash-lite", "qwen3.7-plus"]
-        else:  # активная — Qwen, DeepSeek или Xiaomi
+        else:  # активная — Qwen, DeepSeek, Xiaomi или OpenRouter
             fallback_candidates = [FALLBACK_MODEL, "gemini-3.1-flash-lite"]
 
         chain = [active_model]
@@ -792,6 +864,21 @@ def _gemini_chat_request(messages: list, kind: str = "текст", has_image: bo
                         hist.add_xiaomi_cost(_cost)
                     except Exception as e:
                         logger.warning("⚠️ Не удалось записать расход Xiaomi в БД: %s", e)
+                _cached = (_u.get("prompt_tokens_details") or {}).get("cached_tokens", 0) or 0
+                logger.info("%s Ответ от %s за %.1f с | контекст=%s (из кэша %s) | ответ=%s | размышления=%s | всего=%s | ≈$%.6f",
+                            _icon_of(model_name), model_name, elapsed, _pt, _cached, _ct, _think, _tt, _cost or 0.0)
+            elif _provider_of(model_name) == "openrouter":
+                # OpenRouter (2026-08-01): сумму он присылает сам (usage.cost),
+                # таблица цен — запасной путь; копим в settings и вычитаем из
+                # остатка кредитов, как у DeepSeek и Xiaomi. У бесплатного
+                # варианта модели это честные нули: строка лога всё равно
+                # нужна, чтобы видеть, что счёт ведётся и не сломался.
+                _cost = _openrouter_cost(model_name, _u)
+                if _cost is not None:
+                    try:
+                        hist.add_openrouter_cost(_cost)
+                    except Exception as e:
+                        logger.warning("⚠️ Не удалось записать расход OpenRouter в БД: %s", e)
                 _cached = (_u.get("prompt_tokens_details") or {}).get("cached_tokens", 0) or 0
                 logger.info("%s Ответ от %s за %.1f с | контекст=%s (из кэша %s) | ответ=%s | размышления=%s | всего=%s | ≈$%.6f",
                             _icon_of(model_name), model_name, elapsed, _pt, _cached, _ct, _think, _tt, _cost or 0.0)
