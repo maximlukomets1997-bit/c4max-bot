@@ -247,11 +247,12 @@ async def _monthly_stats_reset(application) -> None:
     """
     Месячный сброс счётчиков панели «📡 Настройки API»: вызовы моделей
     (таблица api_calls) и накопленные расходы (qwen/image_cost_usd).
-    ⚠️ Расходы DeepSeek (deepseek_cost_usd) и Xiaomi (xiaomi_cost_usd) НЕ
-    обнуляются — ведутся «за всё время» и сверяются с кабинетами провайдеров
-    (решение Максима: DeepSeek 2026-07-21, Xiaomi 2026-07-25). У обоих в
-    settings есть остаток счёта, который тает сам, — обнуление расхода
-    разрушило бы сверку.
+    ⚠️ Расходы DeepSeek (deepseek_cost_usd), Xiaomi (xiaomi_cost_usd) и
+    OpenRouter (openrouter_cost_usd) НЕ обнуляются — ведутся «за всё время»
+    и сверяются с кабинетами провайдеров (решение Максима: DeepSeek 2026-07-21,
+    Xiaomi 2026-07-25; OpenRouter заведён 2026-08-01 по тому же образцу).
+    У всех троих в settings есть остаток счёта, который тает сам, — обнуление
+    расхода разрушило бы сверку.
 
     Вызывается раз в сутки из cleanup_loop: сверяет текущий месяц (по Киеву)
     с меткой settings 'stats_reset_month'. Месяц сменился → каждому админу
@@ -292,6 +293,7 @@ async def _monthly_stats_reset(application) -> None:
     qw = _cost("qwen_cost_usd")
     img = _cost("image_cost_usd")
     xm = _cost("xiaomi_cost_usd")
+    orx = _cost("openrouter_cost_usd")
 
     calls_lines = "\n".join(
         f"  • <code>{name}</code>: <b>{cnt}</b>"
@@ -304,6 +306,7 @@ async def _monthly_stats_reset(application) -> None:
         f"💰 <b>Расходы:</b>\n"
         f"  • DeepSeek: <b>${ds:.6f}</b> <i>(за всё время, не обнуляется)</i>\n"
         f"  • Xiaomi: <b>${xm:.6f}</b> <i>(за всё время, не обнуляется)</i>\n"
+        f"  • OpenRouter: <b>${orx:.6f}</b> <i>(за всё время, не обнуляется)</i>\n"
         f"  • Qwen: <b>${qw:.6f}</b>\n"
         f"  • Картинки: <b>${img:.6f}</b>\n"
         f"───────────────────────────\n"
