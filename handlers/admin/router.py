@@ -27,7 +27,8 @@ from .panel_main import (_build_api_keyboard, _handle_balance_callback, build_ad
                          send_stats_panel)
 from .panel_mod import _handle_mod_callback, send_mod_panel
 from .panel_prompts import (_build_prompt_panel_text_and_keyboard, _handle_proactive_callback,
-                            _handle_proactive_wipe, send_prompts_panel, send_prompt_files)
+                            _handle_proactive_wipe, handle_prompt_reset,
+                            send_prompts_panel, send_prompt_files)
 from .panel_rag import _end_kb_test, _handle_kb_callback, send_rag_panel
 from .panel_users import _handle_users_callback, send_users_panel
 
@@ -370,108 +371,21 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         context.application.stop_running()
         return
 
-    if data == "prompt_reset_confirm":
-        set_setting("custom_system_prompt", "")
-        set_setting("prompt_additions", "")
-        logger.info("🔧 Админ %s сбросил системный промпт к заводским настройкам", user_id)
-        await query.answer("✅ Промпт сброшен к заводским настройкам!", show_alert=True)
-        try:
-            await query.edit_message_text(
-                "✅ <b>Системный промпт сброшен!</b>\n\n"
-                "Кастомный промпт и все дополнения удалены.\n"
-                "Бот снова использует заводской промпт из <code>config.py</code>.",
-                parse_mode=ParseMode.HTML
-            )
-        except Exception as e:
-            logger.warning("⚠️ Не удалось обновить сообщение сброса промпта: %s", e)
-        return
-
-    if data == "prompt_reset_cancel":
-        await query.answer("Отменено.", show_alert=False)
-        try:
-            await query.edit_message_text(
-                "🔄 <b>Сброс промпта отменён.</b>\n\nТекущий промпт остался без изменений.",
-                parse_mode=ParseMode.HTML
-            )
-        except Exception as e:
-            logger.warning("⚠️ Не удалось обновить сообщение отмены сброса: %s", e)
-        return
-
-    if data == "news_prompt_reset_confirm":
-        set_setting("news_system_prompt", "")
-        logger.info("🔧 Админ %s удалил промпт новостей", user_id)
-        await query.answer("✅ Промпт новостей удалён!", show_alert=True)
-        try:
-            await query.edit_message_text(
-                "✅ <b>Промпт новостей удалён!</b>\n\n"
-                "Новости теперь форматируются без системного промпта.",
-                parse_mode=ParseMode.HTML
-            )
-        except Exception as e:
-            logger.warning("⚠️ Не удалось обновить сообщение сброса промпта новостей: %s", e)
-        return
-
-    if data == "news_prompt_reset_cancel":
-        await query.answer("Отменено.", show_alert=False)
-        try:
-            await query.edit_message_text(
-                "🔄 <b>Сброс промпта новостей отменён.</b>\n\nТекущий промпт остался без изменений.",
-                parse_mode=ParseMode.HTML
-            )
-        except Exception as e:
-            logger.warning("⚠️ Не удалось обновить сообщение отмены сброса промпта новостей: %s", e)
-        return
-
-    if data == "rag_prompt_reset_confirm":
-        # Удаляем свою инструкцию — get_rag_instruction вернётся к заводской.
-        set_setting("rag_instruction", "")
-        logger.info("🔧 Админ %s вернул заводскую RAG-инструкцию", user_id)
-        await query.answer("✅ Заводская RAG-инструкция возвращена!", show_alert=True)
-        try:
-            await query.edit_message_text(
-                "✅ <b>Заводская RAG-инструкция возвращена.</b>\n\n"
-                "Своя удалена — модель снова получает стандартную «шапку» перед статьями.",
-                parse_mode=ParseMode.HTML
-            )
-        except Exception as e:
-            logger.warning("⚠️ Не удалось обновить сообщение сброса RAG-инструкции: %s", e)
-        return
-
-    if data == "rag_prompt_reset_cancel":
-        await query.answer("Отменено.", show_alert=False)
-        try:
-            await query.edit_message_text(
-                "🔄 <b>Возврат заводской RAG-инструкции отменён.</b>\n\nТвоя инструкция осталась без изменений.",
-                parse_mode=ParseMode.HTML
-            )
-        except Exception as e:
-            logger.warning("⚠️ Не удалось обновить сообщение отмены сброса RAG-инструкции: %s", e)
-        return
-
-    if data == "proactive_prompt_reset_confirm":
-        # Удаляем свою инструкцию — get_proactive_instruction вернётся к заводской.
-        set_setting("proactive_instruction", "")
-        logger.info("🔧 Админ %s вернул заводскую инструкцию участия в разговоре", user_id)
-        await query.answer("✅ Заводская инструкция участия возвращена!", show_alert=True)
-        try:
-            await query.edit_message_text(
-                "✅ <b>Заводская инструкция участия в разговоре возвращена.</b>\n\n"
-                "Своя удалена — режим «Сам в разговор» снова работает по стандартным правилам.",
-                parse_mode=ParseMode.HTML
-            )
-        except Exception as e:
-            logger.warning("⚠️ Не удалось обновить сообщение сброса инструкции участия: %s", e)
-        return
-
-    if data == "proactive_prompt_reset_cancel":
-        await query.answer("Отменено.", show_alert=False)
-        try:
-            await query.edit_message_text(
-                "🔄 <b>Возврат заводской инструкции участия отменён.</b>\n\nТвоя инструкция осталась без изменений.",
-                parse_mode=ParseMode.HTML
-            )
-        except Exception as e:
-            logger.warning("⚠️ Не удалось обновить сообщение отмены сброса инструкции участия: %s", e)
+    # ── Подтверждение и отмена сброса ЧЕТЫРЁХ промптов ─────────────────
+    # Восемь кнопок, одна логика: стереть ключ в settings → попап →
+    # переписать сообщение. Тексты и ключи — в таблице `_PROMPT_RESETS`
+    # (panel_prompts.py), там же исполнитель `handle_prompt_reset`.
+    # ⚠️ СПИСОК ЛИТЕРАЛОВ НИЖЕ НЕ ЗАМЕНЯТЬ ВЫЧИСЛЯЕМЫМ (`_PROMPT_RESET_CALLBACKS`
+    # или приставкой): preflight.py читает роутер разбором ast и видит только
+    # `data == "…"`, `data in (…)` и `data.startswith("…")` — за вычисляемым
+    # ключом проверка «кнопки ↔ роутер» объявит все восемь необработанными.
+    # Отвечает на callback сам handle_prompt_reset, здесь `query.answer` НЕТ:
+    # второй ответ Telegram отбивает ошибкой, и кнопка выглядит зависшей.
+    if data in ("prompt_reset_confirm", "prompt_reset_cancel",
+                "news_prompt_reset_confirm", "news_prompt_reset_cancel",
+                "rag_prompt_reset_confirm", "rag_prompt_reset_cancel",
+                "proactive_prompt_reset_confirm", "proactive_prompt_reset_cancel"):
+        await handle_prompt_reset(query, user_id, data)
         return
 
     if data == "toggle_admin_prompt":
