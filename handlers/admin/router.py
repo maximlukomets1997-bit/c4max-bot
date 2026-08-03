@@ -502,6 +502,32 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             logger.warning("⚠️ Не удалось обновить клавиатуру тумблера ответов ИИ: %s", e)
         return
 
+    if data == "toggle_thoughts":
+        # Тумблер «🧠 МЫСЛИ ПОД КАПОТОМ» (2026-08-03, просьба Максима):
+        # прячет и открывает свёрнутую цитату с рассуждениями модели.
+        # Настройка ОБЩАЯ — действует в личке, в группах и в режиме
+        # «Сам в разговор»; применяется в utils_format.build_text_and_entities.
+        # ⚠️ Модели при этом продолжают думать: тумблер про ПОКАЗ, а не про
+        # расход токенов — обещать здесь экономию нельзя.
+        from utils_format import THOUGHTS_SETTING_KEY, thoughts_enabled
+        cur_on = thoughts_enabled()
+        new_val = "0" if cur_on else "1"
+        set_setting(THOUGHTS_SETTING_KEY, new_val)
+        state = "показываются" if new_val == "1" else "скрыты"
+        logger.info("🔧 Админ %s: мысли под капотом %s (для всех)", user_id, state)
+        _audit(user_id, "thoughts", 0, f"мысли под капотом {state}")
+        await query.answer(
+            f"🧠 Мысли под капотом {state}."
+            + ("" if new_val == "1" else " Модели всё равно думают — прячется только цитата."),
+            show_alert=True,
+        )
+        try:
+            _, prompt_markup = _build_prompt_panel_text_and_keyboard(user_id)
+            await query.edit_message_reply_markup(reply_markup=prompt_markup)
+        except Exception as e:
+            logger.warning("⚠️ Не удалось обновить клавиатуру тумблера мыслей: %s", e)
+        return
+
     if data.startswith("set_model:"):
         new_model = data.split(":", 1)[1]
         if new_model not in AVAILABLE_MODELS:
