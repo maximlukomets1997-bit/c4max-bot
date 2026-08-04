@@ -183,7 +183,7 @@ def check_providers():
          провайдер потерял бы кнопку правки остатка.
     """
     import config
-    from handlers.admin import panel_main
+    from handlers.admin import panel_balance
 
     problems = []
     fields = {"icon", "title", "calls_label", "money_label", "cost_key",
@@ -206,11 +206,11 @@ def check_providers():
                             f"сумма в панели API станет ссылкой в никуда")
         if meta.get("balance_key") and not meta.get("balance_btn"):
             problems.append(f"у провайдера {pid} есть счёт, но нет надписи кнопки balance_btn")
-        if meta.get("cost_key") and pid not in panel_main._COST_ORDER:
-            problems.append(f"провайдер {pid} не попал в panel_main._COST_ORDER — "
+        if meta.get("cost_key") and pid not in panel_balance._COST_ORDER:
+            problems.append(f"провайдер {pid} не попал в panel_balance._COST_ORDER — "
                             f"его не будет на экране «Обнулить потрачено»")
-        if meta.get("balance_key") and pid not in panel_main._BALANCE_ORDER:
-            problems.append(f"провайдер {pid} не попал в panel_main._BALANCE_ORDER — "
+        if meta.get("balance_key") and pid not in panel_balance._BALANCE_ORDER:
+            problems.append(f"провайдер {pid} не попал в panel_balance._BALANCE_ORDER — "
                             f"его остаток нельзя будет поправить кнопкой")
 
     return problems, f"провайдеров: {len(providers)} ({', '.join(sorted(providers))})"
@@ -338,6 +338,21 @@ def _callback_literals():
                             break
                     if head:
                         out.append((head, rel, value.lineno))
+
+    # ⚠️ КНОПКИ, СОБРАННЫЕ f-СТРОКОЙ С ПЕРЕМЕННОЙ В НАЧАЛЕ, разбор выше НЕ
+    # видит: неизменного начала у них нет, и они молча выпадают из проверки.
+    # Так случилось 2026-08-03 с восемью кнопками подтверждения сброса
+    # промптов (`f"{name}_reset_confirm"`) — счётчик проверенных кнопок тихо
+    # упал со 140 до 132, и никто бы не заметил. Достраиваем их ИЗ ТОЙ ЖЕ
+    # таблицы, по которой их строит панель.
+    try:
+        from handlers.admin.panel_prompts import _PROMPTS
+        for name in _PROMPTS:
+            for action in ("confirm", "cancel"):
+                out.append((f"{name}_reset_{action}",
+                            "handlers/admin/panel_prompts.py (собрана f-строкой)", 0))
+    except Exception:
+        pass
     return out
 
 
@@ -397,9 +412,10 @@ def check_panels():
     смотрящего, а нам нужен самый полный вариант — в нём больше всего кнопок.
     """
     from services import roles, user_settings
-    from handlers.admin.panel_main import (_build_api_keyboard, _build_balance_panel,
+    from handlers.admin.panel_balance import _build_balance_panel, _build_zero_panel
+    from handlers.admin.panel_main import (_build_api_keyboard,
                                            _build_model_panel_text_and_keyboard,
-                                           _build_zero_panel, build_adm_keyboard)
+                                           build_adm_keyboard)
     from handlers.admin.panel_mod import _build_mod_panel_text_and_keyboard
     from handlers.admin.panel_prompts import (_build_proactive_stats_panel,
                                               _build_prompt_panel_text_and_keyboard)
