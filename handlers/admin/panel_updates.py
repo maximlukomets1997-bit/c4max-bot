@@ -34,7 +34,7 @@ _PAGE_SIZE = 8
 
 # Предел длины надписи на кнопке. Длиннее Telegram не отбивает, но переносит
 # в несколько строк, и список перестаёт читаться.
-_LABEL_MAX = 42
+_LABEL_MAX = 46
 
 
 def _back_rows():
@@ -47,15 +47,24 @@ def _back_rows():
 
 
 def _label(item: dict) -> str:
-    """Надпись кнопки: «04.08 · Каталог техники: выход в главное меню»."""
+    """
+    Надпись кнопки: «04.08 · v3.82 · Каталог техники: выход в главное меню» —
+    порядок задан Максимом: сначала дата, потом версия, потом название.
+
+    Версию спрашиваем у git ТОЛЬКО для показанной страницы (см. `version_of`).
+    Её может не быть вовсе (файла VERSION в том коммите ещё не было) — тогда
+    надпись собирается из даты и названия, без пустого разделителя.
+    """
     from services import update_log
 
     title = item["title"]
     day = update_log.fmt_day(item["ts"])
-    room = _LABEL_MAX - len(day) - 3  # 3 символа на разделитель « · »
+    version = update_log.version_of(item["sha"])
+    head = f"{day} · v{version}" if version else day
+    room = _LABEL_MAX - len(head) - 3  # 3 символа на разделитель « · »
     if len(title) > room:
         title = title[:max(1, room - 1)].rstrip() + "…"
-    return f"{day} · {title}"
+    return f"{head} · {title}"
 
 
 def _build_updates_panel(page: int = 0):
