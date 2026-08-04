@@ -793,6 +793,7 @@ async def _sync_staff_menu(bot, user_id: int, is_staff_now: bool) -> None:
     public = [
         BotCommand("start", "Перезапустить бота / Приветствие"),
         BotCommand("help", "Справка по возможностям"),
+        BotCommand("ttx", "ТТХ техники из базы знаний"),
         BotCommand("imagine", "Сгенерировать изображение"),
         BotCommand("rank", "Моё личное дело и звание"),
         BotCommand("subscribe", "Подписаться на новости C4_Max"),
