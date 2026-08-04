@@ -35,6 +35,8 @@ def _build_mod_panel_text_and_keyboard(viewer_id: int = 0):
     нажатия ➖/➕.
     """
     from services.antispam import is_enabled, is_linkfilter_enabled, get_thresholds, get_mute_stats, get_recent_actions, MOD_STATS_DAYS
+    from services import greeter
+    from database.history import get_join_counts
     from config import LINKFILTER_WHITELIST, LINKFILTER_MUTE_COUNT
     enabled = is_enabled()
     lf_enabled = is_linkfilter_enabled()
@@ -44,6 +46,18 @@ def _build_mod_panel_text_and_keyboard(viewer_id: int = 0):
     lf_status = "🟢 ВКЛЮЧЁН" if lf_enabled else "🔴 ВЫКЛЮЧЕН"
     minutes = max(1, mute_sec // 60)
     stats = get_mute_stats()
+
+    # 👋 Приветствие новичков (2026-08-04)
+    greet_on = greeter.is_enabled()
+    greet_captcha = greeter.captcha_enabled()
+    greet_kick = greeter.kick_enabled()
+    greet_sec = greeter.timeout_sec()
+    greet_min = max(1, greet_sec // 60)
+    try:
+        joins = get_join_counts(MOD_STATS_DAYS)
+    except Exception as e:
+        logger.debug("👋 Не удалось прочитать журнал вступлений: %s", e)
+        joins = {"joins": 0, "ok": 0, "timeouts": 0, "kicks": 0}
 
     text = (
         "<b>⚙️НАСТРОЙКИ —🛡DDoS-Guard</b>\n"
@@ -55,6 +69,14 @@ def _build_mod_panel_text_and_keyboard(viewer_id: int = 0):
         f"🔗 Фильтр ссылок: <b>{lf_status}</b>\n"
         f"• Разрешены: {', '.join(LINKFILTER_WHITELIST)}\n"
         f"• {LINKFILTER_MUTE_COUNT} удалённые ссылки за час = мут\n"
+        "───────────────────────────\n"
+        f"👋 Приветствие новичков: <b>{'🟢 ВКЛЮЧЕНО' if greet_on else '🔴 ВЫКЛЮЧЕНО'}</b>\n"
+        f"• Проверка «я не бот»: <b>{'🟢 ВКЛЮЧЕНА' if greet_captcha else '🔴 ВЫКЛЮЧЕНА'}</b>"
+        f" · срок <b>{greet_min}</b> мин\n"
+        f"• Не прошёл — кикать: <b>{'🟢 ДА' if greet_kick else '🔴 НЕТ'}</b>\n"
+        f"• За {MOD_STATS_DAYS} дней: пришло <b>{joins['joins']}</b> · "
+        f"прошли <b>{joins['ok']}</b> · не прошли <b>{joins['timeouts']}</b> · "
+        f"выгнано <b>{joins['kicks']}</b>\n"
         "───────────────────────────\n"
         f"📋 За {MOD_STATS_DAYS} дней: мутов <b>{stats.get('mutes', 0)}</b> · "
         f"размутов <b>{stats.get('unmutes', 0)}</b> · "
@@ -131,6 +153,20 @@ def _build_mod_panel_text_and_keyboard(viewer_id: int = 0):
             InlineKeyboardButton(f"{mute_sec} сек", callback_data="mod:antispam:noop"),
             InlineKeyboardButton("➕ мут", callback_data="mod:antispam:mute_inc"),
         ],
+        # 👋 Приветствие новичков. Свои ряды у каждого тумблера: надписи
+        # длинные, в половину ширины не влезают (то же правило, что у
+        # «⬇️ ОБНОВЛЕНИЕ» и «🧠 МЫСЛИ ПОД КАПОТОМ»).
+        [InlineKeyboardButton(f"👋 Приветствие новичков: {_onoff(greet_on)}",
+                              callback_data="mod:greet:toggle")],
+        [InlineKeyboardButton(f"🤖 Проверка «я не бот»: {_onoff(greet_captcha)}",
+                              callback_data="mod:greet:captcha")],
+        [
+            InlineKeyboardButton("➖ срок", callback_data="mod:greet:time_dec"),
+            InlineKeyboardButton(f"{greet_min} мин", callback_data="mod:greet:noop"),
+            InlineKeyboardButton("➕ срок", callback_data="mod:greet:time_inc"),
+        ],
+        [InlineKeyboardButton(f"👢 Кикать не прошедших: {_onoff(greet_kick)}",
+                              callback_data="mod:greet:kick")],
     ]
     # Ряды кнопок просмотра удалённого (по 2 в ряд), если есть недавние муты.
     for i in range(0, len(evidence_buttons), 2):
@@ -154,6 +190,9 @@ _MOD_LIMITS = {
     "antispam_msg_count":   {"step": 1,  "min": 2,  "max": 50},
     "antispam_window_sec":  {"step": 1,  "min": 2,  "max": 60},
     "antispam_mute_sec":    {"step": 60, "min": 30, "max": 86400},
+    # Срок на проверку «я не бот»: от минуты (успеет только живой человек,
+    # уже открывший чат) до часа (человек мог зайти и отложить телефон).
+    "greet_timeout_sec":    {"step": 60, "min": 60, "max": 3600},
 }
 
 
@@ -174,7 +213,8 @@ async def _handle_mod_callback(update, context, query, user_id, data):
     """
     Роутер панели модерации. Формат: mod:<секция>:<действие...>.
     Гейт ADMIN_IDS уже пройден выше по стеку (в handle_callback_query).
-    Секции: antispam (настройки), unmute (снять мут по кнопке из уведомления),
+    Секции: antispam (настройки), greet (приветствие новичков),
+    unmute (снять мут по кнопке из уведомления),
     evidence (показ удалённых сообщений за мут / возврат к панели),
     clearlog / clearlog_yes (очистка журнала модерации, только владелец).
     """
@@ -183,6 +223,10 @@ async def _handle_mod_callback(update, context, query, user_id, data):
 
     if section == "antispam":
         await _handle_antispam_callback(update, query, parts)
+        return
+
+    if section == "greet":
+        await _handle_greet_callback(query, parts)
         return
 
     if section == "unmute":
@@ -285,6 +329,64 @@ async def _handle_antispam_callback(update, query, parts):
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
     except Exception as e:
         logger.debug("🛡 Не удалось обновить панель модерации: %s", e)
+
+
+async def _handle_greet_callback(query, parts):
+    """
+    Ветки mod:greet:<действие> — приветствие новичков (2026-08-04):
+    три тумблера и регулятор срока проверки «я не бот».
+
+    Настройки общие на все группы (как пороги антифлуда), поэтому уровень
+    владельца — он задан в таблице прав (`mod:greet:` в services/roles.py),
+    прятать кнопки здесь не нужно, это сделает `_filter_keyboard`.
+    """
+    from config import GREET_TIMEOUT_SEC
+    from services import greeter
+
+    action = parts[2] if len(parts) > 2 else ""
+    actor_id = query.from_user.id
+
+    if action == "noop":
+        await query.answer()
+        return
+
+    # Тумблеры: ключ в settings, читалка состояния и слова для попапа/журнала.
+    toggles = {
+        "toggle":  ("greet_enabled", greeter.is_enabled,      "приветствие новичков"),
+        "captcha": ("greet_captcha", greeter.captcha_enabled, "проверка «я не бот»"),
+        "kick":    ("greet_kick",    greeter.kick_enabled,    "кик не прошедших проверку"),
+    }
+
+    if action in toggles:
+        key, reader, title = toggles[action]
+        new_val = "0" if reader() else "1"
+        set_setting(key, new_val)
+        state = "включено" if new_val == "1" else "выключено"
+        logger.info("👋 /mod: %s — %s", title, state)
+        _audit(actor_id, "greet", 0, f"{title}: {state}")
+        await query.answer(f"👋 {title.capitalize()}: {state}", show_alert=False)
+    elif action in ("time_inc", "time_dec"):
+        before = greeter.timeout_sec()
+        after = _adjust_setting("greet_timeout_sec", GREET_TIMEOUT_SEC,
+                                1 if action.endswith("inc") else -1)
+        if after == before:
+            # Упёрлись в границу: панель получилась бы точь-в-точь прежней, а
+            # Telegram на такую перерисовку отвечает ошибкой «Message is not
+            # modified» — кнопка выглядела бы мёртвой, а в логе копился шум.
+            await query.answer(f"Уже {max(1, before // 60)} мин — дальше некуда.")
+            return
+        logger.info("👋 /mod: срок проверки «я не бот» = %d сек", after)
+        _audit(actor_id, "greet", 0, f"срок проверки = {after} сек")
+        await query.answer()
+    else:
+        await query.answer()
+        return
+
+    text, markup = _build_mod_panel_text_and_keyboard(actor_id)
+    try:
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+    except Exception as e:
+        logger.debug("👋 Не удалось обновить панель модерации: %s", e)
 
 
 async def _handle_unmute_callback(update, query, parts):

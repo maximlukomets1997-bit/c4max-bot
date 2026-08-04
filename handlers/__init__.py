@@ -1,9 +1,10 @@
-from telegram.ext import CommandHandler, MessageHandler, CallbackQueryHandler, PollAnswerHandler, filters
+from telegram.ext import CommandHandler, MessageHandler, CallbackQueryHandler, ChatMemberHandler, PollAnswerHandler, filters
 from .commands import cmd_start, cmd_help, cmd_clear, cmd_subscribe, cmd_unsubscribe, handle_unknown_command, log_incoming_command
 from .admin import cmd_prompt_set, cmd_prompt_add, cmd_prompt_reset, cmd_stats, cmd_mod, cmd_adm, cmd_rag, cmd_unmute, cmd_users, handle_callback_query, cmd_news_prompt_set, cmd_news_prompt_reset, cmd_rag_prompt_set, cmd_rag_prompt_reset, cmd_proactive_prompt_set, cmd_proactive_prompt_reset, handle_kb_document
 from .media import cmd_imagine
 from .messages import handle_message, handle_photo, handle_voice, handle_video, collect_group_message
 from .quiz import cmd_rank, handle_poll_answer
+from services.greeter import on_chat_member
 
 
 async def _note_chat_activity(update, context):
@@ -67,6 +68,13 @@ def setup_handlers(application):
     application.add_handler(MessageHandler(filters.VIDEO, handle_video, block=False))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message, block=False))
     application.add_handler(MessageHandler(filters.COMMAND, handle_unknown_command))
+
+    # 👋 Приветствие новичков (2026-08-04): событие «участник группы сменил
+    # статус». Обработчик разбирает ТОЛЬКО вступления и уходы (services/greeter.py).
+    # ⚠️ Событий chat_member Telegram по умолчанию НЕ ПРИСЫЛАЕТ — они запрошены
+    # явным списком allowed_updates в main.py. Уберёшь его — этот обработчик
+    # молча перестанет срабатывать, без единой ошибки в логе.
+    application.add_handler(ChatMemberHandler(on_chat_member, ChatMemberHandler.CHAT_MEMBER))
 
     # Handler group=1: runs independently from group=0, captures ALL group messages for context archiving
     group_filter = (filters.TEXT | filters.PHOTO | filters.VOICE | filters.AUDIO | filters.VIDEO) & (filters.ChatType.GROUP | filters.ChatType.SUPERGROUP)
