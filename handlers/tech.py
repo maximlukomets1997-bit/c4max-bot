@@ -224,13 +224,24 @@ def catalog_text(bot) -> str:
 
 
 def catalog_keyboard() -> InlineKeyboardMarkup:
-    """Кнопки классов техники — по два в ряд, с числом статей."""
+    """
+    Кнопки классов техники — по два в ряд, с числом статей, и ВЫХОД в главное
+    меню последним рядом.
+
+    Выход обязателен: каталог — верхний экран справочника, и без него человек,
+    зашедший сюда с /start, упирался в тупик (просьба Максима 2026-08-04).
+    Цепочка возвратов теперь замкнута целиком: карточка → список своего класса
+    → классы → главное меню. Ведёт он на `menu:back` — тот же callback, что у
+    остальных возвратов в меню; своего заводить нельзя, иначе экранов «главное
+    меню» станет два и они разъедутся.
+    """
     buttons = [
         InlineKeyboardButton(f"{icon} {name.capitalize()} ({count})",
                              callback_data=f"ttx:k:{kind}:0")
         for kind, icon, name, count in tech_card.kinds_summary()
     ]
     rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    rows.append([InlineKeyboardButton("⬅️ Главное меню", callback_data="menu:back")])
     return InlineKeyboardMarkup(rows)
 
 
