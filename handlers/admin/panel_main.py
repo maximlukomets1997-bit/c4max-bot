@@ -131,7 +131,18 @@ async def send_stats_panel(bot, chat_id: int, user_id: int):
         # меняешь срок там — поменяй подпись здесь.
         f"📝 <b>Архив группы за последние 10 дней: {stats['group_msg_count']}</b>"
     )
-    await _send_panel_message(bot, chat_id, text, InlineKeyboardMarkup([_adm_back_row()]))
+    # 📊 Недельный дайджест группы (2026-08-04) живёт ИМЕННО ЗДЕСЬ, а не в
+    # /mod: он про жизнь чата, а не про наказания, и собирается ровно из тех
+    # данных, о которых эта панель и рассказывает.
+    from services import group_digest
+    keyboard = [
+        [InlineKeyboardButton("📊 Дайджест недели", callback_data="dig:show")],
+        [InlineKeyboardButton(
+            f"📰 Дайджест по понедельникам: {_onoff(group_digest.is_enabled())}",
+            callback_data="dig:toggle")],
+        _adm_back_row(),
+    ]
+    await _send_panel_message(bot, chat_id, text, InlineKeyboardMarkup(keyboard))
 
 
 async def send_api_panel(bot, chat_id: int, user_id: int):

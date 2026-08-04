@@ -104,11 +104,90 @@ async def daily_report_loop(application):
         except Exception as e:
             logger.error("⚠️ Ночная копия базы не сделана: %s", e)
 
+        # 📊 Недельный дайджест группы — тоже своим try и тоже в этом цикле:
+        # он единственный, кто умеет просыпаться по киевскому времени кусками
+        # не больше часа. Уходит НЕ в полночь, а утром понедельника.
+        try:
+            await weekly_group_digest(application)
+        except Exception as e:
+            logger.error("⚠️ Недельный дайджест группы не отправлен: %s", e)
+
         try:
             delay = min(daily_report.seconds_to_next_midnight(), 3600)
         except Exception:
             delay = 3600
         await asyncio.sleep(delay)
+
+
+# ───────────────────────────────────────────────
+#  📊 Недельный дайджест группы (2026-08-04)
+# ───────────────────────────────────────────────
+
+async def weekly_group_digest(application) -> bool:
+    """
+    По понедельникам в 10:00 по Киеву присылает ВЛАДЕЛЬЦУ В ЛИЧКУ итоги
+    недели по каждой известной группе: сколько сообщений и людей, топ
+    активных, самый живой день и час пик, викторина, новости, участие бота,
+    новички и работа DDoS-Guard. Возвращает True, если дайджест ушёл.
+
+    ⚠️ В ГРУППУ САМ НЕ ПИШЕТ (решение Максима 2026-08-04). Под текстом стоит
+    кнопка «📤 Отправить в группу» — отправляет человек, посмотрев на цифры.
+    Автоматическую отправку в чат без отдельной просьбы не заводить.
+
+    ⚠️ ЖИВЁТ В ЦИКЛЕ СУТОЧНОГО ОТЧЁТА, как и ночная копия базы: этот цикл
+    уже умеет просыпаться по киевскому времени кусками не больше часа и
+    переживать спящий сервер. Отсюда и час отправки — «первое пробуждение
+    после 10:00 понедельника», а не ровно 10:00.
+
+    ⚠️ Проспанный понедельник НЕ досылается (см. group_digest.due_now):
+    дайджест — чтение к утру понедельника, в среду он уже не то же самое.
+    Метка недели ставится ТОЛЬКО после удачной доставки — то же правило,
+    что у ночной копии.
+    """
+    from telegram.constants import ParseMode
+    from config import ADMIN_IDS
+    from services import group_digest
+    from database.history import get_known_chats
+    from handlers.admin.panel_digest import digest_keyboard
+
+    if not group_digest.due_now():
+        return False
+
+    chats = get_known_chats()
+    if not chats:
+        logger.info("📊 Дайджест недели: групп бот не знает — считать нечего")
+        group_digest.note_sent()      # чтобы не пытаться каждый час до вторника
+        return False
+
+    delivered = 0
+    for i, chat in enumerate(chats):
+        title = chat.get("title") or str(chat["chat_id"])
+        try:
+            # save_quiz=True ТОЛЬКО у первой группы: снимок викторины один на
+            # весь бот, и обновить его нужно ровно раз за отправку — иначе
+            # вторая группа получила бы нулевую викторину.
+            text = group_digest.build(chat["chat_id"], title, save_quiz=(i == 0))
+        except Exception as e:
+            logger.error("⚠️ 📊 Не удалось собрать дайджест группы %s: %s", title, e)
+            continue
+        for admin_id in ADMIN_IDS:
+            try:
+                # БЕЗ register_and_clean_bot_message — как отчёты о расходах:
+                # это история, панели не должны её затирать.
+                await application.bot.send_message(
+                    chat_id=admin_id, text=text, parse_mode=ParseMode.HTML,
+                    reply_markup=digest_keyboard(chat["chat_id"]),
+                )
+                delivered += 1
+            except Exception as e:
+                logger.warning("⚠️ Не удалось отправить дайджест владельцу %s: %s", admin_id, e)
+
+    if delivered:
+        group_digest.note_sent()
+        logger.info("📊 Недельный дайджест группы отправлен владельцу (сообщений: %d)", delivered)
+        return True
+    logger.error("⚠️ 📊 Дайджест собран, но НЕ доставлен ни одному владельцу")
+    return False
 
 
 # ───────────────────────────────────────────────

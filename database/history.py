@@ -2210,6 +2210,69 @@ def delete_old_proactive_log(days: int = 30) -> int:
     return deleted
 
 
+# ─── 📊 Выборки для недельного дайджеста группы ─────────────────────
+
+def get_group_messages_between(chat_id: int, start_utc: str, end_utc: str | None = None) -> list[dict]:
+    """
+    Сообщения группы за промежуток — сырьё для недельного дайджеста
+    (services/group_digest.py). Границы — строки UTC «ГГГГ-ММ-ДД ЧЧ:ММ:СС»,
+    как у остальных выборок по времени; правая строго меньше.
+
+    Отдаёт СЫРЫЕ строки, а не готовые счётчики, намеренно: дайджест считает
+    и топ авторов, и распределение по дням недели и часам, и долю медиа —
+    пять отдельных запросов к базе ради одного сообщения раз в неделю не
+    нужны, а неделя архива это тысячи строк, не миллионы (архив групп и так
+    чистится через 10 дней).
+
+    ⚠️ Время в базе — UTC, а дайджест показывает киевские дни и часы:
+    переводит их вызывающий (там же, где живёт зона), здесь только выборка.
+    """
+    where = "chat_id = ? AND created_at >= ?"
+    params = [chat_id, start_utc]
+    if end_utc:
+        where += " AND created_at < ?"
+        params.append(end_utc)
+    with _lock:
+        conn = _get_connection()
+        rows = conn.execute(
+            f"SELECT user_id, username, first_name, text, has_photo, has_voice, "
+            f"has_video, created_at FROM group_messages WHERE {where} ORDER BY id",
+            params,
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def count_sent_news_between(start_utc: str, end_utc: str | None = None) -> int:
+    """Сколько новостей разослано за промежуток (таблица sent_news)."""
+    where = "created_at >= ?"
+    params = [start_utc]
+    if end_utc:
+        where += " AND created_at < ?"
+        params.append(end_utc)
+    with _lock:
+        conn = _get_connection()
+        row = conn.execute(f"SELECT COUNT(*) AS n FROM sent_news WHERE {where}", params).fetchone()
+    return row["n"] if row else 0
+
+
+def get_all_quiz_stats() -> dict:
+    """
+    {user_id: (имя, верных ответов)} по всей таблице викторины.
+
+    ⚠️ Цифры НАКОПИТЕЛЬНЫЕ — в quiz_stats нет времени вовсе. «Сколько
+    ответили за неделю» считается разницей с недельным снимком, который
+    хранит сам дайджест (см. services/group_digest.py). Заводить время в
+    quiz_stats ради этого не стали: снимок дешевле и уже есть такой же приём
+    у недельного отчёта о расходах.
+    """
+    with _lock:
+        conn = _get_connection()
+        rows = conn.execute(
+            "SELECT user_id, username, correct_answers FROM quiz_stats"
+        ).fetchall()
+    return {r["user_id"]: (r["username"] or "", r["correct_answers"] or 0) for r in rows}
+
+
 # ─── 👋 Журнал вступлений в группы (приветствие новичков) ───────────
 
 def log_join(chat_id: int, user_id: int, name: str, outcome: str) -> None:
