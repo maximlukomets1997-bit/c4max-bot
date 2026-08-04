@@ -767,6 +767,20 @@ def unsubscribe_chat(chat_id: int) -> bool:
     return rows > 0
 
 
+def is_chat_subscribed(chat_id: int) -> bool:
+    """
+    Подписан ли чат на новости. Нужен КНОПКЕ-ТУМБЛЕРУ «📰 Новости» экрана
+    /start: она обязана показывать текущее состояние, а не действие
+    (общий стандарт тумблеров проекта, см. _onoff).
+    """
+    with _lock:
+        conn = _get_connection()
+        row = conn.execute(
+            "SELECT 1 FROM news_subscriptions WHERE chat_id=? LIMIT 1", (chat_id,)
+        ).fetchone()
+    return row is not None
+
+
 def get_subscribed_chats() -> list[int]:
     """Возвращает список ID всех подписанных чатов."""
     with _lock:

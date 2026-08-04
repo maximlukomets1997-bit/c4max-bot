@@ -180,11 +180,20 @@ async def cmd_ttx(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info("%s Справочник: «%s» → %s", _ICON, query, article["title"])
 
 
-async def _send_hint(bot, chat_id: int):
-    """Подсказка «как пользоваться» — когда /ttx позвали без названия."""
+def ttx_hint_text(bot) -> str:
+    """
+    Текст подсказки «как пользоваться справочником».
+
+    Вынесен из _send_hint 2026-08-04: тот же текст показывает кнопка
+    «📊 ТТХ техники» главного экрана /start, а второй копии этих строк быть
+    не должно — команда и кнопка обязаны рассказывать одно и то же.
+
+    ⚠️ Ник бота берём из `bot.username` (он заполнен с первой минуты работы),
+    а НЕ через `await bot.get_me()`, как было раньше: это сетевой запрос, а
+    текст теперь собирается ещё и на нажатие кнопки.
+    """
     total = len(tech_card.index())
-    me = await bot.get_me()
-    text = (
+    return (
         f"{_ICON} <b>СПРАВОЧНИК ТЕХНИКИ</b>\n"
         "───────────────────────────\n"
         "Напиши <code>/ttx</code> и название — отдам ТТХ прямо из базы знаний: "
@@ -197,9 +206,15 @@ async def _send_hint(bot, chat_id: int):
         f"<i>В базе статей: {total}. Понимаю названия, игровые прозвища, "
         f"латиницу и кириллицу.\n"
         f"Меня можно звать и в любом другом чате: наберите "
-        f"<code>@{html.escape(me.username or '')} ариете</code>.</i>"
+        f"<code>@{html.escape(bot.username or '')} ариете</code>.</i>"
     )
-    sent = await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML)
+
+
+async def _send_hint(bot, chat_id: int):
+    """Подсказка «как пользоваться» — когда /ttx позвали без названия."""
+    sent = await bot.send_message(chat_id=chat_id, text=ttx_hint_text(bot),
+                                  parse_mode=ParseMode.HTML,
+                                  link_preview_options=_NO_PREVIEW)
     if sent:
         schedule_delete(bot, chat_id, sent.message_id, _HINT_TTL)
 

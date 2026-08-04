@@ -67,6 +67,14 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await handle_ttx_callback(query, context, data)
         return
 
+    # 🏠 Кнопки главного экрана /start (2026-08-04): справочник, звание,
+    # тумблер новостей, полный список команд и возврат. Тоже ДО гейта прав —
+    # это экран для всех, а не для персонала.
+    if data.startswith("menu:"):
+        from handlers.commands import handle_menu_callback
+        await handle_menu_callback(query, context, data)
+        return
+
     if data == "clear_history_btn":
         from database.history import clear_history
         clear_history(user_id)
