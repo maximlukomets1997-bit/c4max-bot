@@ -375,6 +375,42 @@ def suggest(query: str, limit: int = 5) -> list:
     return out[:limit]
 
 
+def kinds_summary() -> list:
+    """
+    Классы техники для КАТАЛОГА: [(код, значок, название, сколько статей)] —
+    только непустые, в порядке ARTICLE_KINDS (наземная → авиация → корабли →
+    подлодки → механики).
+
+    Пустой класс в каталоге не показываем: кнопка, за которой ничего нет,
+    выглядит поломкой. Появятся статьи — кнопка возникнет сама.
+    """
+    counts = {}
+    for art in index():
+        counts[art["kind"]] = counts.get(art["kind"], 0) + 1
+    out = []
+    for kind, meta in sorted(ARTICLE_KINDS.items(), key=lambda kv: kv[1]["order"]):
+        if counts.get(kind):
+            out.append((kind, meta["icon"], meta["name"], counts[kind]))
+    return out
+
+
+def by_kind(kind: str) -> list:
+    """Статьи одного класса по алфавиту — список каталога."""
+    items = [a for a in index() if a["kind"] == kind]
+    items.sort(key=lambda a: a["title"].lower())
+    return items
+
+
+def short_title(title: str, limit: int = 22) -> str:
+    """
+    Название для КНОПКИ каталога: без приставки «Игровая механика:» и не
+    длиннее limit. Приставку срезаем по той же причине, что в панели /rag:
+    с ней все статьи-механики выглядят на кнопке одинаково.
+    """
+    t = re.sub(r"^игровая\s+механика:\s*", "", title.strip(), flags=re.I)
+    return t if len(t) <= limit else t[:limit - 1].rstrip() + "…"
+
+
 def by_title(title: str):
     """Статья по точному названию — так результат поиска RAG превращается в статью."""
     key = _norm(title)
