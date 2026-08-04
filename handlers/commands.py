@@ -298,8 +298,10 @@ async def handle_menu_callback(query, context, data: str) -> None:
 
     await query.answer()
     if what == "ttx":
-        from handlers.tech import ttx_hint_text
-        text, markup = ttx_hint_text(bot), _back_keyboard()
+        # КАТАЛОГ техники: класс → название → карточка, без набора команд.
+        # Отдельный «⬅️ Главное меню» тут не нужен — у каталога свои возвраты.
+        from handlers.tech import catalog_keyboard, catalog_text
+        text, markup = catalog_text(bot), catalog_keyboard()
     elif what == "help":
         text, markup = _help_text(bot.username), _back_keyboard()
     else:  # back — возврат на главный экран

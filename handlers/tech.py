@@ -13,10 +13,16 @@
 #       эмбеддинг запроса, и только если первая ступень не дала ответа;
 #    3) кнопки «возможно, ты имел в виду».
 #
-#  ⚠️ Ответ НЕ регистрируется в гигиене панелей (`register_and_clean_bot_message`)
-#  намеренно: в группе она удалила бы предыдущее сообщение бота — карточку
-#  другого человека посреди обсуждения или новость. Кнопки разделов правят
-#  ТО ЖЕ САМОЕ сообщение, поэтому одна команда = одно сообщение в чате.
+#  Пользоваться можно и вовсе не набирая названий: КАТАЛОГ (2026-08-04) —
+#  класс техники → список кнопок → карточка. Всё в одном сообщении.
+#
+#  ⚠️ Гигиена панелей применяется ТОЛЬКО В ЛИЧКЕ (`_send_ttx_message`):
+#  там карточка ведёт себя как остальные экраны бота и убирается следующей
+#  командой (просьба Максима — раньше она висела в переписке вечно).
+#  В ГРУППЕ регистрации нет намеренно: гигиена удаляет предыдущее сообщение
+#  бота, то есть снесла бы карточку другого человека посреди обсуждения или
+#  свежую новость. Кнопки правят ТО ЖЕ сообщение, поэтому одна команда =
+#  одно сообщение в чате.
 # ─────────────────────────────────────────────
 
 import asyncio
@@ -32,7 +38,9 @@ from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 from services import tech_card
-from utils import delete_user_message_safe, schedule_delete
+from services.knowledge_store import ARTICLE_KINDS
+from utils import (delete_user_message_safe, register_and_clean_bot_message,
+                   schedule_delete)
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +95,10 @@ def _card_keyboard(article: dict, data: dict) -> InlineKeyboardMarkup:
     ]
     rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
     rows.append([InlineKeyboardButton("📄 Вся статья файлом", callback_data=f"ttx:{tok}:file")])
+    # Возврат в КАТАЛОГ — сразу в список своего класса, а не к выбору класса:
+    # человек пришёл оттуда и, скорее всего, хочет посмотреть соседнюю машину.
+    rows.append([InlineKeyboardButton(
+        "⬅️ К списку", callback_data=f"ttx:k:{article['kind']}:0")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -153,7 +165,10 @@ async def cmd_ttx(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = " ".join(context.args).strip() if context.args else ""
 
     if not query:
-        await _send_hint(context.bot, chat.id)
+        # Без названия открываем КАТАЛОГ: человек выбирает класс и жмёт по
+        # названию. Прежняя текстовая подсказка «напиши /ttx ариете» ушла —
+        # её суть переехала в подвал каталога.
+        await _send_catalog(context.bot, chat.id)
         return
 
     if not _cooled_down(user.id):
@@ -164,11 +179,9 @@ async def cmd_ttx(update: Update, context: ContextTypes.DEFAULT_TYPE):
         article = await _semantic_lookup(query)
 
     if not article:
-        sent = await context.bot.send_message(
-            chat_id=chat.id,
-            text=tech_card.render_candidates(query, candidates),
-            parse_mode=ParseMode.HTML,
-            reply_markup=_candidates_keyboard(candidates) if candidates else None,
+        sent = await _send_ttx_message(
+            context.bot, chat.id, tech_card.render_candidates(query, candidates),
+            _candidates_keyboard(candidates) if candidates else None,
         )
         logger.info("%s Справочник: «%s» — не найдено (подсказок: %d)",
                     _ICON, query, len(candidates))
@@ -180,55 +193,126 @@ async def cmd_ttx(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info("%s Справочник: «%s» → %s", _ICON, query, article["title"])
 
 
-def ttx_hint_text(bot) -> str:
-    """
-    Текст подсказки «как пользоваться справочником».
+# ─── 📚 КАТАЛОГ: техника кнопками, без набора названия ──────────────
+#
+#  Просьба Максима 2026-08-04: обычный человек не должен помнить, как
+#  пишется «Ariete PSO», и уж тем более набирать «/ttx ариете». Он жмёт
+#  «📊 ТТХ техники» и дальше только тыкает: класс → название → карточка.
+#
+#  Развилка по классам ОБЯЗАТЕЛЬНА: статей 80, и списком они не влезают
+#  ни в лимит Telegram (~100 кнопок), ни в экран телефона.
 
-    Вынесен из _send_hint 2026-08-04: тот же текст показывает кнопка
-    «📊 ТТХ техники» главного экрана /start, а второй копии этих строк быть
-    не должно — команда и кнопка обязаны рассказывать одно и то же.
+# Сколько названий на одной странице списка. Два столбца по десять рядов:
+# больше на экран телефона не помещается, а листание дешёвое.
+_CATALOG_PAGE = 20
 
-    ⚠️ Ник бота берём из `bot.username` (он заполнен с первой минуты работы),
-    а НЕ через `await bot.get_me()`, как было раньше: это сетевой запрос, а
-    текст теперь собирается ещё и на нажатие кнопки.
-    """
+
+def catalog_text(bot) -> str:
+    """Текст экрана выбора класса техники."""
     total = len(tech_card.index())
     return (
         f"{_ICON} <b>СПРАВОЧНИК ТЕХНИКИ</b>\n"
-        "───────────────────────────\n"
-        "Напиши <code>/ttx</code> и название — отдам ТТХ прямо из базы знаний: "
-        "мгновенно и без нейросети.\n\n"
-        "<b>Примеры:</b>\n"
-        "<code>/ttx ариете</code>\n"
-        "<code>/ttx Leopard 2A5</code>\n"
-        "<code>/ttx т80уе1</code>\n"
-        "───────────────────────────\n"
-        f"<i>В базе статей: {total}. Понимаю названия, игровые прозвища, "
-        f"латиницу и кириллицу.\n"
-        f"Меня можно звать и в любом другом чате: наберите "
+        f"{tech_card.SEPARATOR}\n"
+        f"В базе <b>{total}</b> статей. Выбери класс — дальше просто жми "
+        f"по названию.\n"
+        f"{tech_card.SEPARATOR}\n"
+        f"<i>Знаешь название — можно и напрямую: <code>/ttx ариете</code>. "
+        f"Понимаю игровые прозвища, латиницу и кириллицу.\n"
+        f"А ещё меня можно звать в ЛЮБОМ чате: наберите "
         f"<code>@{html.escape(bot.username or '')} ариете</code>.</i>"
     )
 
 
-async def _send_hint(bot, chat_id: int):
-    """Подсказка «как пользоваться» — когда /ttx позвали без названия."""
-    sent = await bot.send_message(chat_id=chat_id, text=ttx_hint_text(bot),
-                                  parse_mode=ParseMode.HTML,
-                                  link_preview_options=_NO_PREVIEW)
-    if sent:
-        schedule_delete(bot, chat_id, sent.message_id, _HINT_TTL)
+def catalog_keyboard() -> InlineKeyboardMarkup:
+    """Кнопки классов техники — по два в ряд, с числом статей."""
+    buttons = [
+        InlineKeyboardButton(f"{icon} {name.capitalize()} ({count})",
+                             callback_data=f"ttx:k:{kind}:0")
+        for kind, icon, name, count in tech_card.kinds_summary()
+    ]
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    return InlineKeyboardMarkup(rows)
+
+
+def _kind_screen(kind: str, page: int):
+    """
+    Экран списка одного класса: (текст, клавиатура).
+
+    Номер страницы подрезается по ФАКТИЧЕСКОМУ числу статей — статью могли
+    удалить, пока список висел в чате (та же защита, что в панели /rag).
+    """
+    items = tech_card.by_kind(kind)
+    meta = ARTICLE_KINDS.get(kind, ARTICLE_KINDS["other"])
+    pages = max(1, (len(items) + _CATALOG_PAGE - 1) // _CATALOG_PAGE)
+    page = max(0, min(page, pages - 1))
+    chunk = items[page * _CATALOG_PAGE:(page + 1) * _CATALOG_PAGE]
+
+    first = page * _CATALOG_PAGE + 1
+    last = page * _CATALOG_PAGE + len(chunk)
+    text = (
+        f"{meta['icon']} <b>{meta['name'].upper()}</b>\n"
+        f"{tech_card.SEPARATOR}\n"
+        f"Статьи {first}–{last} из {len(items)}"
+        + (f" · страница {page + 1} из {pages}" if pages > 1 else "")
+        + f"\n{tech_card.SEPARATOR}\n"
+        f"<i>Жми по названию — покажу ТТХ.</i>"
+    )
+
+    buttons = [
+        InlineKeyboardButton(tech_card.short_title(a["title"]),
+                             callback_data=f"ttx:{tech_card.token(a['fname'])}:card")
+        for a in chunk
+    ]
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+
+    # Ряд листания — только когда листать есть что. На краю списка стрелка
+    # становится «▫️» с пустышкой, чтобы ряд не прыгал по ширине (как в /rag).
+    if pages > 1:
+        prev_btn = (InlineKeyboardButton("⬅️", callback_data=f"ttx:k:{kind}:{page - 1}")
+                    if page > 0 else InlineKeyboardButton("▫️", callback_data="ttx:noop"))
+        next_btn = (InlineKeyboardButton("➡️", callback_data=f"ttx:k:{kind}:{page + 1}")
+                    if page < pages - 1 else InlineKeyboardButton("▫️", callback_data="ttx:noop"))
+        rows.append([
+            prev_btn,
+            InlineKeyboardButton(f"📄 {page + 1} из {pages}", callback_data="ttx:noop"),
+            next_btn,
+        ])
+
+    rows.append([InlineKeyboardButton("⬅️ К классам", callback_data="ttx:cat")])
+    return text, InlineKeyboardMarkup(rows)
+
+
+async def _send_catalog(bot, chat_id: int):
+    """Отправляет каталог новым сообщением (команда /ttx без названия)."""
+    await _send_ttx_message(bot, chat_id, catalog_text(bot), catalog_keyboard())
 
 
 async def _send_card(bot, chat_id: int, article: dict):
     """Отправляет карточку техники новым сообщением."""
     data = tech_card.load(article)
-    await bot.send_message(
-        chat_id=chat_id,
-        text=tech_card.render_card(article, data),
-        parse_mode=ParseMode.HTML,
-        reply_markup=_card_keyboard(article, data),
-        link_preview_options=_NO_PREVIEW,
+    await _send_ttx_message(bot, chat_id, tech_card.render_card(article, data),
+                            _card_keyboard(article, data))
+
+
+async def _send_ttx_message(bot, chat_id: int, text: str, markup):
+    """
+    Общая отправка экранов справочника.
+
+    ⚠️ В ЛИЧКЕ сообщение регистрируется в гигиене панелей (просьба Максима
+    2026-08-04): карточка ТТХ висела в переписке вечно и не убиралась
+    следующей командой, в отличие от всех остальных экранов бота.
+    ⚠️ В ГРУППЕ — НЕ регистрируется, и это не забывчивость: гигиена удаляет
+    ПРЕДЫДУЩЕЕ сообщение бота в чате, то есть снесла бы карточку другого
+    человека посреди обсуждения или свежую новость. Признак лички — знак
+    chat_id (у групп он отрицательный), как в рассылке новостей.
+    """
+    sent = await bot.send_message(
+        chat_id=chat_id, text=text, parse_mode=ParseMode.HTML,
+        reply_markup=markup, link_preview_options=_NO_PREVIEW,
     )
+    if sent and chat_id > 0:
+        await register_and_clean_bot_message(bot, chat_id, sent.message_id)
+    return sent
 
 
 # ─── кнопки карточки ────────────────────────────────────────────────
@@ -244,6 +328,29 @@ async def handle_ttx_callback(query, context, data: str) -> None:
     parts = data.split(":")
     tok = parts[1] if len(parts) > 1 else ""
     what = parts[2] if len(parts) > 2 else "card"
+
+    # ── Каталог: экраны выбора, а не статья ──────────────────────────
+    # Разбираются ДО поиска статьи по ключу: «cat», «k» и «noop» ключами
+    # быть не могут (ключ — 10 знаков md5), но искать по ним статью незачем.
+    if tok == "noop":
+        await query.answer()
+        return
+
+    if tok == "cat":
+        await query.answer()
+        await _edit_ttx_screen(query, catalog_text(query.get_bot()), catalog_keyboard())
+        return
+
+    if tok == "k":
+        kind = parts[2] if len(parts) > 2 else ""
+        try:
+            page = int(parts[3]) if len(parts) > 3 else 0
+        except ValueError:
+            page = 0
+        await query.answer()
+        text, markup = _kind_screen(kind, page)
+        await _edit_ttx_screen(query, text, markup)
+        return
 
     article = tech_card.by_token(tok)
     if not article:
@@ -274,13 +381,24 @@ async def handle_ttx_callback(query, context, data: str) -> None:
         markup = _section_keyboard(article)
 
     await query.answer()
+    await _edit_ttx_screen(query, text, markup)
+
+
+async def _edit_ttx_screen(query, text: str, markup) -> None:
+    """
+    Перерисовывает ТО ЖЕ сообщение новым экраном справочника.
+
+    Все экраны — каталог, список класса, карточка и раздел — живут в ОДНОМ
+    сообщении: одна команда = одно сообщение в чате, и человек не листает
+    вверх мимо десяти своих же нажатий.
+    """
     try:
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup,
                                       link_preview_options=_NO_PREVIEW)
     except Exception as e:
-        # Самая частая причина — нажали кнопку раздела, который уже открыт:
+        # Самая частая причина — нажали кнопку экрана, который уже открыт:
         # Telegram отвечает «Message is not modified». Ругаться незачем.
-        logger.debug("%s Не удалось перерисовать карточку: %s", _ICON, e)
+        logger.debug("%s Не удалось перерисовать экран справочника: %s", _ICON, e)
 
 
 async def _send_article_file(query, article: dict) -> None:
