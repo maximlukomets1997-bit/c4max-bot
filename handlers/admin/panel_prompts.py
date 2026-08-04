@@ -735,75 +735,6 @@ async def send_prompt_files(bot, chat_id: int, user_id: int) -> int:
     return sent
 
 
-async def cmd_prompt_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await delete_user_message_safe(update.message)
-    """Полностью заменяет системный промпт на кастомный."""
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-
-    if not await _require(update, context, "owner"):
-        return
-
-    # Только личка: в группе молча выходим (команда уже удалена).
-    if _is_group_chat(update):
-        return
-
-    # Получаем текст после команды
-    new_prompt = ""
-    if context.args:
-        new_prompt = update.message.text.split(None, 1)[1]  # Всё после /prompt_set
-
-    # Проверяем, не приложен ли .txt файл (reply на документ)
-    if not new_prompt and update.message.reply_to_message and update.message.reply_to_message.document:
-        doc = update.message.reply_to_message.document
-        if doc.file_name and doc.file_name.endswith(".txt"):
-            try:
-                file = await context.bot.get_file(doc.file_id)
-                file_bytes = await file.download_as_bytearray()
-                new_prompt = file_bytes.decode("utf-8").strip()
-            except Exception as e:
-                logger.error("⚠️ Не удалось прочитать файл промпта: %s", e)
-                # Через регистрацию в уборке: иначе сообщение зависнет в чате навсегда
-                sent_msg = await context.bot.send_message(chat_id=update.effective_chat.id, text=
-                    "❌ <b>Ошибка при чтении файла.</b> Убедись, что это текстовый .txt файл в кодировке UTF-8.",
-                    parse_mode=ParseMode.HTML
-                )
-                if sent_msg:
-                    await register_and_clean_bot_message(context.bot, chat_id, sent_msg.message_id)
-                return
-
-    if not new_prompt:
-        # Через регистрацию в уборке: иначе подсказка зависнет в чате навсегда
-        sent_msg = await context.bot.send_message(chat_id=update.effective_chat.id, text=
-            "✏️ <b>Замена системного промпта</b>\n\n"
-            "<b>Способ 1:</b> Напиши текст после команды:\n"
-            "<code>/prompt_set Ты — дружелюбный бот...</code>\n\n"
-            "<b>Способ 2:</b> Отправь <code>.txt</code> файл с промптом, "
-            "затем ответь (Reply) на него командой <code>/prompt_set</code>",
-            parse_mode=ParseMode.HTML
-        )
-        if sent_msg:
-            await register_and_clean_bot_message(context.bot, chat_id, sent_msg.message_id)
-        return
-
-    set_setting("custom_system_prompt", new_prompt)
-    logger.info("🔧 Админ %s установил кастомный системный промпт (%d символов)", user_id, len(new_prompt))
-
-    # Показываем первые 300 символов для подтверждения
-    preview = new_prompt[:300].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    if len(new_prompt) > 300:
-        preview += "..."
-
-    sent_msg = await context.bot.send_message(chat_id=update.effective_chat.id, text=
-        f"✅ <b>Системный промпт заменён!</b>\n\n"
-        f"📊 Длина: {len(new_prompt)} символов\n\n"
-        f"<b>Превью:</b>\n{preview}",
-        parse_mode=ParseMode.HTML
-    )
-    if sent_msg:
-        await register_and_clean_bot_message(context.bot, chat_id, sent_msg.message_id)
-
-
 async def cmd_prompt_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await delete_user_message_safe(update.message)
     """Дописывает правила/инструкции к текущему промпту."""
@@ -861,408 +792,6 @@ async def send_prompts_panel(bot, chat_id: int, user_id: int):
     await _send_panel_message(bot, chat_id, text, prompt_markup)
 
 
-
-async def cmd_prompt_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await delete_user_message_safe(update.message)
-    """Сбрасывает промпт к заводским настройкам (с подтверждением)."""
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-
-    if not await _require(update, context, "owner"):
-        return
-
-    # Только личка: в группе молча выходим (команда уже удалена).
-    if _is_group_chat(update):
-        return
-
-    # Проверяем, есть ли вообще что сбрасывать
-    custom = get_setting("custom_system_prompt", "")
-    additions = get_setting("prompt_additions", "")
-
-    if not custom and not additions:
-        sent_msg = await context.bot.send_message(chat_id=update.effective_chat.id, text=
-            "ℹ️ <b>Сброс не требуется.</b>\n\n"
-            "Бот уже использует заводской промпт из <code>config.py</code>.\n"
-            "Кастомных изменений и дополнений не обнаружено.",
-            parse_mode=ParseMode.HTML
-        )
-        if sent_msg:
-            await register_and_clean_bot_message(context.bot, chat_id, sent_msg.message_id)
-        return
-
-    # Формируем информацию о том, что будет удалено
-    details = ""
-    if custom:
-        details += f"• Кастомный промпт ({len(custom)} символов)\n"
-    if additions:
-        details += f"• Дополнения ({len(additions)} символов)\n"
-
-    keyboard = [
-        [
-            InlineKeyboardButton("✅ Да, сбросить", callback_data="prompt_reset_confirm"),
-            InlineKeyboardButton("❌ Отмена", callback_data="prompt_reset_cancel"),
-        ]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    sent_msg = await context.bot.send_message(chat_id=update.effective_chat.id, text=
-        f"🔄 <b>Сброс системного промпта</b>\n\n"
-        f"Будет удалено:\n{details}\n"
-        f"Бот вернётся к заводскому промпту из <code>config.py</code>.\n\n"
-        f"⚠️ <b>Это действие нельзя отменить. Подтвердить?</b>",
-        parse_mode=ParseMode.HTML,
-        reply_markup=reply_markup
-    )
-    if sent_msg:
-        await register_and_clean_bot_message(context.bot, chat_id, sent_msg.message_id)
-
-
-async def cmd_news_prompt_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await delete_user_message_safe(update.message)
-    """Устанавливает системный промпт для форматирования новостей."""
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-
-    if not await _require(update, context, "owner"):
-        return
-
-    # Только личка: в группе молча выходим (команда уже удалена).
-    if _is_group_chat(update):
-        return
-
-    new_prompt = ""
-    if context.args:
-        new_prompt = update.message.text.split(None, 1)[1]
-
-    # Поддержка .txt файла через Reply
-    if not new_prompt and update.message.reply_to_message and update.message.reply_to_message.document:
-        doc = update.message.reply_to_message.document
-        if doc.file_name and doc.file_name.endswith(".txt"):
-            try:
-                file = await context.bot.get_file(doc.file_id)
-                file_bytes = await file.download_as_bytearray()
-                new_prompt = file_bytes.decode("utf-8").strip()
-            except Exception as e:
-                logger.error("⚠️ Не удалось прочитать файл промпта новостей: %s", e)
-                # Через регистрацию в уборке: иначе сообщение зависнет в чате навсегда
-                sent_msg = await context.bot.send_message(chat_id=update.effective_chat.id, text=
-                    "❌ <b>Ошибка при чтении файла.</b> Убедись, что это текстовый .txt файл в кодировке UTF-8.",
-                    parse_mode=ParseMode.HTML
-                )
-                if sent_msg:
-                    await register_and_clean_bot_message(context.bot, chat_id, sent_msg.message_id)
-                return
-
-    if not new_prompt:
-        sent_msg = await context.bot.send_message(chat_id=update.effective_chat.id, text=
-            "📰 <b>Промпт для форматирования новостей</b>\n\n"
-            "Этот промпт отправляется ИИ как системная инструкция при каждом форматировании новости.\n\n"
-            "<b>Способ 1:</b> Напиши текст после команды:\n"
-            "<code>/news_prompt_set Ты — военный корреспондент C4_Max...</code>\n\n"
-            "<b>Способ 2:</b> Отправь <code>.txt</code> файл с промптом, "
-            "затем ответь (Reply) на него командой <code>/news_prompt_set</code>",
-            parse_mode=ParseMode.HTML
-        )
-        if sent_msg:
-            await register_and_clean_bot_message(context.bot, chat_id, sent_msg.message_id)
-        return
-
-    set_setting("news_system_prompt", new_prompt)
-    logger.info("🔧 Админ %s установил промпт новостей (%d символов)", user_id, len(new_prompt))
-
-    preview = new_prompt[:300].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    if len(new_prompt) > 300:
-        preview += "..."
-
-    sent_msg = await context.bot.send_message(chat_id=update.effective_chat.id, text=
-        f"✅ <b>Промпт новостей установлен!</b>\n\n"
-        f"📊 Длина: {len(new_prompt)} символов\n\n"
-        f"<b>Превью:</b>\n{preview}",
-        parse_mode=ParseMode.HTML
-    )
-    if sent_msg:
-        await register_and_clean_bot_message(context.bot, chat_id, sent_msg.message_id)
-
-
-async def cmd_news_prompt_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await delete_user_message_safe(update.message)
-    """Удаляет системный промпт для новостей (с подтверждением)."""
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-
-    if not await _require(update, context, "owner"):
-        return
-
-    # Только личка: в группе молча выходим (команда уже удалена).
-    if _is_group_chat(update):
-        return
-
-    current = get_news_system_prompt()
-    if not current:
-        sent_msg = await context.bot.send_message(chat_id=update.effective_chat.id, text=
-            "ℹ️ <b>Промпт новостей не задан.</b>\n\n"
-            "Нечего удалять — новости уже форматируются без системного промпта.",
-            parse_mode=ParseMode.HTML
-        )
-        if sent_msg:
-            await register_and_clean_bot_message(context.bot, chat_id, sent_msg.message_id)
-        return
-
-    keyboard = [
-        [
-            InlineKeyboardButton("✅ Да, удалить", callback_data="news_prompt_reset_confirm"),
-            InlineKeyboardButton("❌ Отмена", callback_data="news_prompt_reset_cancel"),
-        ]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    sent_msg = await context.bot.send_message(chat_id=update.effective_chat.id, text=
-        f"🗑️ <b>Удаление промпта новостей</b>\n\n"
-        f"Текущий промпт ({len(current)} символов) будет удалён.\n"
-        f"Новости начнут форматироваться без системного промпта.\n\n"
-        f"⚠️ <b>Подтвердить?</b>",
-        parse_mode=ParseMode.HTML,
-        reply_markup=reply_markup
-    )
-    if sent_msg:
-        await register_and_clean_bot_message(context.bot, chat_id, sent_msg.message_id)
-
-
-async def cmd_rag_prompt_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await delete_user_message_safe(update.message)
-    """Задаёт «шапку»-инструкцию, уходящую модели перед статьями RAG.
-    Хранится в settings под ключом 'rag_instruction'. Сами статьи бот всегда
-    подставляет под инструкцией автоматически."""
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-
-    if not await _require(update, context, "owner"):
-        return
-
-    # Только личка: в группе молча выходим (команда уже удалена).
-    if _is_group_chat(update):
-        return
-
-    new_prompt = ""
-    if context.args:
-        new_prompt = update.message.text.split(None, 1)[1]
-
-    # Поддержка .txt файла через Reply (как у системного промпта и новостей)
-    if not new_prompt and update.message.reply_to_message and update.message.reply_to_message.document:
-        doc = update.message.reply_to_message.document
-        if doc.file_name and doc.file_name.endswith(".txt"):
-            try:
-                file = await context.bot.get_file(doc.file_id)
-                file_bytes = await file.download_as_bytearray()
-                new_prompt = file_bytes.decode("utf-8").strip()
-            except Exception as e:
-                logger.error("⚠️ Не удалось прочитать файл RAG-инструкции: %s", e)
-                # Через регистрацию в уборке: иначе сообщение зависнет в чате навсегда
-                sent_msg = await context.bot.send_message(chat_id=chat_id, text=
-                    "❌ <b>Ошибка при чтении файла.</b> Убедись, что это текстовый .txt файл в кодировке UTF-8.",
-                    parse_mode=ParseMode.HTML
-                )
-                if sent_msg:
-                    await register_and_clean_bot_message(context.bot, chat_id, sent_msg.message_id)
-                return
-
-    if not new_prompt:
-        sent_msg = await context.bot.send_message(chat_id=chat_id, text=
-            "🧠 <b>RAG-инструкция</b>\n\n"
-            "Это «шапка», которая уходит модели ПЕРЕД найденными статьями базы "
-            "знаний. Сами статьи бот всегда подставляет под ней сам — их писать "
-            "не нужно.\n\n"
-            "<b>Способ 1:</b> Напиши текст после команды:\n"
-            "<code>/rag_prompt_set Ты эксперт по технике War Thunder Mobile...</code>\n\n"
-            "<b>Способ 2:</b> Отправь <code>.txt</code> файл с текстом, "
-            "затем ответь (Reply) на него командой <code>/rag_prompt_set</code>\n\n"
-            "🗑️ Вернуть заводскую — /rag_prompt_reset",
-            parse_mode=ParseMode.HTML
-        )
-        if sent_msg:
-            await register_and_clean_bot_message(context.bot, chat_id, sent_msg.message_id)
-        return
-
-    set_setting("rag_instruction", new_prompt)
-    logger.info("🔧 Админ %s изменил RAG-инструкцию (%d символов)", user_id, len(new_prompt))
-
-    preview = new_prompt[:300].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    if len(new_prompt) > 300:
-        preview += "..."
-
-    sent_msg = await context.bot.send_message(chat_id=chat_id, text=
-        f"✅ <b>RAG-инструкция обновлена!</b>\n\n"
-        f"📊 Длина: {len(new_prompt)} символов\n\n"
-        f"<b>Превью:</b>\n{preview}\n\n"
-        f"ℹ️ Найденные статьи по-прежнему подставляются автоматически под этой инструкцией.",
-        parse_mode=ParseMode.HTML
-    )
-    if sent_msg:
-        await register_and_clean_bot_message(context.bot, chat_id, sent_msg.message_id)
-
-
-async def cmd_rag_prompt_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await delete_user_message_safe(update.message)
-    """Возвращает заводскую RAG-инструкцию (удаляет свою, с подтверждением)."""
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-
-    if not await _require(update, context, "owner"):
-        return
-
-    # Только личка: в группе молча выходим (команда уже удалена).
-    if _is_group_chat(update):
-        return
-
-    # Своя инструкция задана? Если нет — уже действует заводская, сбрасывать нечего.
-    current = get_setting("rag_instruction", "").strip()
-    if not current:
-        sent_msg = await context.bot.send_message(chat_id=chat_id, text=
-            "ℹ️ <b>Сейчас уже действует заводская RAG-инструкция.</b>\n\n"
-            "Своя не задана — возвращать нечего.",
-            parse_mode=ParseMode.HTML
-        )
-        if sent_msg:
-            await register_and_clean_bot_message(context.bot, chat_id, sent_msg.message_id)
-        return
-
-    keyboard = [
-        [
-            InlineKeyboardButton("✅ Да, вернуть заводскую", callback_data="rag_prompt_reset_confirm"),
-            InlineKeyboardButton("❌ Отмена", callback_data="rag_prompt_reset_cancel"),
-        ]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    sent_msg = await context.bot.send_message(chat_id=chat_id, text=
-        f"🗑️ <b>Возврат заводской RAG-инструкции</b>\n\n"
-        f"Твоя инструкция ({len(current)} символов) будет удалена, "
-        f"вернётся заводская.\n\n"
-        f"⚠️ <b>Подтвердить?</b>",
-        parse_mode=ParseMode.HTML,
-        reply_markup=reply_markup
-    )
-    if sent_msg:
-        await register_and_clean_bot_message(context.bot, chat_id, sent_msg.message_id)
-
-
-async def cmd_proactive_prompt_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await delete_user_message_safe(update.message)
-    """Задаёт инструкцию участия в разговоре групп (режим «Сам в разговор»).
-    Хранится в settings под ключом 'proactive_instruction'. По ней модель
-    решает, вступить ли в беседу без обращения к боту (services/proactive.py)."""
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-
-    if not await _require(update, context, "owner"):
-        return
-
-    # Только личка: в группе молча выходим (команда уже удалена).
-    if _is_group_chat(update):
-        return
-
-    new_prompt = ""
-    if context.args:
-        new_prompt = update.message.text.split(None, 1)[1]
-
-    # Поддержка .txt файла через Reply (как у системного промпта и RAG)
-    if not new_prompt and update.message.reply_to_message and update.message.reply_to_message.document:
-        doc = update.message.reply_to_message.document
-        if doc.file_name and doc.file_name.endswith(".txt"):
-            try:
-                file = await context.bot.get_file(doc.file_id)
-                file_bytes = await file.download_as_bytearray()
-                new_prompt = file_bytes.decode("utf-8").strip()
-            except Exception as e:
-                logger.error("⚠️ Не удалось прочитать файл инструкции участия: %s", e)
-                # Через регистрацию в уборке: иначе сообщение зависнет в чате навсегда
-                sent_msg = await context.bot.send_message(chat_id=chat_id, text=
-                    "❌ <b>Ошибка при чтении файла.</b> Убедись, что это текстовый .txt файл в кодировке UTF-8.",
-                    parse_mode=ParseMode.HTML
-                )
-                if sent_msg:
-                    await register_and_clean_bot_message(context.bot, chat_id, sent_msg.message_id)
-                return
-
-    if not new_prompt:
-        sent_msg = await context.bot.send_message(chat_id=chat_id, text=
-            "🗣 <b>Инструкция участия в разговоре</b>\n\n"
-            "По ней бот сам решает, вступить ли в беседу группы, когда к нему "
-            "НЕ обращались (режим «Сам в разговор»). Стенограмму чата бот "
-            "подставляет под ней сам — её писать не нужно.\n\n"
-            "<b>Способ 1:</b> Напиши текст после команды:\n"
-            "<code>/proactive_prompt_set Вступай, только если можешь пошутить...</code>\n\n"
-            "<b>Способ 2:</b> Отправь <code>.txt</code> файл с текстом, "
-            "затем ответь (Reply) на него командой <code>/proactive_prompt_set</code>\n\n"
-            "🗑️ Вернуть заводскую — /proactive_prompt_reset",
-            parse_mode=ParseMode.HTML
-        )
-        if sent_msg:
-            await register_and_clean_bot_message(context.bot, chat_id, sent_msg.message_id)
-        return
-
-    set_setting("proactive_instruction", new_prompt)
-    logger.info("🔧 Админ %s изменил инструкцию участия в разговоре (%d символов)", user_id, len(new_prompt))
-
-    preview = new_prompt[:300].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    if len(new_prompt) > 300:
-        preview += "..."
-
-    sent_msg = await context.bot.send_message(chat_id=chat_id, text=
-        f"✅ <b>Инструкция участия в разговоре обновлена!</b>\n\n"
-        f"📊 Длина: {len(new_prompt)} символов\n\n"
-        f"<b>Превью:</b>\n{preview}\n\n"
-        f"ℹ️ Стенограмма чата по-прежнему подставляется автоматически под этой инструкцией.",
-        parse_mode=ParseMode.HTML
-    )
-    if sent_msg:
-        await register_and_clean_bot_message(context.bot, chat_id, sent_msg.message_id)
-
-
-async def cmd_proactive_prompt_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await delete_user_message_safe(update.message)
-    """Возвращает заводскую инструкцию участия в разговоре (с подтверждением)."""
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-
-    if not await _require(update, context, "owner"):
-        return
-
-    # Только личка: в группе молча выходим (команда уже удалена).
-    if _is_group_chat(update):
-        return
-
-    # Своя инструкция задана? Если нет — уже действует заводская, сбрасывать нечего.
-    current = get_setting("proactive_instruction", "").strip()
-    if not current:
-        sent_msg = await context.bot.send_message(chat_id=chat_id, text=
-            "ℹ️ <b>Сейчас уже действует заводская инструкция участия в разговоре.</b>\n\n"
-            "Своя не задана — возвращать нечего.",
-            parse_mode=ParseMode.HTML
-        )
-        if sent_msg:
-            await register_and_clean_bot_message(context.bot, chat_id, sent_msg.message_id)
-        return
-
-    keyboard = [
-        [
-            InlineKeyboardButton("✅ Да, вернуть заводскую", callback_data="proactive_prompt_reset_confirm"),
-            InlineKeyboardButton("❌ Отмена", callback_data="proactive_prompt_reset_cancel"),
-        ]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    sent_msg = await context.bot.send_message(chat_id=chat_id, text=
-        f"🗑️ <b>Возврат заводской инструкции участия в разговоре</b>\n\n"
-        f"Твоя инструкция ({len(current)} символов) будет удалена, "
-        f"вернётся заводская.\n\n"
-        f"⚠️ <b>Подтвердить?</b>",
-        parse_mode=ParseMode.HTML,
-        reply_markup=reply_markup
-    )
-    if sent_msg:
-        await register_and_clean_bot_message(context.bot, chat_id, sent_msg.message_id)
-
 # ─────────────────────────────────────────────
 #  ПОДТВЕРЖДЕНИЕ СБРОСА ПРОМПТОВ (2026-08-03)
 # ─────────────────────────────────────────────
@@ -1288,9 +817,33 @@ async def cmd_proactive_prompt_reset(update: Update, context: ContextTypes.DEFAU
 #  «кнопки ↔ роутер» (кнопка в панели есть, ветки нет); попал в роутер
 #  лишний callback без записи в таблице — сработает ветка «кнопка устарела»
 #  в handle_prompt_reset, с предупреждением в лог.
-_PROMPT_RESETS = {
+_PROMPTS = {
     # ключ = приставка callback'ов «<приставка>_reset_confirm/cancel»
     "prompt": {
+        # ── команда /prompt_set ──
+        "set_key": "custom_system_prompt",
+        "file_what": "промпта",
+        "set_log":  "установил кастомный системный промпт",
+        "set_done": "✅ <b>Системный промпт заменён!</b>",
+        "set_note": "",
+        "set_usage": "✏️ <b>Замена системного промпта</b>\n\n"
+                     "<b>Способ 1:</b> Напиши текст после команды:\n"
+                     "<code>/prompt_set Ты — дружелюбный бот...</code>\n\n"
+                     "<b>Способ 2:</b> Отправь <code>.txt</code> файл с промптом, "
+                     "затем ответь (Reply) на него командой <code>/prompt_set</code>",
+        # ── команда /prompt_reset ──
+        # ЕДИНСТВЕННЫЙ промпт из двух ключей: свой текст и дополнения /prompt_add.
+        # Поэтому подтверждение перечисляет их списком, а не одной длиной.
+        "reset_reader": lambda: [("Кастомный промпт", get_setting("custom_system_prompt", "")),
+                                 ("Дополнения", get_setting("prompt_additions", ""))],
+        "reset_btn": "✅ Да, сбросить",
+        "reset_empty": "ℹ️ <b>Сброс не требуется.</b>\n\n"
+                       "Бот уже использует заводской промпт из <code>config.py</code>.\n"
+                       "Кастомных изменений и дополнений не обнаружено.",
+        "reset_body": "🔄 <b>Сброс системного промпта</b>\n\n"
+                      "Будет удалено:\n{details}\n"
+                      "Бот вернётся к заводскому промпту из <code>config.py</code>.\n\n"
+                      "⚠️ <b>Это действие нельзя отменить. Подтвердить?</b>",
         "keys":   ("custom_system_prompt", "prompt_additions"),
         "what":   "промпта",
         "log":    "сбросил системный промпт к заводским настройкам",
@@ -1301,6 +854,26 @@ _PROMPT_RESETS = {
         "cancel": "🔄 <b>Сброс промпта отменён.</b>\n\nТекущий промпт остался без изменений.",
     },
     "news_prompt": {
+        "set_key": "news_system_prompt",
+        "file_what": "промпта новостей",
+        "set_log":  "установил промпт новостей",
+        "set_done": "✅ <b>Промпт новостей установлен!</b>",
+        "set_note": "",
+        "set_usage": "📰 <b>Промпт для форматирования новостей</b>\n\n"
+                     "Этот промпт отправляется ИИ как системная инструкция при каждом "
+                     "форматировании новости.\n\n"
+                     "<b>Способ 1:</b> Напиши текст после команды:\n"
+                     "<code>/news_prompt_set Ты — военный корреспондент C4_Max...</code>\n\n"
+                     "<b>Способ 2:</b> Отправь <code>.txt</code> файл с промптом, "
+                     "затем ответь (Reply) на него командой <code>/news_prompt_set</code>",
+        "reset_reader": lambda: [(None, get_news_system_prompt())],
+        "reset_btn": "✅ Да, удалить",
+        "reset_empty": "ℹ️ <b>Промпт новостей не задан.</b>\n\n"
+                       "Нечего удалять — новости уже форматируются без системного промпта.",
+        "reset_body": "🗑️ <b>Удаление промпта новостей</b>\n\n"
+                      "Текущий промпт ({length} символов) будет удалён.\n"
+                      "Новости начнут форматироваться без системного промпта.\n\n"
+                      "⚠️ <b>Подтвердить?</b>",
         "keys":   ("news_system_prompt",),
         "what":   "промпта новостей",
         "log":    "удалил промпт новостей",
@@ -1312,6 +885,29 @@ _PROMPT_RESETS = {
     # Своя инструкция стирается, а не заменяется текстом: get_rag_instruction
     # и get_proactive_instruction сами вернутся к заводской из config.py.
     "rag_prompt": {
+        "set_key": "rag_instruction",
+        "file_what": "RAG-инструкции",
+        "set_log":  "изменил RAG-инструкцию",
+        "set_done": "✅ <b>RAG-инструкция обновлена!</b>",
+        "set_note": "\n\nℹ️ Найденные статьи по-прежнему подставляются автоматически "
+                    "под этой инструкцией.",
+        "set_usage": "🧠 <b>RAG-инструкция</b>\n\n"
+                     "Это «шапка», которая уходит модели ПЕРЕД найденными статьями базы "
+                     "знаний. Сами статьи бот всегда подставляет под ней сам — их писать "
+                     "не нужно.\n\n"
+                     "<b>Способ 1:</b> Напиши текст после команды:\n"
+                     "<code>/rag_prompt_set Ты эксперт по технике War Thunder Mobile...</code>\n\n"
+                     "<b>Способ 2:</b> Отправь <code>.txt</code> файл с текстом, "
+                     "затем ответь (Reply) на него командой <code>/rag_prompt_set</code>\n\n"
+                     "🗑️ Вернуть заводскую — /rag_prompt_reset",
+        "reset_reader": lambda: [(None, get_setting("rag_instruction", "").strip())],
+        "reset_btn": "✅ Да, вернуть заводскую",
+        "reset_empty": "ℹ️ <b>Сейчас уже действует заводская RAG-инструкция.</b>\n\n"
+                       "Своя не задана — возвращать нечего.",
+        "reset_body": "🗑️ <b>Возврат заводской RAG-инструкции</b>\n\n"
+                      "Твоя инструкция ({length} символов) будет удалена, "
+                      "вернётся заводская.\n\n"
+                      "⚠️ <b>Подтвердить?</b>",
         "keys":   ("rag_instruction",),
         "what":   "RAG-инструкции",
         "log":    "вернул заводскую RAG-инструкцию",
@@ -1321,6 +917,29 @@ _PROMPT_RESETS = {
         "cancel": "🔄 <b>Возврат заводской RAG-инструкции отменён.</b>\n\nТвоя инструкция осталась без изменений.",
     },
     "proactive_prompt": {
+        "set_key": "proactive_instruction",
+        "file_what": "инструкции участия",
+        "set_log":  "изменил инструкцию участия в разговоре",
+        "set_done": "✅ <b>Инструкция участия в разговоре обновлена!</b>",
+        "set_note": "\n\nℹ️ Стенограмма чата по-прежнему подставляется автоматически "
+                    "под этой инструкцией.",
+        "set_usage": "🗣 <b>Инструкция участия в разговоре</b>\n\n"
+                     "По ней бот сам решает, вступить ли в беседу группы, когда к нему "
+                     "НЕ обращались (режим «Сам в разговор»). Стенограмму чата бот "
+                     "подставляет под ней сам — её писать не нужно.\n\n"
+                     "<b>Способ 1:</b> Напиши текст после команды:\n"
+                     "<code>/proactive_prompt_set Вступай, только если можешь пошутить...</code>\n\n"
+                     "<b>Способ 2:</b> Отправь <code>.txt</code> файл с текстом, "
+                     "затем ответь (Reply) на него командой <code>/proactive_prompt_set</code>\n\n"
+                     "🗑️ Вернуть заводскую — /proactive_prompt_reset",
+        "reset_reader": lambda: [(None, get_setting("proactive_instruction", "").strip())],
+        "reset_btn": "✅ Да, вернуть заводскую",
+        "reset_empty": "ℹ️ <b>Сейчас уже действует заводская инструкция участия в разговоре.</b>\n\n"
+                       "Своя не задана — возвращать нечего.",
+        "reset_body": "🗑️ <b>Возврат заводской инструкции участия в разговоре</b>\n\n"
+                      "Твоя инструкция ({length} символов) будет удалена, "
+                      "вернётся заводская.\n\n"
+                      "⚠️ <b>Подтвердить?</b>",
         "keys":   ("proactive_instruction",),
         "what":   "инструкции участия",
         "log":    "вернул заводскую инструкцию участия в разговоре",
@@ -1335,7 +954,7 @@ _PROMPT_RESETS = {
 # читателю. В САМ РОУТЕР их подставлять нельзя (см. предупреждение выше).
 _PROMPT_RESET_CALLBACKS = tuple(
     f"{name}_reset_{action}"
-    for name in _PROMPT_RESETS
+    for name in _PROMPTS
     for action in ("confirm", "cancel")
 )
 
@@ -1343,13 +962,13 @@ _PROMPT_RESET_CALLBACKS = tuple(
 async def handle_prompt_reset(query, user_id: int, data: str):
     """
     Кнопки «✅ Да, сбросить» / «❌ Отмена» под вопросом о сбросе промпта.
-    Одна на все четыре промпта: что стереть и что написать — в _PROMPT_RESETS.
+    Одна на все четыре промпта: что стереть и что написать — в _PROMPTS.
 
     На callback отвечает РОВНО ОДИН раз (правило карты про кнопки карточки
     действует и здесь): попап здесь, вызывающая ветка роутера молчит.
     """
     name, _, action = data.rpartition("_reset_")
-    spec = _PROMPT_RESETS.get(name)
+    spec = _PROMPTS.get(name)
     if spec is None:
         # Кнопка из старого сообщения на промпт, которого больше нет в таблице.
         # Молчать нельзя — кнопка будет выглядеть зависшей.
@@ -1371,3 +990,174 @@ async def handle_prompt_reset(query, user_id: int, data: str):
         await query.edit_message_text(text, parse_mode=ParseMode.HTML)
     except Exception as e:
         logger.warning("⚠️ Не удалось обновить сообщение %s: %s", whose, e)
+
+
+# ─────────────────────────────────────────────
+#  КОМАНДЫ УПРАВЛЕНИЯ ПРОМПТАМИ (2026-08-04)
+# ─────────────────────────────────────────────
+#  Четыре промпта правятся одинаково: /X_prompt_set задаёт текст (аргументом
+#  команды или .txt-файлом через Reply), /X_prompt_reset спрашивает
+#  подтверждение и вешает кнопки, которые обслуживает handle_prompt_reset.
+#
+#  До 2026-08-04 это были ВОСЕМЬ отдельных функций на 455 строк, совпадавших
+#  каркасом на 78–95%: различались имя ключа и тексты сообщений. Теперь тексты
+#  живут в таблице _PROMPTS (там же, где тексты кнопок подтверждения), а логика
+#  одна — _prompt_set_command и _prompt_reset_command. Команды остались
+#  отдельными именами: их регистрирует handlers/__init__.py, и PTB зовёт
+#  каждую по своему CommandHandler.
+#
+#  ⚠️ Пятый промпт заводится ОДНОЙ записью в _PROMPTS плюс парой тонких
+#  обёрток ниже — и не забыть зарегистрировать команды в handlers/__init__.py
+#  и добавить их в re-export handlers/admin/__init__.py.
+
+
+async def _prompt_send(context, chat_id: int, text: str, reply_markup=None):
+    """
+    Ответ команды промпта. ВСЕГДА через гигиену панелей: подсказки и
+    подтверждения — служебные сообщения, без регистрации они копились бы
+    в чате навсегда (так было задумано с самого начала во всех восьми
+    командах, здесь это правило записано один раз).
+    """
+    sent_msg = await context.bot.send_message(
+        chat_id=chat_id, text=text, parse_mode=ParseMode.HTML, reply_markup=reply_markup
+    )
+    if sent_msg:
+        await register_and_clean_bot_message(context.bot, chat_id, sent_msg.message_id)
+
+
+async def _prompt_text_from_message(update, context, spec) -> tuple:
+    """
+    Достаёт новый текст промпта из команды: аргументом после команды ИЛИ
+    из .txt-файла, на который сделан Reply. Возвращает (текст, ошибка_прочтения).
+
+    Файл читается только с расширением .txt и только в UTF-8 — так было
+    во всех четырёх командах; чужую кодировку ловим и честно об этом пишем.
+    """
+    message = update.message
+    if context.args:
+        return message.text.split(None, 1)[1], False
+
+    reply = message.reply_to_message
+    if reply and reply.document:
+        doc = reply.document
+        if doc.file_name and doc.file_name.endswith(".txt"):
+            try:
+                file = await context.bot.get_file(doc.file_id)
+                file_bytes = await file.download_as_bytearray()
+                return file_bytes.decode("utf-8").strip(), False
+            except Exception as e:
+                logger.error("⚠️ Не удалось прочитать файл %s: %s", spec["file_what"], e)
+                return "", True
+    return "", False
+
+
+async def _prompt_set_command(update: Update, context: ContextTypes.DEFAULT_TYPE, name: str):
+    """
+    Общий исполнитель команд /X_prompt_set. Что именно писать и куда —
+    в записи `name` таблицы _PROMPTS.
+    """
+    await delete_user_message_safe(update.message)
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    spec = _PROMPTS[name]
+
+    if not await _require(update, context, "owner"):
+        return
+    # Только личка: в группе молча выходим (команда уже удалена).
+    if _is_group_chat(update):
+        return
+
+    new_prompt, read_failed = await _prompt_text_from_message(update, context, spec)
+    if read_failed:
+        await _prompt_send(context, chat_id,
+                           "❌ <b>Ошибка при чтении файла.</b> Убедись, что это текстовый "
+                           ".txt файл в кодировке UTF-8.")
+        return
+    if not new_prompt:
+        await _prompt_send(context, chat_id, spec["set_usage"])
+        return
+
+    set_setting(spec["set_key"], new_prompt)
+    logger.info("🔧 Админ %s %s (%d символов)", user_id, spec["set_log"], len(new_prompt))
+
+    # Превью первых 300 символов: чужой текст в HTML-панели обязателен
+    # к экранированию — «<» в промпте иначе сломает отправку.
+    preview = new_prompt[:300].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    if len(new_prompt) > 300:
+        preview += "..."
+    await _prompt_send(context, chat_id,
+                       f"{spec['set_done']}\n\n"
+                       f"📊 Длина: {len(new_prompt)} символов\n\n"
+                       f"<b>Превью:</b>\n{preview}{spec['set_note']}")
+
+
+async def _prompt_reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE, name: str):
+    """
+    Общий исполнитель команд /X_prompt_reset: спрашивает подтверждение и вешает
+    две кнопки. Само стирание делает handle_prompt_reset по той же таблице.
+    Нечего сбрасывать — говорим об этом и кнопок не показываем.
+    """
+    await delete_user_message_safe(update.message)
+    chat_id = update.effective_chat.id
+    spec = _PROMPTS[name]
+
+    if not await _require(update, context, "owner"):
+        return
+    if _is_group_chat(update):
+        return
+
+    filled = [(label, text) for label, text in spec["reset_reader"]() if text]
+    if not filled:
+        await _prompt_send(context, chat_id, spec["reset_empty"])
+        return
+
+    details = "".join(f"• {label} ({len(text)} символов)\n" for label, text in filled if label)
+    body = spec["reset_body"].format(details=details, length=len(filled[0][1]))
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton(spec["reset_btn"], callback_data=f"{name}_reset_confirm"),
+        InlineKeyboardButton("❌ Отмена", callback_data=f"{name}_reset_cancel"),
+    ]])
+    await _prompt_send(context, chat_id, body, keyboard)
+
+
+# ── Тонкие обёртки: их регистрирует handlers/__init__.py ──────────────
+async def cmd_prompt_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Полностью заменяет системный промпт на кастомный."""
+    await _prompt_set_command(update, context, "prompt")
+
+
+async def cmd_prompt_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Сбрасывает системный промпт к заводским настройкам (с подтверждением)."""
+    await _prompt_reset_command(update, context, "prompt")
+
+
+async def cmd_news_prompt_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Задаёт системный промпт форматирования новостей."""
+    await _prompt_set_command(update, context, "news_prompt")
+
+
+async def cmd_news_prompt_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Удаляет промпт новостей (с подтверждением)."""
+    await _prompt_reset_command(update, context, "news_prompt")
+
+
+async def cmd_rag_prompt_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Задаёт «шапку»-инструкцию, уходящую модели перед статьями RAG.
+    Хранится в settings под ключом 'rag_instruction'. Сами статьи бот всегда
+    подставляет под инструкцией автоматически."""
+    await _prompt_set_command(update, context, "rag_prompt")
+
+
+async def cmd_rag_prompt_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Возвращает заводскую RAG-инструкцию (удаляет свою, с подтверждением)."""
+    await _prompt_reset_command(update, context, "rag_prompt")
+
+
+async def cmd_proactive_prompt_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Задаёт инструкцию участия в разговоре (режим «Сам в разговор»)."""
+    await _prompt_set_command(update, context, "proactive_prompt")
+
+
+async def cmd_proactive_prompt_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Возвращает заводскую инструкцию участия (с подтверждением)."""
+    await _prompt_reset_command(update, context, "proactive_prompt")
