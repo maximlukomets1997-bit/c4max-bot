@@ -268,19 +268,12 @@ async def _notify_admins(bot, text: str, html: bool = False):
 
 
 async def post_init(application):
-    commands = [
-        BotCommand("start", "Начать работу / перезапуск"),
-        BotCommand("help", "Помощь и список команд"),
-        BotCommand("ttx", "ТТХ техники из базы знаний"),
-        BotCommand("imagine", "Сгенерировать картинку"),
-        BotCommand("rank", "Моя статистика"),
-        # /subscribe и /unsubscribe в меню НЕТ (решение Максима 2026-08-04):
-        # подписка переехала на кнопку-тумблер «📰 Новости» главного экрана
-        # /start — она показывает состояние и не требует помнить две команды.
-        # Сами команды остались рабочими: старые сообщения с ними и привычка
-        # набирать /subscribe продолжают работать.
-        BotCommand("clear", "Очистить текущий контекст диалога"),
-    ]
+    # Список публичных команд ОДИН на весь проект — handlers/commands.py.
+    # Второй читатель — _sync_staff_menu (панель /users): он пересобирает меню
+    # в момент выдачи и снятия прав модератора. Здесь списка руками нет
+    # намеренно: две копии уже разъезжались (2026-08-04).
+    from handlers.commands import public_commands
+    commands = public_commands()
     await application.bot.set_my_commands(commands, scope=BotCommandScopeDefault())
     # Публичные команды видны всем в личке и в группах.
     await application.bot.set_my_commands(commands, scope=BotCommandScopeAllPrivateChats())

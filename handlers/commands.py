@@ -16,6 +16,46 @@ logger = logging.getLogger(__name__)
 _SEP = "─" * 27
 
 
+def public_commands():
+    """
+    ЕДИНСТВЕННЫЙ список публичных команд для меню Telegram (2026-08-04).
+
+    ⚠️ Читателей у него ДВА: `main.py::post_init` (меню при старте) и
+    `panel_users.py::_sync_staff_menu` (пересборка меню в момент выдачи или
+    снятия прав модератора). До этой правки список был написан РУКАМИ в обоих
+    местах — и они успели разъехаться: у модератора остался `/subscribe`,
+    убранный из общего меню, да ещё и с другими подписями у всех команд.
+    Появится третий читатель — берёт отсюда же, своей копии не заводит.
+
+    `/subscribe` и `/unsubscribe` здесь НЕТ намеренно (решение Максима):
+    подписка живёт на кнопке-тумблере «📰 Новости» главного экрана. Сами
+    команды остались рабочими — просто в меню не показываются.
+    """
+    from telegram import BotCommand
+    return [
+        BotCommand("start", "Главное меню"),
+        BotCommand("help", "Все команды и как со мной говорить"),
+        BotCommand("ttx", "ТТХ техники из базы знаний"),
+        BotCommand("imagine", "Сгенерировать картинку"),
+        BotCommand("rank", "Моё личное дело и звание"),
+        BotCommand("clear", "Очистить текущий контекст диалога"),
+    ]
+
+
+def bot_display_name(bot) -> str:
+    """
+    Как бот называет САМ СЕБЯ в текстах для людей — его имя в Telegram
+    («АДМИНИСТРАТОР C4_WTM»), а не выдуманное в коде.
+
+    ⚠️ Раньше в /start и в приветствии новичков было зашито «Я C4_Max» —
+    это ИМЯ ВЛАДЕЛЬЦА (его аккаунт называется C4_Max), и получалось, что бот
+    представляется чужим именем, а Максиму писал «Привет, C4_Max! Я C4_Max».
+    Берём `bot.first_name`: переименуют бота у @BotFather — тексты поедут
+    следом сами, править ничего не надо.
+    """
+    return getattr(bot, "first_name", None) or "бот"
+
+
 async def _send_public_panel(bot, chat_id: int, text: str, markup=None):
     """
     Отправка публичного экрана (/start, /help) с общим запасным путём.
@@ -76,19 +116,30 @@ def _menu_keyboard(chat_id: int) -> InlineKeyboardMarkup:
     ])
 
 
-def _menu_text(bot_username: str, first_name: str = "") -> str:
-    """Текст главного экрана. Одинаков в личке и в группе — он короткий."""
+def _menu_text(bot, first_name: str = "") -> str:
+    """
+    Текст главного экрана. Одинаков в личке и в группе — он короткий.
+
+    Имя бота берётся у самого бота (см. bot_display_name), номер версии — из
+    файла VERSION через config.BOT_VERSION, как в заголовке /adm.
+    ⚠️ Номер печатается ПРОСТЫМ ТЕКСТОМ, а не ссылкой `BOT_VERSION_HTML`, как
+    в админ-панели: там ссылка ведёт на коммит в репозитории, и посторонним
+    людям, которые видят этот экран, она бесполезна (а если репозиторий
+    закрыт — просто мёртвая).
+    """
+    from config import BOT_VERSION
     hello = f"👋 <b>Привет, {html.escape(first_name)}!</b>" if first_name else "👋 <b>Привет!</b>"
+    name = html.escape(bot_display_name(bot))
     return (
         f"{hello}\n\n"
-        f"Я <b>C4_Max</b> — бот по War Thunder Mobile.\n"
+        f"Я <b>{name}</b> — бот по War Thunder Mobile.\n"
         f"Отвечу на вопрос, покажу ТТХ, погоняю в викторине.\n"
         f"{_SEP}\n"
         f"💬 <b>В личке</b> пиши что угодно — можно голосовым, фото или видео, "
         f"я всё пойму.\n"
-        f"🗣 <b>В группе</b> — упомяни @{bot_username} или ответь на моё сообщение.\n"
+        f"🗣 <b>В группе</b> — упомяни @{bot.username} или ответь на моё сообщение.\n"
         f"{_SEP}\n"
-        f"<i>Жми кнопки — команды набирать не обязательно.</i>"
+        f"<i>Жми кнопки — команды набирать не обязательно · v{BOT_VERSION}</i>"
     )
 
 
@@ -133,7 +184,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await _send_public_panel(
         context.bot, chat_id,
-        _menu_text(context.bot.username, user.first_name if user else ""),
+        _menu_text(context.bot, user.first_name if user else ""),
         _menu_keyboard(chat_id),
     )
 
@@ -252,7 +303,7 @@ async def handle_menu_callback(query, context, data: str) -> None:
     elif what == "help":
         text, markup = _help_text(bot.username), _back_keyboard()
     else:  # back — возврат на главный экран
-        text = _menu_text(bot.username, query.from_user.first_name or "")
+        text = _menu_text(bot, query.from_user.first_name or "")
         markup = _menu_keyboard(chat_id)
 
     try:
