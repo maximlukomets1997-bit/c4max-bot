@@ -6,8 +6,9 @@
 #  Забирает только в тишину — перезапуск оборвал бы разговор.
 # ───────────────────────────────────────────────
 
-import logging
 import asyncio
+import json
+import logging
 import time
 
 logger = logging.getLogger(__name__)
@@ -38,7 +39,8 @@ async def auto_update_loop(application):
     """
     from config import (ADMIN_IDS, AUTO_UPDATE_ENABLED_DEFAULT, AUTO_UPDATE_INTERVAL_SEC,
                         AUTO_UPDATE_QUIET_SEC, AUTO_UPDATE_TICK_SEC)
-    from database.history import get_setting
+    from config import UPDATE_NOTICE_MSGS_KEY
+    from database.history import get_setting, set_setting
     from services import deploy
 
     await asyncio.sleep(20)  # даём боту подняться (как у остальных циклов)
@@ -51,13 +53,55 @@ async def auto_update_loop(application):
                 "перезапуск только при тишине %d сек)",
                 AUTO_UPDATE_INTERVAL_SEC // 60, AUTO_UPDATE_QUIET_SEC)
 
+    async def _forget_previous_notice() -> None:
+        """
+        Стирает ПРЕДЫДУЩЕЕ сообщение об обновлении (2026-08-04, просьба
+        Максима: «пусть удаляет старое своё сообщение об обновлении»). Иначе
+        в личке владельца копится лента одинаковых уведомлений — бот
+        обновляется тем чаще, чем чаще идут правки.
+
+        Координаты лежат в settings (`UPDATE_NOTICE_MSGS_KEY`), а не в памяти:
+        сразу после «⬇️ Обновился сам…» бот ПЕРЕЗАПУСКАЕТСЯ, и память не
+        переживает даже собственного сообщения.
+
+        Тихая: сообщение мог удалить сам владелец, а старше 48 часов Telegram
+        ботам удалять не даёт — оба случая штатные, ругаться на них нечего.
+        ⚠️ Гигиену панелей (`register_and_clean_bot_message`) здесь применять
+        НЕЛЬЗЯ: она стирает ПОСЛЕДНЕЕ сообщение бота в чате, каким бы оно ни
+        было, — уведомление об обновлении снесло бы открытую админ-панель.
+        Поэтому у него свой, отдельный след.
+        """
+        raw = get_setting(UPDATE_NOTICE_MSGS_KEY, "")
+        if not raw:
+            return
+        try:
+            items = json.loads(raw)
+        except (TypeError, ValueError):
+            items = []
+        for pair in items:
+            try:
+                chat_id, message_id = pair
+                await application.bot.delete_message(chat_id=chat_id, message_id=message_id)
+            except Exception as e:
+                logger.debug("⬇️ Не удалось удалить прошлое уведомление %s: %s", pair, e)
+
     async def _notify(text: str) -> None:
+        # Сначала убираем прошлое уведомление, потом шлём новое: если бот
+        # не достучится до Телеграма вовсе, старое хотя бы уже стёрто и
+        # ленты не будет.
+        await _forget_previous_notice()
+        sent = []
         # Ошибка отправки одному владельцу не мешает остальным (как в итогах месяца)
         for admin_id in ADMIN_IDS:
             try:
-                await application.bot.send_message(chat_id=admin_id, text=text)
+                msg = await application.bot.send_message(chat_id=admin_id, text=text)
+                if msg:
+                    sent.append([admin_id, msg.message_id])
             except Exception as e:
                 logger.warning("⚠️ Не удалось сообщить об обновлении %s: %s", admin_id, e)
+        # ⚠️ ЗАПИСЫВАЕМ ДО ПЕРЕЗАПУСКА — вызывающий код останавливает бота
+        # сразу после этой строки, и всё несохранённое пропадёт.
+        set_setting(UPDATE_NOTICE_MSGS_KEY, json.dumps(sent, ensure_ascii=False))
 
     last_check = time.monotonic()
     while True:
