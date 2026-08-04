@@ -21,7 +21,8 @@ logger = logging.getLogger(__name__)
 from .common import (_LOG_FILE_TTL, _adm_back_row, _audit, _build_log_text,
                      _count_archive_sessions, _log_files_row, _read_archive_log,
                      _read_current_log)
-from .panel_main import (_build_api_keyboard, _handle_balance_callback, build_adm_keyboard,
+from .panel_balance import _handle_balance_callback
+from .panel_main import (_build_api_keyboard, build_adm_keyboard,
                          send_adm_panel, send_api_panel,
                          send_daily_report_panel, send_weekly_report_panel,
                          send_stats_panel)

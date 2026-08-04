@@ -27,8 +27,8 @@ from .panel_prompts import (
     cmd_proactive_prompt_set, cmd_proactive_prompt_reset, send_prompt_files,
 )
 from .panel_main import (send_adm_panel, cmd_adm, send_stats_panel, cmd_stats, send_api_panel,
-                         send_daily_report_panel, send_weekly_report_panel,
-                         send_balance_panel, handle_balance_input)
+                         send_daily_report_panel, send_weekly_report_panel)
+from .panel_balance import send_balance_panel, handle_balance_input
 from .panel_mod import send_mod_panel, cmd_mod, cmd_unmute
 from .panel_users import send_users_panel, send_user_card, cmd_users
 from .router import handle_callback_query
