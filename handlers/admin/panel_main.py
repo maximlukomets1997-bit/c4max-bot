@@ -34,17 +34,15 @@ from .panel_rag import _end_kb_test
 # Максимом «по столбцам»: слева 3 Flash (v3) и 3.1 Flash-Lite, справа
 # 3.5 Flash и 3.6 Flash — в рядах это даёт пары ниже.
 # 2026-07-25: добавлен ряд Xiaomi MiMo (mimo-v2.5 / mimo-v2.5-pro) — стало 5 рядов.
-# 2026-08-01: добавлена ВРЕМЕННАЯ Ling 3.0 Flash (OpenRouter) — стало 6 рядов.
-# Она одна в своём ряду намеренно: пара ей не нужна, а отдельная строка сразу
-# показывает, что модель тут гостит, а не прописана. Наигрались — удалить
-# и эту строку, и запись из AVAILABLE_MODELS.
+# 2026-08-01: добавлялась ВРЕМЕННАЯ Ling 3.0 Flash (OpenRouter) отдельной
+# строкой; 2026-08-04 убрана по решению Максима — «больше не нужна». Провайдер
+# OpenRouter оставлен под следующую дешёвую модель, см. config.py.
 _MODEL_BUTTON_ROWS = [
     ["gemini-3-flash-preview", "gemini-3.5-flash"],
     ["gemini-3.1-flash-lite", "gemini-3.6-flash"],
     ["qwen3.7-plus", "qwen3.7-max"],
     ["deepseek-v4-flash", "deepseek-v4-pro"],
     ["mimo-v2.5", "mimo-v2.5-pro"],
-    ["inclusionai/ling-3.0-flash:free"],
 ]
 
 # Ряд моделей картинок (Nano Banana, gemini-*-image).
@@ -95,9 +93,23 @@ def _build_api_keyboard(user_id):
     active_model = get_setting("active_model", GEMINI_MODEL)
     active_image_model = get_setting("active_image_model", "gemini-3.1-flash-image")
     _, model_markup = _build_model_panel_text_and_keyboard(active_model, active_image_model, user_id)
+    # Тумблер показа «мыслей под капотом» (2026-08-03; 2026-08-04 переехал сюда
+    # из панели промптов по просьбе Максима — его место рядом с выбором модели,
+    # а не рядом с текстами промптов). Настройка ОБЩАЯ: выключена — свёрнутой
+    # цитаты с рассуждениями нет ни в личке, ни в группах, ни в режиме
+    # «Сам в разговор». Состояние читаем через utils_format — там же, где оно
+    # и применяется, своей строки `"thoughts_enabled"` здесь не заводим.
+    # ⚠️ Тумблер про ПОКАЗ, а не про расход: модели думают и тратят токены
+    # по-прежнему — обещать рядом с кнопками моделей экономию нельзя.
+    # Своим рядом: надпись длинная, в половину ширины не влезает.
+    from utils_format import thoughts_enabled
+    thoughts_row = [InlineKeyboardButton(
+        f"🧠 МЫСЛИ ПОД КАПОТОМ: {_onoff(thoughts_enabled())}",
+        callback_data="toggle_thoughts")]
     # inline_keyboard у собранной клавиатуры — кортеж (tuple), складывать его
     # со списком нельзя — приводим всё к спискам.
     rows = list(model_markup.inline_keyboard) + [
+        thoughts_row,
         list(_REPORT_BUTTON_ROW),
         [InlineKeyboardButton("💰 СЧЕТА И КВОТЫ", callback_data="bal:panel")],
         _adm_back_row(),

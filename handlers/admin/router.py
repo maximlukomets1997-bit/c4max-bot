@@ -437,8 +437,9 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             show_alert=True,
         )
         try:
-            _, prompt_markup = _build_prompt_panel_text_and_keyboard(user_id)
-            await query.edit_message_reply_markup(reply_markup=prompt_markup)
+            # Кнопка живёт в панели «📡 Настройки API» (переехала туда
+            # 2026-08-04) — перерисовываем ЕЁ клавиатуру, а не панели промптов.
+            await query.edit_message_reply_markup(reply_markup=_build_api_keyboard(user_id))
         except Exception as e:
             logger.warning("⚠️ Не удалось обновить клавиатуру тумблера мыслей: %s", e)
         return
