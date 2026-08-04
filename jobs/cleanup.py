@@ -47,9 +47,9 @@ async def _monthly_stats_reset(application) -> None:
     Месячный сброс счётчиков панели «📡 Настройки API»: вызовы моделей
     (таблица api_calls) и накопленные расходы (qwen/image_cost_usd).
     ⚠️ Расходы DeepSeek (deepseek_cost_usd), Xiaomi (xiaomi_cost_usd) и
-    OpenRouter (openrouter_cost_usd) НЕ обнуляются — ведутся «за всё время»
+    (deepseek_cost_usd, xiaomi_cost_usd) НЕ обнуляются — ведутся «за всё время»
     и сверяются с кабинетами провайдеров (решение Максима: DeepSeek 2026-07-21,
-    Xiaomi 2026-07-25; OpenRouter заведён 2026-08-01 по тому же образцу).
+    Xiaomi 2026-07-25).
     У всех троих в settings есть остаток счёта, который тает сам, — обнуление
     расхода разрушило бы сверку.
 

@@ -52,8 +52,8 @@ from .common import _adm_back_row, _audit, _send_panel_message
 # руками по два в ряд, и блоки текста идут тем же порядком, что они. Провайдер,
 # забытый в этих кортежах, на экран не попадёт — поэтому полноту сверяет
 # `preflight.py` (проверка «провайдеры»), а не внимательность.
-_BALANCE_ORDER = ("deepseek", "xiaomi", "openrouter", "image")
-_COST_ORDER = ("deepseek", "qwen", "xiaomi", "openrouter", "image")
+_BALANCE_ORDER = ("deepseek", "xiaomi", "image")
+_COST_ORDER = ("deepseek", "qwen", "xiaomi", "image")
 
 _BALANCE_FIELDS = {
     pid: {"key": PROVIDERS[pid]["balance_key"], "provider": pid,
@@ -63,7 +63,7 @@ _BALANCE_FIELDS = {
 
 # Счётчики «потрачено» — их можно обнулить (при смене ключа или рабочего
 # пространства). Обнуление руками нужно потому, что вечные счётчики
-# (DeepSeek, Xiaomi, OpenRouter) месячный сброс не трогает вовсе, а у месячных
+# (DeepSeek, Xiaomi) месячный сброс не трогает вовсе, а у месячных
 # (Qwen, картинки) бывает нужно начать счёт заново посреди месяца.
 _COST_FIELDS = {
     pid: {"key": PROVIDERS[pid]["cost_key"], "provider": pid,
@@ -190,7 +190,7 @@ def _build_balance_panel(flash: str = ""):
         parts.append(f"{flash}\n{sep}")
 
     # Денежные блоки — в том же порядке, что кнопки ниже.
-    for field_id in ("deepseek", "xiaomi", "openrouter", "image"):
+    for field_id in _BALANCE_ORDER:
         cfg = _BALANCE_FIELDS[field_id]
         spent, _ = _read_number(_COST_FIELDS[field_id]["key"], "money")
         parts.append(
@@ -221,8 +221,7 @@ def _build_balance_panel(flash: str = ""):
     rows = [
         [InlineKeyboardButton(_BALANCE_FIELDS["deepseek"]["btn"], callback_data="bal:set:deepseek"),
          InlineKeyboardButton(_BALANCE_FIELDS["xiaomi"]["btn"], callback_data="bal:set:xiaomi")],
-        [InlineKeyboardButton(_BALANCE_FIELDS["openrouter"]["btn"], callback_data="bal:set:openrouter"),
-         InlineKeyboardButton(_BALANCE_FIELDS["image"]["btn"], callback_data="bal:set:image")],
+        [InlineKeyboardButton(_BALANCE_FIELDS["image"]["btn"], callback_data="bal:set:image")],
     ]
     # Кнопки квот — по две в ряд, собираются из конфига сами.
     qw_buttons = [InlineKeyboardButton(f"🎫 Квота {m}", callback_data=f"bal:set:qwen:{m}")
