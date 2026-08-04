@@ -32,6 +32,7 @@ from .panel_prompts import (_build_prompt_panel_text_and_keyboard, _handle_proac
                             _handle_proactive_wipe, handle_prompt_reset,
                             send_prompts_panel, send_prompt_files)
 from .panel_rag import _end_kb_test, _handle_kb_callback, send_rag_panel
+from .panel_updates import _handle_updates_callback, send_updates_panel
 from .panel_users import _handle_users_callback, send_users_panel
 
 
@@ -523,6 +524,14 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     # Префикс dig:<действие> — обработчик в panel_digest.py.
     if data.startswith("dig:"):
         await _handle_digest_callback(query, context, data, chat_id, user_id)
+        return
+
+    # ── ⬇️ Обновления (экран в панели статистики) ────────────────────────
+    # Префикс upd:<действие> — обработчик в panel_updates.py. Сами обновления
+    # в роутер НЕ приходят: их кнопки ссылочные (url=…), Telegram открывает
+    # страницу GitHub без участия бота — сюда попадает только листание.
+    if data.startswith("upd:"):
+        await _handle_updates_callback(query, context, data, chat_id, user_id)
         return
 
     # ── Панель модерации (/mod) ─────────────────────────────────────────

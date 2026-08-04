@@ -134,8 +134,12 @@ async def send_stats_panel(bot, chat_id: int, user_id: int):
     # 📊 Недельный дайджест группы (2026-08-04) живёт ИМЕННО ЗДЕСЬ, а не в
     # /mod: он про жизнь чата, а не про наказания, и собирается ровно из тех
     # данных, о которых эта панель и рассказывает.
+    # ⬇️ «Обновления» (2026-08-04, просьба Максима) — тоже здесь: это
+    # статистика про самого бота (сколько правок и когда), а каждая строка
+    # экрана открывается ссылкой на GitHub.
     from services import group_digest
     keyboard = [
+        [InlineKeyboardButton("⬇️ Обновления", callback_data="upd:list")],
         [InlineKeyboardButton("📊 Дайджест недели", callback_data="dig:show")],
         [InlineKeyboardButton(
             f"📰 Дайджест по понедельникам: {_onoff(group_digest.is_enabled())}",

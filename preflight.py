@@ -420,6 +420,7 @@ def check_panels():
     from handlers.admin.panel_prompts import (_build_proactive_stats_panel,
                                               _build_prompt_panel_text_and_keyboard)
     from handlers.admin.panel_rag import _build_rag_panel
+    from handlers.admin.panel_updates import _build_updates_panel
     from handlers.admin.panel_users import _build_staff_log_panel, _build_users_panel
     import config
 
@@ -442,6 +443,10 @@ def check_panels():
         "модерация": lambda: _build_mod_panel_text_and_keyboard(owner),
         "список пользователей": lambda: _build_users_panel(owner, 999),
         "журнал персонала": _build_staff_log_panel,
+        # ⬇️ Обновления: список читается из журнала git. В CI клон бывает
+        # обрезанным (одна запись) — панель тогда просто короче, но собраться
+        # обязана и на пустой истории.
+        "обновления": lambda: _build_updates_panel(0),
         "база знаний": lambda: _build_rag_panel(ctx, owner),
     }
 

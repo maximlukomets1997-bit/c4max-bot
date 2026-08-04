@@ -11,6 +11,7 @@
 #    panel_mod.py     — модерация: /mod, улики, размут
 #    panel_rag.py     — база знаний: /rag, приём файлов, «Проверить поиск»
 #    panel_users.py   — «👥 Пользователи»: список и карточка участника
+#    panel_updates.py — «⬇️ Обновления»: история правок со ссылками на GitHub
 #
 #  Этот файл — «оглавление»: собирает имена, которыми пользуется остальной
 #  код (handlers/__init__.py, main.py, handlers/messages.py), поэтому снаружи
@@ -31,4 +32,5 @@ from .panel_main import (send_adm_panel, cmd_adm, send_stats_panel, cmd_stats, s
 from .panel_balance import send_balance_panel, handle_balance_input
 from .panel_mod import send_mod_panel, cmd_mod, cmd_unmute
 from .panel_users import send_users_panel, send_user_card, cmd_users
+from .panel_updates import send_updates_panel
 from .router import handle_callback_query
