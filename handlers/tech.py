@@ -26,7 +26,8 @@ import os
 import time
 
 from telegram import (Update, InlineKeyboardButton, InlineKeyboardMarkup,
-                      InlineQueryResultArticle, InputTextMessageContent)
+                      InlineQueryResultArticle, InputTextMessageContent,
+                      LinkPreviewOptions)
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
@@ -50,6 +51,14 @@ _HINT_TTL = 60
 # процесса (как у антиспама) — переживать перезапуск ему незачем.
 _COOLDOWN_SEC = 10
 _last_call: dict[int, float] = {}
+
+# Превью ссылок выключено во ВСЕХ сообщениях справочника (решение Максима
+# 2026-08-04). Раздел «🎬 Видеообзор» содержит ссылки на YouTube и TikTok, и
+# Telegram разворачивал первую из них в обложку ролика во весь экран: карточка
+# переставала быть карточкой, а кнопки разделов уезжали за нижний край.
+# ⚠️ Ставить ОДИНАКОВО на всех путях — карточка, раздел и инлайн-ответ: иначе
+# превью будет то появляться, то исчезать при переходе между разделами.
+_NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
 
 def _cooled_down(user_id: int) -> bool:
@@ -203,6 +212,7 @@ async def _send_card(bot, chat_id: int, article: dict):
         text=tech_card.render_card(article, data),
         parse_mode=ParseMode.HTML,
         reply_markup=_card_keyboard(article, data),
+        link_preview_options=_NO_PREVIEW,
     )
 
 
@@ -250,7 +260,8 @@ async def handle_ttx_callback(query, context, data: str) -> None:
 
     await query.answer()
     try:
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup,
+                                      link_preview_options=_NO_PREVIEW)
     except Exception as e:
         # Самая частая причина — нажали кнопку раздела, который уже открыт:
         # Telegram отвечает «Message is not modified». Ругаться незачем.
@@ -318,6 +329,7 @@ async def inline_ttx(update: Update, context: ContextTypes.DEFAULT_TYPE):
             input_message_content=InputTextMessageContent(
                 message_text=tech_card.render_card(art, data),
                 parse_mode=ParseMode.HTML,
+                link_preview_options=_NO_PREVIEW,
             ),
         ))
     try:
