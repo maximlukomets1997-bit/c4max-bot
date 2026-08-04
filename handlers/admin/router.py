@@ -58,6 +58,14 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await handle_join_callback(query, context, data)
         return
 
+    # 📊 Кнопки карточки справочника техники (2026-08-04): разделы статьи,
+    # возврат к карточке, файл. Тоже ДО гейта прав — /ttx публичная команда,
+    # и её карточкой пользуются обычные участники группы.
+    if data.startswith("ttx:"):
+        from handlers.tech import handle_ttx_callback
+        await handle_ttx_callback(query, context, data)
+        return
+
     if data == "clear_history_btn":
         from database.history import clear_history
         clear_history(user_id)

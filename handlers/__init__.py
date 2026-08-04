@@ -1,9 +1,10 @@
-from telegram.ext import CommandHandler, MessageHandler, CallbackQueryHandler, ChatMemberHandler, PollAnswerHandler, filters
+from telegram.ext import CommandHandler, MessageHandler, CallbackQueryHandler, ChatMemberHandler, InlineQueryHandler, PollAnswerHandler, filters
 from .commands import cmd_start, cmd_help, cmd_clear, cmd_subscribe, cmd_unsubscribe, handle_unknown_command, log_incoming_command
 from .admin import cmd_prompt_set, cmd_prompt_add, cmd_prompt_reset, cmd_stats, cmd_mod, cmd_adm, cmd_rag, cmd_unmute, cmd_users, handle_callback_query, cmd_news_prompt_set, cmd_news_prompt_reset, cmd_rag_prompt_set, cmd_rag_prompt_reset, cmd_proactive_prompt_set, cmd_proactive_prompt_reset, handle_kb_document
 from .media import cmd_imagine
 from .messages import handle_message, handle_photo, handle_voice, handle_video, collect_group_message
 from .quiz import cmd_rank, handle_poll_answer
+from .tech import cmd_ttx, inline_ttx
 from services.greeter import on_chat_member
 
 
@@ -50,6 +51,14 @@ def setup_handlers(application):
     # прошёл бы проверку лимита весь разом.
     application.add_handler(CommandHandler('imagine', cmd_imagine, block=False))
     application.add_handler(CommandHandler('rank', cmd_rank))
+    # 📊 Справочник техники (2026-08-04). block=False: первая ступень поиска —
+    # чтение файлов, но вторая (семантическая) ходит в сеть за эмбеддингом
+    # запроса, и держать на ней всю очередь апдейтов нельзя.
+    application.add_handler(CommandHandler('ttx', cmd_ttx, block=False))
+    # Инлайн-режим того же справочника: «@бот ариете» в ЛЮБОМ чате.
+    # ⚠️ Пока инлайн не включён у @BotFather (/setinline), Telegram таких
+    # запросов просто не присылает — обработчик молчит, и это не поломка.
+    application.add_handler(InlineQueryHandler(inline_ttx, block=False))
     application.add_handler(CallbackQueryHandler(handle_callback_query))
     application.add_handler(PollAnswerHandler(handle_poll_answer))
     # Документы в личке: используется ТОЛЬКО заменой статей базы знаний

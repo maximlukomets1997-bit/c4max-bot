@@ -271,6 +271,7 @@ async def post_init(application):
     commands = [
         BotCommand("start", "Начать работу / перезапуск"),
         BotCommand("help", "Помощь и список команд"),
+        BotCommand("ttx", "ТТХ техники из базы знаний"),
         BotCommand("imagine", "Сгенерировать картинку"),
         BotCommand("rank", "Моя статистика"),
         BotCommand("subscribe", "Подписаться на новости C4_Max"),
