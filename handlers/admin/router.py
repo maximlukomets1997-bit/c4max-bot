@@ -22,6 +22,7 @@ from .common import (_LOG_FILE_TTL, _adm_back_row, _audit, _build_log_text,
                      _count_archive_sessions, _log_files_row, _read_archive_log,
                      _read_current_log)
 from .panel_balance import _handle_balance_callback
+from .panel_digest import _handle_digest_callback, send_digest_panel
 from .panel_main import (_build_api_keyboard, build_adm_keyboard,
                          send_adm_panel, send_api_panel,
                          send_daily_report_panel, send_weekly_report_panel,
@@ -508,6 +509,12 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     # панели «📡 Настройки API», рядом со счётчиками, которые он правит).
     if data.startswith("bal:"):
         await _handle_balance_callback(query, context, data, chat_id, user_id)
+        return
+
+    # ── 📊 Недельный дайджест группы (экран в панели статистики) ─────────
+    # Префикс dig:<действие> — обработчик в panel_digest.py.
+    if data.startswith("dig:"):
+        await _handle_digest_callback(query, context, data, chat_id, user_id)
         return
 
     # ── Панель модерации (/mod) ─────────────────────────────────────────
