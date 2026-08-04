@@ -26,7 +26,7 @@ from jobs import cleanup_loop
 from jobs import rag_catchup_loop
 from jobs import daily_report_loop
 from jobs import watchdog_loop
-from jobs import auto_update_loop
+from jobs import auto_update_loop, forget_update_notice
 
 logger = logging.getLogger(__name__)
 
@@ -331,6 +331,20 @@ async def post_init(application):
         # Дома завершается сразу — там код с GitHub не забирается.
         asyncio.create_task(auto_update_loop(application)),
     ]
+
+    # Убираем УСТАРЕВШЕЕ уведомление «⬇️ Обновился сам…» от прошлой сборки
+    # (2026-08-05). Само себя оно не стирает: код приезжает на сервер тремя
+    # путями, а уведомление шлёт только самообновление — после отправки с ПК
+    # Максима или кнопки «🔄 ПЕРЕЗАПУСК» старое сообщение висело в чате до
+    # следующего САМОобновления, то есть могло не исчезнуть никогда.
+    # ⚠️ stale_only=True обязателен: без него бот, поднявшись после
+    # самообновления, снёс бы собственное свежее уведомление через пару секунд
+    # (см. докстринг forget_update_notice — «протухшим» считается только след,
+    # снятый с другой метки сборки).
+    try:
+        await forget_update_notice(application, stale_only=True)
+    except Exception as e:
+        logger.warning("⚠️ Не удалось прибрать старое уведомление об обновлении: %s", e)
 
     # Сообщаем админам, что бот поднялся (после обычного старта И после перезапуска
     # кнопкой — новый процесс всегда проходит через post_init).
