@@ -10,7 +10,7 @@ import logging_setup
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
-from config import AVAILABLE_MODELS, AVAILABLE_IMAGE_MODELS, ADMIN_IDS, GEMINI_MODEL, PROVIDER_ICONS, BOT_VERSION_HTML, AUTO_UPDATE_ENABLED_DEFAULT
+from config import AVAILABLE_MODELS, AVAILABLE_IMAGE_MODELS, ADMIN_IDS, GEMINI_MODEL, PROVIDER_ICONS, PROVIDERS, BOT_VERSION_HTML, AUTO_UPDATE_ENABLED_DEFAULT
 from database.history import set_setting, get_setting, delete_setting, append_prompt_addition, get_active_system_prompt, get_bot_stats, get_news_system_prompt, get_rag_instruction, get_qwen_tokens
 from utils import register_and_clean_bot_message, delete_user_message_safe
 from utils import mention, schedule_delete
@@ -130,7 +130,7 @@ async def send_api_panel(bot, chat_id: int, user_id: int):
     # Модели картинок — в ОТДЕЛЬНУЮ группу "image" (не смешивать с бесплатным
     # текстовым Gemini); модели, которых уже нет в конфиге, попадают только в
     # общий счётчик «Общие вызовы API».
-    groups = {"gemini": "", "qwen": "", "deepseek": "", "xiaomi": "", "openrouter": "", "image": ""}
+    groups = {pid: "" for pid in PROVIDERS}   # порядок блоков задаёт реестр
     for model_name, cnt in stats["api_calls_by_model"]:
         if model_name in AVAILABLE_IMAGE_MODELS:
             provider = "image"
@@ -169,100 +169,34 @@ async def send_api_panel(bot, chat_id: int, user_id: int):
         if not groups[provider]:
             groups[provider] = "  • нет данных\n"
 
-    # Накопленный расход на DeepSeek: копится в services/gemini.py по точным
-    # токенам из API и ценам DEEPSEEK_PRICES. settings хранит строки — приводим
-    # к числу с запасным нулём.
-    try:
-        ds_spent = float(get_setting("deepseek_cost_usd", "0") or 0)
-    except (TypeError, ValueError):
-        ds_spent = 0.0
+    # Блоки провайдеров собираются ИЗ РЕЕСТРА `config.PROVIDERS` (2026-08-03):
+    # порядок блоков, значки, заголовки, ключи копилок и ссылки на кабинеты —
+    # всё оттуда. Раньше шесть блоков были выписаны здесь руками, и провайдер,
+    # забытый в этом тексте, просто не показывал своих вызовов — молча.
+    # Правила рисования, одинаковые для всех:
+    #   • нет `cost_key` — денежной строки нет вовсе (Gemini на бесплатном ключе);
+    #   • сумма расхода — ССЫЛКОЙ на кабинет провайдера (превью ссылок гасит
+    #     `_send_panel_message`);
+    #   • есть `balance_key` — после «/» дописывается остаток на счету; у Qwen
+    #     его нет намеренно: там бесплатная квота в токенах, а не деньги.
+    def _money(key: str) -> float:
+        """settings хранит строки — приводим к числу с запасным нулём."""
+        try:
+            return float(get_setting(key, "0") or 0)
+        except (TypeError, ValueError):
+            return 0.0
 
-    # Остаток баланса аккаунта DeepSeek: заводится кнопкой «💵 Счёт DeepSeek»
-    # на экране «💰 Счета и квоты» (ниже в этом файле), дальше тает сам —
-    # add_deepseek_cost вычитает стоимость каждого запроса.
-    try:
-        ds_balance = float(get_setting("deepseek_balance_usd", "0") or 0)
-    except (TypeError, ValueError):
-        ds_balance = 0.0
-
-    # Накопленный расход на Qwen — считается так же (services/gemini.py::_qwen_cost,
-    # цены QWEN_PRICES). Пока действует бесплатная квота Alibaba, это «расчётная»
-    # стоимость по прайсу — реальные списания начнутся после исчерпания квоты.
-    try:
-        qw_spent = float(get_setting("qwen_cost_usd", "0") or 0)
-    except (TypeError, ValueError):
-        qw_spent = 0.0
-
-    # Накопленный расход на Xiaomi MiMo (services/gemini.py::_xiaomi_cost, цены
-    # XIAOMI_PRICES) и остаток счёта: остаток заводится кнопкой «💵 Счёт Xiaomi»
-    # на экране «💰 Счета и квоты», дальше тает сам — add_xiaomi_cost вычитает
-    # стоимость каждого запроса.
-    try:
-        xm_spent = float(get_setting("xiaomi_cost_usd", "0") or 0)
-    except (TypeError, ValueError):
-        xm_spent = 0.0
-    try:
-        xm_balance = float(get_setting("xiaomi_balance_usd", "0") or 0)
-    except (TypeError, ValueError):
-        xm_balance = 0.0
-
-    # Накопленный расход на OpenRouter (2026-08-01, временная Ling 3.0 Flash):
-    # сумму присылает сам OpenRouter в ответе (services/gemini.py::_openrouter_cost),
-    # остаток кредитов заводится кнопкой «💵 Счёт OpenRouter» на экране
-    # «💰 Счета и квоты» и дальше тает сам. На бесплатном варианте модели обе
-    # цифры нулевые — так и должно быть.
-    try:
-        or_spent = float(get_setting("openrouter_cost_usd", "0") or 0)
-    except (TypeError, ValueError):
-        or_spent = 0.0
-    try:
-        or_balance = float(get_setting("openrouter_balance_usd", "0") or 0)
-    except (TypeError, ValueError):
-        or_balance = 0.0
-
-    # Накопленный расход на генерацию картинок (Nano Banana): считается по точным
-    # токенам из usageMetadata и ценам IMAGE_PRICES (services/gemini.py::_image_cost).
-    try:
-        img_spent = float(get_setting("image_cost_usd", "0") or 0)
-    except (TypeError, ValueError):
-        img_spent = 0.0
-
-    # Остаток баланса картинок: заводится кнопкой «💵 Счёт Картинок» на экране
-    # «💰 Счета и квоты», дальше тает сам — add_image_cost вычитает стоимость
-    # каждой картинки.
-    try:
-        img_balance = float(get_setting("image_balance_usd", "0") or 0)
-    except (TypeError, ValueError):
-        img_balance = 0.0
-
-    # Значки провайдеров берём из общего списка PROVIDER_ICONS (config.py) —
-    # того же, что метит строки лога в services/gemini.py. Так панель и лог
-    # не разъезжаются: сменил значок в конфиге — поменялось в обоих местах.
-    text = (
-        f"🤖 <b>УПРАВЛЕНИЕ МОДЕЛЯМИ</b>\n"
-        f"───────────────────────────\n"
-        f"{PROVIDER_ICONS['gemini']} <b>Вызовы Gemini:</b>\n{groups['gemini']}"
-        f"───────────────────────────\n"
-        f"{PROVIDER_ICONS['image']} <b>Генерация Картинок:</b>\n{groups['image']}"
-        f"💰 <b>Расход Картинок:</b> <a href=\"https://aistudio.google.com/spend\">${img_spent:.6f}</a> / <b>${img_balance:.6f}</b>\n"
-        f"───────────────────────────\n"
-        f"{PROVIDER_ICONS['qwen']} <b>Вызовы Qwen:</b>\n{groups['qwen']}"
-        f"💰 <b>Расход Qwen:</b> <a href=\"https://modelstudio.console.alibabacloud.com/\">${qw_spent:.6f}</a>\n"
-        f"───────────────────────────\n"
-        f"{PROVIDER_ICONS['deepseek']} <b>Вызовы DeepSeek:</b>\n{groups['deepseek']}"
-        # Сумма — ссылкой на страницу расходов DeepSeek (превью отключено в
-        # _send_panel_message); после «/» — остаток баланса аккаунта.
-        f"💰 <b>Расход DeepSeek:</b> <a href=\"https://platform.deepseek.com/usage\">${ds_spent:.6f}</a> / <b>${ds_balance:.6f}</b>\n"
-        f"───────────────────────────\n"
-        f"{PROVIDER_ICONS['xiaomi']} <b>Вызовы Xiaomi:</b>\n{groups['xiaomi']}"
-        # Как у DeepSeek: расход ссылкой на кабинет, после «/» — остаток счёта.
-        f"💰 <b>Расход Xiaomi:</b> <a href=\"https://platform.xiaomimimo.com/\">${xm_spent:.6f}</a> / <b>${xm_balance:.6f}</b>\n"
-        f"───────────────────────────\n"
-        f"{PROVIDER_ICONS['openrouter']} <b>Вызовы OpenRouter:</b>\n{groups['openrouter']}"
-        # Как у DeepSeek и Xiaomi: расход ссылкой на кабинет, после «/» — остаток
-        # кредитов. Пока модель на бесплатном варианте, обе цифры нулевые.
-        f"💰 <b>Расход OpenRouter:</b> <a href=\"https://openrouter.ai/credits\">${or_spent:.6f}</a> / <b>${or_balance:.6f}</b>\n"
-        f"───────────────────────────\n"
+    text = f"🤖 <b>УПРАВЛЕНИЕ МОДЕЛЯМИ</b>\n───────────────────────────\n"
+    for pid, meta in PROVIDERS.items():
+        text += f"{meta['icon']} <b>{meta['calls_label']}:</b>\n{groups[pid]}"
+        if meta["cost_key"]:
+            money = (f"💰 <b>{meta['money_label']}:</b> "
+                     f"<a href=\"{meta['console_url']}\">${_money(meta['cost_key']):.6f}</a>")
+            if meta["balance_key"]:
+                money += f" / <b>${_money(meta['balance_key']):.6f}</b>"
+            text += money + "\n"
+        text += "───────────────────────────\n"
+    text += (
         f"📡 <b>Общие вызовы API:</b>\n"
         f"  • Всего: <b>{stats['api_calls_total']}</b>\n"
         f"  • Сегодня: <b>{stats['api_calls_today']}</b>"
@@ -349,29 +283,31 @@ async def send_weekly_report_panel(bot, chat_id: int, user_id: int):
 # ─────────────────────────────────────────────
 
 # Настраиваемые ОСТАТКИ на счетах. Ключи те же, что читает панель API и
-# из которых вычитают add_deepseek_cost / add_xiaomi_cost / add_image_cost.
+# из которых вычитает add_provider_cost (одна на всех, ключи берёт из реестра).
 # Денежного остатка у Qwen намеренно нет (решение Максима 2026-07-27): там
 # бесплатная квота в токенах, а не счёт в долларах.
+# ⚠️ СОБИРАЮТСЯ ИЗ РЕЕСТРА `config.PROVIDERS` (2026-08-03) — ключи, имена и
+# надписи кнопок там, здесь только ПОРЯДОК НА ЭКРАНЕ: кнопки счетов разложены
+# руками по два в ряд, и блоки текста идут тем же порядком, что они. Провайдер,
+# забытый в этих кортежах, на экран не попадёт — поэтому полноту сверяет
+# `preflight.py` (проверка «провайдеры»), а не внимательность.
+_BALANCE_ORDER = ("deepseek", "xiaomi", "openrouter", "image")
+_COST_ORDER = ("deepseek", "qwen", "xiaomi", "openrouter", "image")
+
 _BALANCE_FIELDS = {
-    "deepseek": {"key": "deepseek_balance_usd", "provider": "deepseek",
-                 "name": "DeepSeek", "btn": "💵 Счёт DeepSeek"},
-    "xiaomi":   {"key": "xiaomi_balance_usd", "provider": "xiaomi",
-                 "name": "Xiaomi", "btn": "💵 Счёт Xiaomi"},
-    "openrouter": {"key": "openrouter_balance_usd", "provider": "openrouter",
-                   "name": "OpenRouter", "btn": "💵 Счёт OpenRouter"},
-    "image":    {"key": "image_balance_usd", "provider": "image",
-                 "name": "Картинки", "btn": "💵 Счёт Картинок"},
+    pid: {"key": PROVIDERS[pid]["balance_key"], "provider": pid,
+          "name": PROVIDERS[pid]["title"], "btn": PROVIDERS[pid]["balance_btn"]}
+    for pid in _BALANCE_ORDER
 }
 
 # Счётчики «потрачено» — их можно обнулить (при смене ключа или рабочего
-# пространства). Все пять ВЕЧНЫЕ: месячный сброс их не трогает, поэтому
-# единственный способ начать счёт заново — эта кнопка.
+# пространства). Обнуление руками нужно потому, что вечные счётчики
+# (DeepSeek, Xiaomi, OpenRouter) месячный сброс не трогает вовсе, а у месячных
+# (Qwen, картинки) бывает нужно начать счёт заново посреди месяца.
 _COST_FIELDS = {
-    "deepseek":   {"key": "deepseek_cost_usd",   "provider": "deepseek",   "name": "DeepSeek"},
-    "qwen":       {"key": "qwen_cost_usd",       "provider": "qwen",       "name": "Qwen"},
-    "xiaomi":     {"key": "xiaomi_cost_usd",     "provider": "xiaomi",     "name": "Xiaomi"},
-    "openrouter": {"key": "openrouter_cost_usd", "provider": "openrouter", "name": "OpenRouter"},
-    "image":      {"key": "image_cost_usd",      "provider": "image",      "name": "Картинки"},
+    pid: {"key": PROVIDERS[pid]["cost_key"], "provider": pid,
+          "name": PROVIDERS[pid]["title"]}
+    for pid in _COST_ORDER
 }
 
 _MAX_MONEY = 1_000_000.0          # больше — почти наверняка опечатка
