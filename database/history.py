@@ -1035,7 +1035,7 @@ def register_api_call(model_name: str):
 
 def clear_api_calls() -> int:
     """Полная очистка счётчиков вызовов API — месячный сброс статистики
-    (jobs.py::_monthly_stats_reset, первое число месяца). Возвращает число
+    (jobs/cleanup.py::_monthly_stats_reset, первое число месяца). Возвращает число
     удалённых записей. Обмены «вопрос-ответ» (user_token_usage) не трогает."""
     with _lock:
         conn = _get_connection()
@@ -1047,7 +1047,7 @@ def clear_api_calls() -> int:
 
 def clear_user_token_usage() -> int:
     """Месячный сброс обменов «вопрос-ответ»: обнуляет счётчики токенов и
-    запросов всех пользователей (jobs.py::_monthly_stats_reset).
+    запросов всех пользователей (jobs/cleanup.py::_monthly_stats_reset).
     ВАЖНО: именно UPDATE до нулей, а НЕ DELETE — init_db при полностью пустой
     таблице заново заполнил бы её старыми числами из устаревшей user_context
     (одноразовый перенос в init_db выше). Возвращает число затронутых строк."""
@@ -1331,7 +1331,7 @@ def get_bot_stats() -> dict:
         conn = _get_connection()
 
         # Обмены «вопрос-ответ» за текущий месяц: user_token_usage копится
-        # с последнего месячного сброса (jobs.py::_monthly_stats_reset;
+        # с последнего месячного сброса (jobs/cleanup.py::_monthly_stats_reset;
         # каждый успешный ответ модели = +1 к total_requests).
         try:
             lifetime_requests = conn.execute(
@@ -1359,7 +1359,7 @@ def get_bot_stats() -> dict:
             "GROUP BY model_name ORDER BY cnt DESC"
         ).fetchall()
 
-        # Архив групп чистится через 10 дней (jobs.py::cleanup_loop),
+        # Архив групп чистится через 10 дней (jobs/cleanup.py::cleanup_loop),
         # поэтому COUNT — это «за последние 10 дней», а не за всё время.
         try:
             group_msg_count = conn.execute(
@@ -1395,7 +1395,7 @@ def get_bot_stats() -> dict:
 
 def save_stats_snapshot(taken_at_utc: str, kyiv_label: str, data: dict) -> None:
     """Сохраняет «фотографию» счётчиков расходов на момент taken_at_utc.
-    Снимок делается раз в сутки в полночь по Киеву (jobs.py::daily_report_loop)
+    Снимок делается раз в сутки в полночь по Киеву (jobs/reports.py::daily_report_loop)
     и один раз при первом запуске бота — с него начинается отсчёт."""
     with _lock:
         conn = _get_connection()
@@ -1472,7 +1472,7 @@ def count_api_calls_between(start_utc: str, end_utc: str | None = None) -> list:
 
 
 def delete_old_stats_snapshots(days: int = 400) -> int:
-    """Чистка снимков старше N суток (суточный цикл jobs.py::cleanup_loop).
+    """Чистка снимков старше N суток (суточный цикл jobs/cleanup.py::cleanup_loop).
     Таблица крошечная (один снимок в сутки), но расти вечно ей незачем.
     ⚠️ Последний снимок не удаляется НИКОГДА — от него отсчитывается текущий
     период; без него отчёт остался бы без точки отсчёта."""
