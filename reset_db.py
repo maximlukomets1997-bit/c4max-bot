@@ -42,6 +42,7 @@ USER_TABLES = [
     "staff_log",
     "stats_snapshots",
     "proactive_log",
+    "join_log",
 ]
 
 def main():

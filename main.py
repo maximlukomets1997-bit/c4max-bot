@@ -14,7 +14,7 @@ from telegram.error import NetworkError, TimedOut
 from logging_setup import setup_logging, archive_old_logs
 setup_logging()
 
-from telegram import BotCommand, BotCommandScopeChat, BotCommandScopeAllPrivateChats, BotCommandScopeAllGroupChats, BotCommandScopeDefault, BotCommandScopeAllChatAdministrators
+from telegram import Update, BotCommand, BotCommandScopeChat, BotCommandScopeAllPrivateChats, BotCommandScopeAllGroupChats, BotCommandScopeDefault, BotCommandScopeAllChatAdministrators
 from telegram.ext import ApplicationBuilder
 
 from config import TELEGRAM_TOKEN, ADMIN_IDS, GEMINI_API_KEY, RAG_ENABLED, IS_DOCKER, DB_PATH, BOT_VERSION, BOT_VERSION_HTML
@@ -444,6 +444,23 @@ async def _error_handler(update, context) -> None:
     logger.error("⚠️ Необработанное исключение: %s\n%s", err, "".join(traceback.format_exception(type(err), err, err.__traceback__)))
 
 
+# ─────────────────────────────────────────────
+#  Какие события мы просим у Telegram (2026-08-04)
+# ─────────────────────────────────────────────
+# ⚠️ ПО УМОЛЧАНИЮ TELEGRAM НЕ ПРИСЫЛАЕТ chat_member — событие «участник группы
+# сменил статус», на котором держится приветствие новичков (services/greeter.py).
+# Не запросить его явно = обработчик не сработает НИ РАЗУ, и в логе будет
+# тишина: ни ошибки, ни предупреждения. Поэтому список задан здесь.
+#
+# Берём всё, что умеет библиотека, КРОМЕ реакций: в живой группе эмодзи-реакции
+# идут потоком, а обработчика у них нет — это был бы чистый расход трафика и
+# времени на разбор. Понадобятся реакции — убрать их из списка исключений.
+# ⚠️ Строить список «руками» через перечисление нужных типов нельзя: забытый
+# тип молча отключит уже работающую часть бота (кнопки, опросы викторины).
+_ALLOWED_UPDATES = [t for t in Update.ALL_TYPES
+                    if t not in (Update.MESSAGE_REACTION, Update.MESSAGE_REACTION_COUNT)]
+
+
 def main():
     if not TELEGRAM_TOKEN or TELEGRAM_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN":
         logger.error("⚠️ TELEGRAM_TOKEN не установлен — проверьте файл .env")
@@ -513,7 +530,7 @@ def main():
     logger.info("🚀 Бот запускается — для остановки нажмите Ctrl+C")
     
     try:
-        application.run_polling()
+        application.run_polling(allowed_updates=_ALLOWED_UPDATES)
     except (KeyboardInterrupt, SystemExit):
         logger.info("🚀 Получен сигнал остановки — завершаю работу служб бота")
     finally:

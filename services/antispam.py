@@ -422,13 +422,21 @@ async def check_and_mute(bot, chat_id: int, user, user_text: str = "",
 # ─── снятие мута ────────────────────────────────────────────────────
 
 async def unmute(bot, chat_id: int, user_id: int, name: str | None = None,
-                 admin_name: str | None = None) -> bool:
+                 admin_name: str | None = None, journal: bool = True) -> bool:
     """
     Снимает мут: восстанавливает пользователю ДЕФОЛТНЫЕ права чата
     (а не «всё разрешено» — чтобы не выдать больше, чем у обычного участника).
     Чистит внутреннее состояние, чтобы повторный флуд ловился заново.
     admin_name — кто снял мут (пишется в журнал, показывается в панели /mod).
     Возвращает True при успехе. Гасит исключения.
+
+    journal=False (2026-08-04) — не писать строку в журнал модерации. Нужно
+    ровно одному месту: приветствию новичков (services/greeter.py), где права
+    возвращаются не по решению админа, а по нажатию кнопки «Я не бот».
+    Такие строки замусорили бы «Последние действия» панели /mod и завысили
+    счётчик размутов. Само восстановление прав живёт ЗДЕСЬ и только здесь:
+    второго места, знающего, что такое «права обычного участника», быть не
+    должно — они разъедутся при первой же правке.
     """
     try:
         # Берём дефолтные права группы; если недоступны — безопасный разрешающий набор.
@@ -458,10 +466,11 @@ async def unmute(bot, chat_id: int, user_id: int, name: str | None = None,
 
     _muted_until.pop((chat_id, user_id), None)
     _reset_user(user_id)
-    try:
-        log_moderation_action("unmute", chat_id, user_id, name or str(user_id), admin_name)
-    except Exception as e:
-        logger.debug("🛡 Не удалось записать размут в журнал: %s", e)
+    if journal:
+        try:
+            log_moderation_action("unmute", chat_id, user_id, name or str(user_id), admin_name)
+        except Exception as e:
+            logger.debug("🛡 Не удалось записать размут в журнал: %s", e)
     return True
 
 

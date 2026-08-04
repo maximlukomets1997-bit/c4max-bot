@@ -320,6 +320,23 @@ def _create_schema(conn):
             trigger_kind TEXT       -- text | photo | voice | video
         );
 
+        -- 👋 Журнал вступлений в группы (2026-08-04): по строке на каждого
+        -- новичка и на исход его проверки «я не бот» (services/greeter.py).
+        -- Отдельная таблица, а НЕ moderation_log: вступления идут потоком и
+        -- вытеснили бы муты со «Последних действий» панели /mod — журнал
+        -- модерации показывает всего пять строк. Считается по этой таблице
+        -- строка «За 7 дней: пришло … прошли …» в блоке приветствия.
+        -- ⚠️ Кик не прошедшего пишется И СЮДА (outcome='kick'), И в
+        -- moderation_log: там он законная запись — человека выгнали из группы.
+        CREATE TABLE IF NOT EXISTS join_log (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts         REAL,       -- time.time(), как в moderation_log
+            chat_id    INTEGER,
+            user_id    INTEGER,
+            name       TEXT,
+            outcome    TEXT        -- join | ok | timeout | kick
+        );
+
         CREATE TABLE IF NOT EXISTS group_messages (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
             chat_id    INTEGER NOT NULL,
@@ -469,6 +486,7 @@ def _create_schema(conn):
         CREATE INDEX IF NOT EXISTS idx_kblog_ts ON knowledge_log(ts);
         CREATE INDEX IF NOT EXISTS idx_stafflog_ts ON staff_log(ts);
         CREATE INDEX IF NOT EXISTS idx_proactive_log_ts ON proactive_log(ts);
+        CREATE INDEX IF NOT EXISTS idx_join_log_ts ON join_log(ts);
         -- Индекс стенограммы чата для проактивного участия в разговоре
         -- (get_recent_group_messages — выборка последних сообщений чата)
         CREATE INDEX IF NOT EXISTS idx_group_messages_chat ON group_messages(chat_id, id);
@@ -2188,6 +2206,68 @@ def delete_old_proactive_log(days: int = 30) -> int:
         conn.commit()
     if deleted:
         logger.info("🤖 Очистка журнала проактивных проверок: удалено %d записей старше %d дней",
+                    deleted, days)
+    return deleted
+
+
+# ─── 👋 Журнал вступлений в группы (приветствие новичков) ───────────
+
+def log_join(chat_id: int, user_id: int, name: str, outcome: str) -> None:
+    """
+    Пишет строку в журнал вступлений (services/greeter.py).
+
+    outcome: 'join' — человек вошёл в группу, 'ok' — прошёл проверку
+    «я не бот», 'timeout' — не нажал за отведённый срок, 'kick' — не нажал
+    и был выгнан (кикать не прошедших — отдельный тумблер панели /mod).
+    На одного новичка приходится ДВЕ строки: приход и исход, — иначе
+    «пришло» и «прошли» пришлось бы считать по разным источникам.
+
+    Время — time.time(), как в moderation_log: обе таблицы читает одна и та
+    же панель, и разнобой форматов пришлось бы разбирать в ней.
+    """
+    import time as _time
+    with _lock:
+        conn = _get_connection()
+        conn.execute(
+            "INSERT INTO join_log (ts, chat_id, user_id, name, outcome) VALUES (?, ?, ?, ?, ?)",
+            (_time.time(), chat_id, user_id, name or str(user_id), outcome),
+        )
+        conn.commit()
+
+
+def get_join_counts(days: int = 7) -> dict:
+    """
+    Сколько человек пришло и чем кончилась их проверка за последние `days`
+    дней. Ключи: joins, ok, timeouts, kicks (неизвестные исходы игнорируются).
+    """
+    import time as _time
+    cutoff = _time.time() - days * 86400
+    with _lock:
+        conn = _get_connection()
+        rows = conn.execute(
+            "SELECT outcome, COUNT(*) AS n FROM join_log WHERE ts >= ? GROUP BY outcome",
+            (cutoff,),
+        ).fetchall()
+    counts = {"joins": 0, "ok": 0, "timeouts": 0, "kicks": 0}
+    keys = {"join": "joins", "ok": "ok", "timeout": "timeouts", "kick": "kicks"}
+    for r in rows:
+        key = keys.get(r["outcome"])
+        if key:
+            counts[key] = r["n"]
+    return counts
+
+
+def delete_old_join_log(days: int = 30) -> int:
+    """Чистка журнала вступлений (суточный цикл). Возвращает число удалённых."""
+    import time as _time
+    cutoff = _time.time() - days * 86400
+    with _lock:
+        conn = _get_connection()
+        cur = conn.execute("DELETE FROM join_log WHERE ts < ?", (cutoff,))
+        deleted = cur.rowcount or 0
+        conn.commit()
+    if deleted:
+        logger.info("👋 Очистка журнала вступлений: удалено %d записей старше %d дней",
                     deleted, days)
     return deleted
 

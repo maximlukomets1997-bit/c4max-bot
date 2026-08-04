@@ -170,6 +170,7 @@ async def cleanup_loop(application):
       • архив group_messages — старше 10 дней;
       • журнал модерации + улики (moderation_log/mute_evidence) — старше 7 дней;
       • журнал базы знаний — старше KB_LOG_DAYS дней;
+      • журнал вступлений в группы — старше JOIN_LOG_DAYS дней;
       • снимки счётчиков суточного отчёта — старше 400 дней (кроме последнего);
       • смена месяца (по Киеву) → итоги админам + обнуление вызовов и расходов
         (_monthly_stats_reset, метка settings 'stats_reset_month').
@@ -209,6 +210,15 @@ async def cleanup_loop(application):
             delete_old_proactive_log(days=PROACTIVE_LOG_DAYS)
         except Exception as e:
             logger.error("⚠️ Не удалось очистить журнал проактивных проверок: %s", e)
+        try:
+            # Журнал вступлений (2026-08-04): месяц истории — панель /mod
+            # показывает неделю, месяц оставлен на случай «а сколько народу
+            # приходило, пока проверка была выключена».
+            from database.history import delete_old_join_log
+            from config import JOIN_LOG_DAYS
+            delete_old_join_log(days=JOIN_LOG_DAYS)
+        except Exception as e:
+            logger.error("⚠️ Не удалось очистить журнал вступлений: %s", e)
         try:
             # Снимки счётчиков для суточного отчёта: один в сутки, храним ~год.
             # Последний снимок функция не трогает — от него идёт текущий период.

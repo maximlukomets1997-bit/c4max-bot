@@ -49,6 +49,15 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await send_quiz_question(chat_id, context)
         return
 
+    # 👋 Кнопка «Я не бот» из приветствия новичков (2026-08-04). Стоит ЗДЕСЬ,
+    # ДО гейта прав, намеренно: её жмёт обычный участник группы, а не персонал
+    # (как quiz_start). Чужому нажатию отказывает сам обработчик — кнопка
+    # именная, в её данных лежит id того, кому она адресована.
+    if data.startswith("join:"):
+        from services.greeter import handle_join_callback
+        await handle_join_callback(query, context, data)
+        return
+
     if data == "clear_history_btn":
         from database.history import clear_history
         clear_history(user_id)
