@@ -15,6 +15,113 @@ logger = logging.getLogger(__name__)
 
 
 # ───────────────────────────────────────────────
+#  Уведомление об обновлении: свой след в чате
+# ───────────────────────────────────────────────
+# Уведомление «⬇️ Обновился сам…» живёт по особым правилам: оно переживает
+# перезапуск бота, поэтому его координаты лежат в settings, а не в памяти,
+# и убирает его не гигиена панелей, а этот файл. Подробности — в докстрингах
+# ниже и в карте проекта (`references/dependencies-runtime.md`).
+
+
+def _load_notice() -> tuple[str, list]:
+    """
+    Достаёт из settings след прошлого уведомления: («метка сборки», [[чат, id]…]).
+
+    В базе лежит JSON `{"build": "…", "msgs": [[чат, id], …]}`. Формат
+    2026-08-05; до него писался голый список пар без метки сборки — он ещё
+    может лежать в базе боевого сервера, поэтому разбирается тоже (метка при
+    этом пустая, то есть «неизвестно, к какому коду относилось»).
+    """
+    from config import UPDATE_NOTICE_MSGS_KEY
+    from database.history import get_setting
+
+    raw = get_setting(UPDATE_NOTICE_MSGS_KEY, "")
+    if not raw:
+        return "", []
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return "", []
+    if isinstance(data, list):          # старый формат: только список пар
+        return "", data
+    if isinstance(data, dict):
+        return str(data.get("build") or ""), list(data.get("msgs") or [])
+    return "", []
+
+
+def _save_notice(build: str, msgs: list) -> None:
+    """Запоминает след уведомления. Пустой список тоже пишем — это «следа нет»."""
+    from config import UPDATE_NOTICE_MSGS_KEY
+    from database.history import set_setting
+
+    set_setting(UPDATE_NOTICE_MSGS_KEY,
+                json.dumps({"build": build, "msgs": msgs}, ensure_ascii=False))
+
+
+async def forget_update_notice(application, stale_only: bool = False) -> None:
+    """
+    Стирает ПРЕДЫДУЩЕЕ сообщение об обновлении (2026-08-04, просьба Максима:
+    «пусть удаляет старое своё сообщение об обновлении»). Иначе в личке
+    владельца копится лента одинаковых уведомлений — бот обновляется тем чаще,
+    чем чаще идут правки.
+
+    Зовут её ДВОЕ, и вторым она появилась 2026-08-05 по разбору «почему
+    сообщение про v3.84 так и висит»:
+      • сам цикл самообновления, перед отправкой нового уведомления
+        (stale_only=False) — «новое стирает старое»;
+      • `main.post_init` при КАЖДОМ запуске (stale_only=True) — потому что код
+        приезжает на сервер ТРЕМЯ путями, а уведомление шлёт только один.
+        Отправка с ПК Максима (`.bat` → deploy-restart.sh) и кнопка
+        «🔄 ПЕРЕЗАПУСК» обновляют код молча, ничего не удаляя, — и уведомление
+        от прошлого САМОобновления висело в чате до следующего самообновления,
+        то есть могло не исчезнуть никогда (например, при выключенном тумблере
+        самообновления).
+
+    ⚠️ ЧТО ЗНАЧИТ stale_only. При запуске нельзя стирать всё подряд: сразу
+    после самообновления в чате лежит СВЕЖЕЕ «⬇️ Обновился сам…», и бот,
+    поднявшись через несколько секунд, снёс бы собственное сообщение — человек
+    не успел бы его прочитать, а весь смысл уведомления в том, чтобы он узнал
+    о новой версии. Поэтому «протухшим» считается только след, снятый с ДРУГОГО
+    кода: сравниваем метку сборки в следе с меткой РАБОТАЮЩЕГО кода
+    (`config.BOT_BUILD`, снята при импорте). Совпали — уведомление про этот
+    самый код, оставляем. Разошлись — код с тех пор сменился другим путём,
+    сообщение устарело, убираем. Метка неизвестна (старый формат записи, нет
+    файла `.build`) — не трогаем: лучше лишнее сообщение, чем стёртое нужное.
+
+    Тихая: сообщение мог удалить сам владелец, а старше 48 часов Telegram
+    ботам удалять не даёт — оба случая штатные, ругаться на них нечего, но в
+    лог они идут предупреждением (2026-08-05: раньше стояла отладочная запись,
+    и молчаливо не сработавшая уборка не оставляла в логе ни следа).
+    ⚠️ Гигиену панелей (`register_and_clean_bot_message`) здесь применять
+    НЕЛЬЗЯ: она стирает ПОСЛЕДНЕЕ сообщение бота в чате, каким бы оно ни
+    было, — уведомление об обновлении снесло бы открытую админ-панель.
+    Поэтому у него свой, отдельный след.
+    """
+    from config import BOT_BUILD
+
+    build, msgs = _load_notice()
+    if not msgs:
+        return
+    if stale_only:
+        if not build or not BOT_BUILD:
+            return                      # не с чем сравнивать — не трогаем
+        if build == BOT_BUILD:
+            return                      # уведомление про работающий код
+        logger.info("⬇️ Убираю уведомление об обновлении от прошлой сборки %s "
+                    "(сейчас %s): код приехал другим путём", build, BOT_BUILD)
+    for pair in msgs:
+        try:
+            chat_id, message_id = pair
+            await application.bot.delete_message(chat_id=chat_id, message_id=message_id)
+        except Exception as e:
+            logger.warning("⚠️ Не удалось удалить прошлое уведомление об обновлении %s: %s",
+                           pair, e)
+    # След снимаем В ЛЮБОМ случае, даже если удалить не вышло: иначе бот будет
+    # ломиться в то же сообщение при каждом запуске до скончания века.
+    _save_notice(BOT_BUILD, [])
+
+
+# ───────────────────────────────────────────────
 #  Самообновление: бот сам забирает новый код
 # ───────────────────────────────────────────────
 
@@ -39,8 +146,8 @@ async def auto_update_loop(application):
     """
     from config import (ADMIN_IDS, AUTO_UPDATE_ENABLED_DEFAULT, AUTO_UPDATE_INTERVAL_SEC,
                         AUTO_UPDATE_QUIET_SEC, AUTO_UPDATE_TICK_SEC)
-    from config import UPDATE_NOTICE_MSGS_KEY
-    from database.history import get_setting, set_setting
+    from config import read_build_mark
+    from database.history import get_setting
     from services import deploy
 
     await asyncio.sleep(20)  # даём боту подняться (как у остальных циклов)
@@ -53,43 +160,11 @@ async def auto_update_loop(application):
                 "перезапуск только при тишине %d сек)",
                 AUTO_UPDATE_INTERVAL_SEC // 60, AUTO_UPDATE_QUIET_SEC)
 
-    async def _forget_previous_notice() -> None:
-        """
-        Стирает ПРЕДЫДУЩЕЕ сообщение об обновлении (2026-08-04, просьба
-        Максима: «пусть удаляет старое своё сообщение об обновлении»). Иначе
-        в личке владельца копится лента одинаковых уведомлений — бот
-        обновляется тем чаще, чем чаще идут правки.
-
-        Координаты лежат в settings (`UPDATE_NOTICE_MSGS_KEY`), а не в памяти:
-        сразу после «⬇️ Обновился сам…» бот ПЕРЕЗАПУСКАЕТСЯ, и память не
-        переживает даже собственного сообщения.
-
-        Тихая: сообщение мог удалить сам владелец, а старше 48 часов Telegram
-        ботам удалять не даёт — оба случая штатные, ругаться на них нечего.
-        ⚠️ Гигиену панелей (`register_and_clean_bot_message`) здесь применять
-        НЕЛЬЗЯ: она стирает ПОСЛЕДНЕЕ сообщение бота в чате, каким бы оно ни
-        было, — уведомление об обновлении снесло бы открытую админ-панель.
-        Поэтому у него свой, отдельный след.
-        """
-        raw = get_setting(UPDATE_NOTICE_MSGS_KEY, "")
-        if not raw:
-            return
-        try:
-            items = json.loads(raw)
-        except (TypeError, ValueError):
-            items = []
-        for pair in items:
-            try:
-                chat_id, message_id = pair
-                await application.bot.delete_message(chat_id=chat_id, message_id=message_id)
-            except Exception as e:
-                logger.debug("⬇️ Не удалось удалить прошлое уведомление %s: %s", pair, e)
-
     async def _notify(text: str) -> None:
         # Сначала убираем прошлое уведомление, потом шлём новое: если бот
         # не достучится до Телеграма вовсе, старое хотя бы уже стёрто и
         # ленты не будет.
-        await _forget_previous_notice()
+        await forget_update_notice(application)
         sent = []
         # Ошибка отправки одному владельцу не мешает остальным (как в итогах месяца)
         for admin_id in ADMIN_IDS:
@@ -99,9 +174,15 @@ async def auto_update_loop(application):
                     sent.append([admin_id, msg.message_id])
             except Exception as e:
                 logger.warning("⚠️ Не удалось сообщить об обновлении %s: %s", admin_id, e)
+        # ⚠️ МЕТКУ БЕРЁМ С ДИСКА (read_build_mark), А НЕ ИЗ config.BOT_BUILD:
+        # обновление уже прошло, deploy.sh переписал `.build` новым коммитом, а
+        # BOT_BUILD снят при импорте и держит ЕЩЁ СТАРЫЙ. Уведомление относится
+        # к тому коду, на который бот сейчас перезапустится, — значит и метка
+        # нужна новая. Возьмёшь BOT_BUILD — новый процесс сочтёт свежее
+        # уведомление протухшим и снесёт его через секунду после отправки.
         # ⚠️ ЗАПИСЫВАЕМ ДО ПЕРЕЗАПУСКА — вызывающий код останавливает бота
         # сразу после этой строки, и всё несохранённое пропадёт.
-        set_setting(UPDATE_NOTICE_MSGS_KEY, json.dumps(sent, ensure_ascii=False))
+        _save_notice(read_build_mark(), sent)
 
     last_check = time.monotonic()
     while True:
