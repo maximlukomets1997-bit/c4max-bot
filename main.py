@@ -274,7 +274,11 @@ async def post_init(application):
         BotCommand("ttx", "ТТХ техники из базы знаний"),
         BotCommand("imagine", "Сгенерировать картинку"),
         BotCommand("rank", "Моя статистика"),
-        BotCommand("subscribe", "Подписаться на новости C4_Max"),
+        # /subscribe и /unsubscribe в меню НЕТ (решение Максима 2026-08-04):
+        # подписка переехала на кнопку-тумблер «📰 Новости» главного экрана
+        # /start — она показывает состояние и не требует помнить две команды.
+        # Сами команды остались рабочими: старые сообщения с ними и привычка
+        # набирать /subscribe продолжают работать.
         BotCommand("clear", "Очистить текущий контекст диалога"),
     ]
     await application.bot.set_my_commands(commands, scope=BotCommandScopeDefault())

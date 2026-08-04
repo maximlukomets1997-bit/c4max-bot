@@ -88,9 +88,21 @@ async def cmd_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_rank(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /rank — тонкая обёртка над send_rank_panel (см. ниже)."""
     await delete_user_message_safe(update.message)
-    user_id = update.effective_user.id
-    username = update.effective_user.username or update.effective_user.first_name or f"ID_{user_id}"
+    await send_rank_panel(context.bot, update.effective_chat.id, update.effective_user)
+
+
+async def send_rank_panel(bot, chat_id: int, user):
+    """
+    Личное дело бойца — звание, статистика викторин, остаток картинок и служба
+    в гарнизоне. Вынесено из cmd_rank 2026-08-04 тем же приёмом, что
+    send_adm_panel / send_mod_panel: панель открывается И командой /rank,
+    И кнопкой «🎖 Моё звание» с экрана /start. Второй сборки того же текста
+    заводить нельзя — разъедутся.
+    """
+    user_id = user.id
+    username = user.username or user.first_name or f"ID_{user_id}"
     # logger.info("🪖 Открыто личное дело /rank (%s)", username)  # скрыто по просьбе
 
     stats = get_user_stats(user_id)
@@ -193,32 +205,22 @@ async def cmd_rank(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👉 {progress_text}"
     )
 
-    chat_id = update.effective_chat.id
-
     rank_keyboard = InlineKeyboardMarkup([
         [
             InlineKeyboardButton("🎮 Викторина", callback_data="quiz_start"),
             InlineKeyboardButton("🗑️ Очистить историю", callback_data="clear_history_btn"),
-        ]
+        ],
+        [InlineKeyboardButton("⬅️ Главное меню", callback_data="menu:back")],
     ])
 
-    sent_msg = None
-    if update.message:
-        sent_msg = await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=text_html,
-            parse_mode=ParseMode.HTML,
-            reply_markup=rank_keyboard,
-        )
-    else:
-        sent_msg = await context.bot.send_message(
-            chat_id=chat_id,
-            text=text_html,
-            parse_mode=ParseMode.HTML,
-            reply_markup=rank_keyboard,
-        )
+    sent_msg = await bot.send_message(
+        chat_id=chat_id,
+        text=text_html,
+        parse_mode=ParseMode.HTML,
+        reply_markup=rank_keyboard,
+    )
     if sent_msg:
-        await register_and_clean_bot_message(context.bot, chat_id, sent_msg.message_id)
+        await register_and_clean_bot_message(bot, chat_id, sent_msg.message_id)
 
 
 async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
