@@ -793,15 +793,12 @@ async def _sync_staff_menu(bot, user_id: int, is_staff_now: bool) -> None:
     Тихая: у того, кто не открывал личку с ботом, меню не ставится — не беда.
     """
     from telegram import BotCommand, BotCommandScopeChat
-    public = [
-        BotCommand("start", "Перезапустить бота / Приветствие"),
-        BotCommand("help", "Справка по возможностям"),
-        BotCommand("ttx", "ТТХ техники из базы знаний"),
-        BotCommand("imagine", "Сгенерировать изображение"),
-        BotCommand("rank", "Моё личное дело и звание"),
-        BotCommand("subscribe", "Подписаться на новости C4_Max"),
-        BotCommand("clear", "Очистить текущий контекст диалога"),
-    ]
+    # ⚠️ Список публичных команд — ОДИН на весь проект (handlers/commands.py).
+    # Своей копии здесь быть не должно: она уже успела разъехаться с меню при
+    # старте — у модератора оставался /subscribe, убранный из общего списка,
+    # да ещё и с другими подписями у всех команд (2026-08-04).
+    from handlers.commands import public_commands
+    public = public_commands()
     cmds = ([BotCommand("adm", "Панель модератора")] + public) if is_staff_now else public
     try:
         await bot.set_my_commands(cmds, scope=BotCommandScopeChat(chat_id=user_id))

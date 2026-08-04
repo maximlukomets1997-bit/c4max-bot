@@ -200,7 +200,7 @@ async def _handle(update, context) -> None:
             await _warn_owners(context.bot, chat)
             captcha = False  # прав нет — остаётся просто поздороваться
 
-    text = _welcome_text(name, captcha, seconds, context.bot.username or "")
+    text = _welcome_text(name, captcha, seconds, context.bot)
     markup = None
     if captcha:
         markup = InlineKeyboardMarkup([[InlineKeyboardButton(
@@ -397,15 +397,22 @@ async def handle_join_callback(query, context, data: str) -> None:
 
 # ─── текст приветствия ──────────────────────────────────────────────
 
-def _welcome_text(name: str, captcha: bool, seconds: int, bot_username: str) -> str:
+def _welcome_text(name: str, captcha: bool, seconds: int, bot) -> str:
     """
     Собирает текст приветствия из шаблонов config.GREET_TEXT (+ хвост
     GREET_CAPTCHA_TEXT при включённой проверке).
 
     ⚠️ Имя новичка — ЧУЖОЙ ТЕКСТ: экранируем, иначе «<» в имени порвёт
     HTML-разметку и приветствие не отправится вовсе.
+    ⚠️ Имя САМОГО БОТА берём у него же (`bot_display_name`), а не пишем в
+    шаблоне руками: до 2026-08-04 там стояло «Я C4_Max» — имя владельца.
     """
-    text = GREET_TEXT.format(name=html.escape(name), bot=bot_username)
+    from handlers.commands import bot_display_name
+    text = GREET_TEXT.format(
+        name=html.escape(name),
+        bot=bot.username or "",
+        bot_name=html.escape(bot_display_name(bot)),
+    )
     if captcha:
         text += "\n" + GREET_CAPTCHA_TEXT.format(minutes=max(1, seconds // 60))
     return text
