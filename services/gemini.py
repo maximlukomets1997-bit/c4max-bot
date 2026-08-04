@@ -846,7 +846,7 @@ def _gemini_chat_request(messages: list, kind: str = "текст", has_image: bo
                 _cost = _deepseek_cost(model_name, _u)
                 if _cost is not None:
                     try:
-                        hist.add_deepseek_cost(_cost)
+                        hist.add_provider_cost("deepseek", _cost)
                     except Exception as e:
                         logger.warning("⚠️ Не удалось записать расход DeepSeek в БД: %s", e)
                 _hit = _u.get("prompt_cache_hit_tokens", 0) or 0
@@ -861,7 +861,7 @@ def _gemini_chat_request(messages: list, kind: str = "текст", has_image: bo
                 _cost = _xiaomi_cost(model_name, _u)
                 if _cost is not None:
                     try:
-                        hist.add_xiaomi_cost(_cost)
+                        hist.add_provider_cost("xiaomi", _cost)
                     except Exception as e:
                         logger.warning("⚠️ Не удалось записать расход Xiaomi в БД: %s", e)
                 _cached = (_u.get("prompt_tokens_details") or {}).get("cached_tokens", 0) or 0
@@ -876,7 +876,7 @@ def _gemini_chat_request(messages: list, kind: str = "текст", has_image: bo
                 _cost = _openrouter_cost(model_name, _u)
                 if _cost is not None:
                     try:
-                        hist.add_openrouter_cost(_cost)
+                        hist.add_provider_cost("openrouter", _cost)
                     except Exception as e:
                         logger.warning("⚠️ Не удалось записать расход OpenRouter в БД: %s", e)
                 _cached = (_u.get("prompt_tokens_details") or {}).get("cached_tokens", 0) or 0
@@ -890,7 +890,7 @@ def _gemini_chat_request(messages: list, kind: str = "текст", has_image: bo
                 _cost = _qwen_cost(model_name, _u)
                 if _cost is not None:
                     try:
-                        hist.add_qwen_cost(_cost)
+                        hist.add_provider_cost("qwen", _cost)
                     except Exception as e:
                         logger.warning("⚠️ Не удалось записать расход Qwen в БД: %s", e)
                 # Израсходованные токены вычитаем из ОСТАТКА бесплатной квоты
@@ -1725,7 +1725,7 @@ def generate_image(prompt: str) -> bytes:
         cost = _image_cost(active_image_model, data.get("usageMetadata", {}))
         if cost is not None:
             try:
-                hist.add_image_cost(cost)
+                hist.add_provider_cost("image", cost)
             except Exception as e:
                 logger.warning("⚠️ Не удалось записать расход картинок в БД: %s", e)
             logger.info("🎨 Картинка сгенерирована за %.1f с (модель %s) | ≈$%.6f",

@@ -289,11 +289,21 @@ async def _monthly_stats_reset(application) -> None:
         except (TypeError, ValueError):
             return 0.0
 
-    ds = _cost("deepseek_cost_usd")
-    qw = _cost("qwen_cost_usd")
-    img = _cost("image_cost_usd")
-    xm = _cost("xiaomi_cost_usd")
-    orx = _cost("openrouter_cost_usd")
+    # Расходы — по реестру провайдеров (config.PROVIDERS). Вечные счётчики
+    # (monthly_reset=False) идут первыми и с пометкой «за всё время»: их
+    # месячный сброс не трогает, они сверяются с кабинетом провайдера.
+    from config import PROVIDERS
+    spent = {pid: _cost(meta["cost_key"])
+             for pid, meta in PROVIDERS.items() if meta["cost_key"]}
+    eternal = [pid for pid, meta in PROVIDERS.items()
+               if meta["cost_key"] and not meta["monthly_reset"]]
+    monthly = [pid for pid, meta in PROVIDERS.items()
+               if meta["cost_key"] and meta["monthly_reset"]]
+    cost_lines = "".join(
+        f"  • {PROVIDERS[pid]['title']}: <b>${spent[pid]:.6f}</b>"
+        f"{' <i>(за всё время, не обнуляется)</i>' if pid in eternal else ''}\n"
+        for pid in eternal + monthly
+    )
 
     calls_lines = "\n".join(
         f"  • <code>{name}</code>: <b>{cnt}</b>"
@@ -304,11 +314,7 @@ async def _monthly_stats_reset(application) -> None:
         f"📊 <b>Итоги месяца: {_month_label(last_month)}</b>\n"
         f"───────────────────────────\n"
         f"💰 <b>Расходы:</b>\n"
-        f"  • DeepSeek: <b>${ds:.6f}</b> <i>(за всё время, не обнуляется)</i>\n"
-        f"  • Xiaomi: <b>${xm:.6f}</b> <i>(за всё время, не обнуляется)</i>\n"
-        f"  • OpenRouter: <b>${orx:.6f}</b> <i>(за всё время, не обнуляется)</i>\n"
-        f"  • Qwen: <b>${qw:.6f}</b>\n"
-        f"  • Картинки: <b>${img:.6f}</b>\n"
+        f"{cost_lines}"
         f"───────────────────────────\n"
         f"📡 <b>Вызовы API: {stats['api_calls_total']}</b>\n"
         f"{calls_lines}\n"
@@ -344,11 +350,17 @@ async def _monthly_stats_reset(application) -> None:
     # сброс разрушал бы эту сверку. Qwen и картинки остаются месячными.
     deleted = clear_api_calls()
     users_reset = clear_user_token_usage()
-    set_setting("qwen_cost_usd", "0")
-    set_setting("image_cost_usd", "0")
+    # Обнуляем ТОЛЬКО месячные копилки — какие именно, знает реестр
+    # (monthly_reset). Раньше это были две строки руками, и «вечность»
+    # счётчика жила в трёх местах сразу: здесь, в тексте итогов и в переносе
+    # daily_report.note_monthly_reset. Теперь признак один на всех.
+    for pid in monthly:
+        set_setting(PROVIDERS[pid]["cost_key"], "0")
     set_setting("stats_reset_month", current_month)
-    logger.info("🚀 Месячный сброс статистики за %s: удалено записей вызовов %d, обнулены обмены у %d пользователей, расходы DeepSeek $%.6f / Qwen $%.6f / картинки $%.6f",
-                _month_label(last_month), deleted, users_reset, ds, qw, img)
+    logger.info("🚀 Месячный сброс статистики за %s: удалено записей вызовов %d, обнулены обмены у %d пользователей, расходы %s",
+                _month_label(last_month), deleted, users_reset,
+                " / ".join(f"{PROVIDERS[pid]['title']} ${spent[pid]:.6f}"
+                           for pid in eternal + monthly))
 
 
 # ───────────────────────────────────────────────

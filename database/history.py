@@ -13,7 +13,7 @@ import sqlite3
 import threading
 import logging
 
-from config import DB_PATH, MAX_CONTEXT_MESSAGES, QUIZ_RANKS
+from config import DB_PATH, MAX_CONTEXT_MESSAGES, QUIZ_RANKS, PROVIDERS
 
 logger = logging.getLogger(__name__)
 
@@ -937,87 +937,45 @@ def delete_setting(key: str) -> None:
         conn.commit()
 
 
-def add_deepseek_cost(delta_usd: float):
-    """Прибавляет стоимость одного запроса DeepSeek (доллары) к накопительному
-    счётчику в settings (ключ deepseek_cost_usd) и на ту же сумму уменьшает
-    остаток баланса аккаунта (ключ deepseek_balance_usd — показывается в панели
-    «📡 Настройки API» как «расход / остаток»). Оба действия выполняются прямо
-    в SQL — атомарно, без гонки «прочитал-прибавил-записал» между
-    worker-потоками. settings хранит строки, CAST приводит к числу.
-    Если баланс в settings не заведён — уменьшать нечего, UPDATE молча
-    не найдёт строку (счётчик расхода при этом работает как раньше)."""
+def add_provider_cost(provider: str, delta_usd: float):
+    """
+    Прибавляет стоимость одного запроса к копилке расхода провайдера и на ту же
+    сумму уменьшает остаток на его счету. ОДНА функция на всех (2026-08-03):
+    раньше их было пять — add_deepseek_cost / add_xiaomi_cost /
+    add_openrouter_cost / add_qwen_cost / add_image_cost, — и различались они
+    только именами ключей.
+
+    Имена ключей берутся из реестра `config.PROVIDERS`: `cost_key` (копилка,
+    есть у всех, кто тратит деньги) и `balance_key` (остаток, есть не у всех —
+    у Qwen вместо денег бесплатная квота в токенах, см. spend_qwen_tokens).
+    Провайдер без копилки — молча ничего не делаем: у Gemini бесплатный ключ,
+    и считать там нечего.
+
+    Оба действия выполняются прямо в SQL — атомарно, без гонки
+    «прочитал-прибавил-записал» между worker-потоками; settings хранит строки,
+    CAST приводит к числу. Остаток не заведён — уменьшать нечего, UPDATE молча
+    не найдёт строку, а копилка расхода при этом работает как обычно.
+    ⚠️ На бесплатных вариантах моделей сюда приходят НУЛИ, и это правильно:
+    копилка заведётся на нуле и будет видна в панели — значит, счёт ведётся.
+    """
+    meta = PROVIDERS.get(provider) or {}
+    cost_key = meta.get("cost_key")
+    if not cost_key:
+        return
+    balance_key = meta.get("balance_key")
     with _lock:
         conn = _get_connection()
         conn.execute(
-            "INSERT INTO settings (key, value) VALUES ('deepseek_cost_usd', ?) "
+            "INSERT INTO settings (key, value) VALUES (?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value = CAST(value AS REAL) + CAST(excluded.value AS REAL)",
-            (str(delta_usd),),
+            (cost_key, str(delta_usd)),
         )
-        conn.execute(
-            "UPDATE settings SET value = CAST(value AS REAL) - CAST(? AS REAL) "
-            "WHERE key = 'deepseek_balance_usd'",
-            (str(delta_usd),),
-        )
-        conn.commit()
-
-
-def add_xiaomi_cost(delta_usd: float):
-    """Как add_deepseek_cost, но для Xiaomi MiMo (2026-07-25): копит стоимость
-    запросов в settings (ключ xiaomi_cost_usd) и на ту же сумму уменьшает
-    остаток счёта (ключ xiaomi_balance_usd — в панели «📡 Настройки API» это
-    «расход / остаток»). Пополнил счёт Xiaomi — поправь остаток в settings
-    руками. Ключа нет — уменьшать нечего, UPDATE молча не найдёт строку."""
-    with _lock:
-        conn = _get_connection()
-        conn.execute(
-            "INSERT INTO settings (key, value) VALUES ('xiaomi_cost_usd', ?) "
-            "ON CONFLICT(key) DO UPDATE SET value = CAST(value AS REAL) + CAST(excluded.value AS REAL)",
-            (str(delta_usd),),
-        )
-        conn.execute(
-            "UPDATE settings SET value = CAST(value AS REAL) - CAST(? AS REAL) "
-            "WHERE key = 'xiaomi_balance_usd'",
-            (str(delta_usd),),
-        )
-        conn.commit()
-
-
-def add_openrouter_cost(delta_usd: float):
-    """Как add_deepseek_cost, но для OpenRouter (2026-08-01, временная модель
-    Ling 3.0 Flash): копит стоимость запросов в settings (ключ
-    openrouter_cost_usd) и на ту же сумму уменьшает остаток кредитов
-    (ключ openrouter_balance_usd — в панели «📡 Настройки API» это
-    «расход / остаток»). Остаток заводится кнопкой «💵 Счёт OpenRouter» на
-    экране «💰 Счета и квоты»; ключа нет — уменьшать нечего, UPDATE молча
-    не найдёт строку.
-    ⚠️ На бесплатном варианте модели сюда приходят НУЛИ, и это правильно:
-    счётчик заведётся на нуле и будет виден в панели: значит, счёт ведётся.
-    Перейдём на платный вариант — цифры пойдут в ту же копилку сами."""
-    with _lock:
-        conn = _get_connection()
-        conn.execute(
-            "INSERT INTO settings (key, value) VALUES ('openrouter_cost_usd', ?) "
-            "ON CONFLICT(key) DO UPDATE SET value = CAST(value AS REAL) + CAST(excluded.value AS REAL)",
-            (str(delta_usd),),
-        )
-        conn.execute(
-            "UPDATE settings SET value = CAST(value AS REAL) - CAST(? AS REAL) "
-            "WHERE key = 'openrouter_balance_usd'",
-            (str(delta_usd),),
-        )
-        conn.commit()
-
-
-def add_qwen_cost(delta_usd: float):
-    """Как add_deepseek_cost, но для Qwen: копит стоимость запросов в settings
-    (ключ qwen_cost_usd). Сложение атомарно в SQL — без гонки между потоками."""
-    with _lock:
-        conn = _get_connection()
-        conn.execute(
-            "INSERT INTO settings (key, value) VALUES ('qwen_cost_usd', ?) "
-            "ON CONFLICT(key) DO UPDATE SET value = CAST(value AS REAL) + CAST(excluded.value AS REAL)",
-            (str(delta_usd),),
-        )
+        if balance_key:
+            conn.execute(
+                "UPDATE settings SET value = CAST(value AS REAL) - CAST(? AS REAL) "
+                "WHERE key = ?",
+                (str(delta_usd), balance_key),
+            )
         conn.commit()
 
 
@@ -1064,28 +1022,6 @@ def get_qwen_tokens() -> dict:
         except (TypeError, ValueError):
             out[row["key"][len(prefix):]] = 0
     return out
-
-
-def add_image_cost(delta_usd: float):
-    """Как add_deepseek_cost, но для генерации картинок (Nano Banana):
-    копит стоимость в settings (ключ image_cost_usd) и на ту же сумму уменьшает
-    остаток баланса (ключ image_balance_usd — показывается в панели «📡 Настройки
-    API» как «расход / остаток»). Оба действия атомарны в SQL.
-    Если баланс в settings не заведён — уменьшать нечего, UPDATE молча
-    не найдёт строку (счётчик расхода при этом работает как раньше)."""
-    with _lock:
-        conn = _get_connection()
-        conn.execute(
-            "INSERT INTO settings (key, value) VALUES ('image_cost_usd', ?) "
-            "ON CONFLICT(key) DO UPDATE SET value = CAST(value AS REAL) + CAST(excluded.value AS REAL)",
-            (str(delta_usd),),
-        )
-        conn.execute(
-            "UPDATE settings SET value = CAST(value AS REAL) - CAST(? AS REAL) "
-            "WHERE key = 'image_balance_usd'",
-            (str(delta_usd),),
-        )
-        conn.commit()
 
 
 def register_api_call(model_name: str):

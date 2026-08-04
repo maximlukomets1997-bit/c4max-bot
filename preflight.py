@@ -171,39 +171,47 @@ def check_models():
 
 def check_providers():
     """
-    Новый провайдер добавляется в восьми местах, и три из них молчаливые
-    (раздел 3 карты): забудешь значок — логи пойдут под общим 🤖; забудешь
-    группу в панели API — вызовы просто не покажутся; забудешь ветку в
-    отчётах — расход молча уедет в графу «прочие». Первое проверяем прямо,
-    два вторых — по исходному тексту тех самых функций.
+    Провайдер описывается ОДНОЙ записью в `config.PROVIDERS` (2026-08-03), и
+    из неё собираются панель «📡 Настройки API», отчёты о расходах и экран
+    «💰 Счета и квоты». Поэтому проверяем не «упомянут ли он в тексте функций»
+    (так было до реестра), а три вещи по существу:
+      1. у каждого провайдера моделей есть запись в реестре;
+      2. запись ПОЛНАЯ — ни одного пропущенного поля (опечатка в имени поля
+         иначе всплыла бы только на боевой панели);
+      3. провайдер с деньгами попал в кортежи порядка на экране счетов —
+         это последние списки, которые ведутся руками, и забытый в них
+         провайдер потерял бы кнопку правки остатка.
     """
-    import inspect
     import config
     from handlers.admin import panel_main
-    from services import daily_report
 
     problems = []
+    fields = {"icon", "title", "calls_label", "money_label", "cost_key",
+              "balance_key", "console_url", "balance_btn",
+              "monthly_reset", "report_approx", "quota_tokens"}
+
     providers = {info.get("provider") for info in config.AVAILABLE_MODELS.values()}
     providers.discard(None)
-
-    try:
-        panel_src = inspect.getsource(panel_main.send_api_panel)
-    except OSError:
-        panel_src = ""
-    try:
-        report_src = inspect.getsource(daily_report._calls_by_group) + inspect.getsource(daily_report.render)
-    except OSError:
-        report_src = ""
-
     for provider in sorted(providers):
-        if provider not in config.PROVIDER_ICONS:
-            problems.append(f"у провайдера {provider} нет значка в config.PROVIDER_ICONS")
-        if panel_src and f'"{provider}"' not in panel_src and f"'{provider}'" not in panel_src:
-            problems.append(f"провайдер {provider} не упомянут в send_api_panel — его вызовы "
-                            f"не покажутся в панели «📡 Настройки API»")
-        if report_src and f'"{provider}"' not in report_src and f"'{provider}'" not in report_src:
-            problems.append(f"провайдер {provider} не упомянут в отчётах о расходах "
-                            f"(services/daily_report.py) — его расход уедет в «прочие»")
+        if provider not in config.PROVIDERS:
+            problems.append(f"у провайдера {provider} нет записи в config.PROVIDERS — "
+                            f"он не покажется ни в панели API, ни в отчётах")
+
+    for pid, meta in config.PROVIDERS.items():
+        missing = fields - set(meta)
+        if missing:
+            problems.append(f"в записи провайдера {pid} нет полей: {', '.join(sorted(missing))}")
+        if meta.get("cost_key") and not meta.get("console_url"):
+            problems.append(f"у провайдера {pid} есть копилка расхода, но нет console_url — "
+                            f"сумма в панели API станет ссылкой в никуда")
+        if meta.get("balance_key") and not meta.get("balance_btn"):
+            problems.append(f"у провайдера {pid} есть счёт, но нет надписи кнопки balance_btn")
+        if meta.get("cost_key") and pid not in panel_main._COST_ORDER:
+            problems.append(f"провайдер {pid} не попал в panel_main._COST_ORDER — "
+                            f"его не будет на экране «Обнулить потрачено»")
+        if meta.get("balance_key") and pid not in panel_main._BALANCE_ORDER:
+            problems.append(f"провайдер {pid} не попал в panel_main._BALANCE_ORDER — "
+                            f"его остаток нельзя будет поправить кнопкой")
 
     return problems, f"провайдеров: {len(providers)} ({', '.join(sorted(providers))})"
 

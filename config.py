@@ -533,23 +533,96 @@ AVAILABLE_MODELS = {
     }
 }
 
-# Смысловые значки провайдеров — ЕДИНЫЙ ИСТОЧНИК ПРАВДЫ для логов и панелей.
-# По ним видно с первого взгляда, чья модель обслужила запрос:
-#   ♊️ Gemini (и Gemma — она числится за тем же провайдером),
-#   🐪 Qwen, 🐋 DeepSeek, 🍚 Xiaomi MiMo, 🧭 OpenRouter («привратник» к чужим
-#   моделям — отсюда компас), 🎨 генерация картинок (Nano Banana).
-# Читают: services/gemini.py (строки лога «Запрос к модели» / «Ответ от …»)
-# и handlers/admin/panel_main.py (заголовки блоков панели «📡 Настройки API»).
-# Новый провайдер в AVAILABLE_MODELS → добавь ему значок ЗДЕСЬ, иначе в логах
-# он пойдёт под запасным 🤖.
-PROVIDER_ICONS = {
-    "gemini":     "♊️",
-    "qwen":       "🐪",
-    "deepseek":   "🐋",
-    "xiaomi":     "🍚",
-    "openrouter": "🧭",
-    "image":      "🎨",
+# ─────────────────────────────────────────────
+#  РЕЕСТР ПРОВАЙДЕРОВ — ЕДИНЫЙ ИСТОЧНИК ПРАВДЫ (2026-08-03)
+# ─────────────────────────────────────────────
+# Раньше знание о провайдере было размазано по восьми местам, и ТРИ из них
+# молчали при забывчивости: словарь groups в send_api_panel (вызовы просто не
+# показывались), _calls_by_group + render в отчётах (расход уезжал в «прочие»)
+# и реестры счетов на экране «💰 Счета и квоты». Теперь всё это собирается
+# ОТСЮДА, и забыть строку негде: нет записи — нет и провайдера.
+#
+# ⚠️ ПОРЯДОК ЗАПИСЕЙ = ПОРЯДОК БЛОКОВ в панели «📡 Настройки API» и в отчётах
+# о расходах. Меняешь порядок — меняется вид обоих экранов сразу, в этом и смысл.
+#
+# Что значат поля:
+#   icon         — значок для логов и заголовков (♊️ Gemini и Gemma числятся за
+#                  одним провайдером; 🧭 OpenRouter — «привратник» к чужим
+#                  моделям, отсюда компас; 🎨 картинки — Nano Banana);
+#   title        — человеческое имя (кнопки счетов, «Итоги месяца»);
+#   calls_label  — заголовок блока вызовов («Генерация Картинок» — единственный,
+#                  кто не «Вызовы …», поэтому поле отдельное, а не из title);
+#   money_label  — заголовок строки расхода; None = денег у провайдера нет
+#                  (Gemini на бесплатном ключе);
+#   cost_key     — копилка расхода в settings; None = расход не считается;
+#   balance_key  — остаток на счету в settings; None = счёта нет (у Qwen вместо
+#                  денег бесплатная КВОТА ТОКЕНОВ по моделям, ключи
+#                  qwen_tokens_<модель> — решение Максима 2026-07-27);
+#   console_url  — кабинет провайдера: цифра расхода в панели ведёт туда;
+#   balance_btn  — надпись кнопки на экране «💰 Счета и квоты» (есть у всех,
+#                  у кого есть balance_key);
+#   monthly_reset — обнуляется ли копилка первого числа. ⚠️ У DeepSeek, Xiaomi
+#                  и OpenRouter она ВЕЧНАЯ (сверяется с кабинетом провайдера —
+#                  решения Максима 2026-07-21 и 2026-07-25), и «чинить» это
+#                  обратно нельзя; у Qwen и картинок — месячная, поэтому их
+#                  значение переносится через daily_report.note_monthly_reset;
+#   report_approx — писать ли «≈» перед суммой в отчёте: у Qwen расход
+#                  РАСЧЁТНЫЙ по прайсу (пока действует бесплатная квота,
+#                  реальных списаний нет);
+#   quota_tokens — есть ли у провайдера остаток квоты токенов по моделям
+#                  (только Qwen; блок в панели рисуется отдельно).
+PROVIDERS = {
+    "gemini": {
+        "icon": "♊️", "title": "Gemini", "calls_label": "Вызовы Gemini",
+        "money_label": None, "cost_key": None, "balance_key": None,
+        "console_url": None, "balance_btn": None,
+        "monthly_reset": False, "report_approx": False, "quota_tokens": False,
+    },
+    "image": {
+        "icon": "🎨", "title": "Картинки", "calls_label": "Генерация Картинок",
+        "money_label": "Расход Картинок", "cost_key": "image_cost_usd",
+        "balance_key": "image_balance_usd",
+        "console_url": "https://aistudio.google.com/spend",
+        "balance_btn": "💵 Счёт Картинок",
+        "monthly_reset": True, "report_approx": False, "quota_tokens": False,
+    },
+    "qwen": {
+        "icon": "🐪", "title": "Qwen", "calls_label": "Вызовы Qwen",
+        "money_label": "Расход Qwen", "cost_key": "qwen_cost_usd",
+        "balance_key": None,
+        "console_url": "https://modelstudio.console.alibabacloud.com/",
+        "balance_btn": None,
+        "monthly_reset": True, "report_approx": True, "quota_tokens": True,
+    },
+    "deepseek": {
+        "icon": "🐋", "title": "DeepSeek", "calls_label": "Вызовы DeepSeek",
+        "money_label": "Расход DeepSeek", "cost_key": "deepseek_cost_usd",
+        "balance_key": "deepseek_balance_usd",
+        "console_url": "https://platform.deepseek.com/usage",
+        "balance_btn": "💵 Счёт DeepSeek",
+        "monthly_reset": False, "report_approx": False, "quota_tokens": False,
+    },
+    "xiaomi": {
+        "icon": "🍚", "title": "Xiaomi", "calls_label": "Вызовы Xiaomi",
+        "money_label": "Расход Xiaomi", "cost_key": "xiaomi_cost_usd",
+        "balance_key": "xiaomi_balance_usd",
+        "console_url": "https://platform.xiaomimimo.com/",
+        "balance_btn": "💵 Счёт Xiaomi",
+        "monthly_reset": False, "report_approx": False, "quota_tokens": False,
+    },
+    "openrouter": {
+        "icon": "🧭", "title": "OpenRouter", "calls_label": "Вызовы OpenRouter",
+        "money_label": "Расход OpenRouter", "cost_key": "openrouter_cost_usd",
+        "balance_key": "openrouter_balance_usd",
+        "console_url": "https://openrouter.ai/credits",
+        "balance_btn": "💵 Счёт OpenRouter",
+        "monthly_reset": False, "report_approx": False, "quota_tokens": False,
+    },
 }
+
+# Значки отдельным словарём — им пользуются логи (services/gemini.py, rag.py)
+# и панели. Собирается ИЗ РЕЕСТРА: второго списка значков заводить нельзя.
+PROVIDER_ICONS = {pid: meta["icon"] for pid, meta in PROVIDERS.items()}
 # Запасной значок: модель неизвестна (например, убрана из AVAILABLE_MODELS,
 # а в логе/статистике ещё встречается) — раньше так помечались ВСЕ нейросети.
 PROVIDER_ICON_FALLBACK = "🤖"

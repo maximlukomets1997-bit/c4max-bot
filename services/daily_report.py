@@ -29,7 +29,7 @@ import json
 import logging
 from datetime import datetime, timezone, timedelta
 
-from config import AVAILABLE_MODELS, AVAILABLE_IMAGE_MODELS, PROVIDER_ICONS, PROVIDER_ICON_FALLBACK
+from config import AVAILABLE_MODELS, AVAILABLE_IMAGE_MODELS, PROVIDER_ICONS, PROVIDER_ICON_FALLBACK, PROVIDERS
 import database.history as hist
 
 logger = logging.getLogger(__name__)
@@ -147,18 +147,17 @@ def collect_counters() -> dict:
     расходов по каждому провайдеру, остатки на счетах и остаток квоты по каждой
     модели Qwen.
     Вызовы сюда НЕ входят — они считаются по времени из таблицы api_calls."""
-    return {
-        "deepseek_cost": _money("deepseek_cost_usd"),
-        "qwen_cost": _money("qwen_cost_usd"),
-        "image_cost": _money("image_cost_usd"),
-        "xiaomi_cost": _money("xiaomi_cost_usd"),
-        "openrouter_cost": _money("openrouter_cost_usd"),
-        "deepseek_balance": _money("deepseek_balance_usd"),
-        "image_balance": _money("image_balance_usd"),
-        "xiaomi_balance": _money("xiaomi_balance_usd"),
-        "openrouter_balance": _money("openrouter_balance_usd"),
-        "qwen_tokens": hist.get_qwen_tokens(),
-    }
+    out = {}
+    # Копилки и остатки — по реестру провайдеров (config.PROVIDERS): имена
+    # ключей снимка складываются как «<провайдер>_cost» и «<провайдер>_balance».
+    # Нового провайдера сюда вписывать не нужно — он приедет с реестром.
+    for pid, meta in PROVIDERS.items():
+        if meta["cost_key"]:
+            out[f"{pid}_cost"] = _money(meta["cost_key"])
+        if meta["balance_key"]:
+            out[f"{pid}_balance"] = _money(meta["balance_key"])
+    out["qwen_tokens"] = hist.get_qwen_tokens()
+    return out
 
 
 def _carry_read() -> dict:
@@ -200,11 +199,16 @@ def note_monthly_reset() -> None:
         # Копилки Qwen и картинок обнуляются целиком — переносим их значение
         # ЦЕЛИКОМ: расход периода = (значение на момент сброса − снимок) + то,
         # что накапает после сброса. См. формулу в шапке файла.
-        carry["qwen_cost"] = float(carry.get("qwen_cost", 0.0)) + _money("qwen_cost_usd")
-        carry["image_cost"] = float(carry.get("image_cost", 0.0)) + _money("image_cost_usd")
+        # Переносим ТОЛЬКО те копилки, которые месячный сброс обнуляет
+        # (признак monthly_reset в реестре). Вечные счётчики — DeepSeek,
+        # Xiaomi, OpenRouter — он не трогает, и переносить их нечего.
+        for pid, meta in PROVIDERS.items():
+            if meta["cost_key"] and meta["monthly_reset"]:
+                key = f"{pid}_cost"
+                carry[key] = float(carry.get(key, 0.0)) + _money(meta["cost_key"])
         hist.set_setting(_CARRY_KEY, json.dumps(carry, ensure_ascii=False))
         logger.info("📊 Суточный отчёт: перед месячным сбросом отложено %d моделей вызовов, Qwen $%.6f, картинки $%.6f",
-                    len(calls), carry["qwen_cost"], carry["image_cost"])
+                    len(calls), carry.get("qwen_cost", 0.0), carry.get("image_cost", 0.0))
     except Exception as e:
         logger.warning("⚠️ Не удалось отложить счётчики перед месячным сбросом: %s", e)
 
@@ -235,10 +239,11 @@ def _calls_by_group(calls: dict) -> dict:
     """Раскладывает вызовы по блокам панели: gemini / image / qwen / deepseek /
     xiaomi / openrouter и «прочие» (модель удалена из конфига, а вызовы за
     период были). Порядок внутри блока — по числу вызовов, как в панели.
-    ⚠️ Новый провайдер в AVAILABLE_MODELS → добавь его СЮДА и в render(), иначе
-    его вызовы молча уедут в «прочие»."""
-    groups = {"gemini": [], "image": [], "qwen": [], "deepseek": [], "xiaomi": [],
-              "openrouter": [], "other": []}
+    Блоки берутся из реестра config.PROVIDERS (2026-08-03) — нового провайдера
+    вписывать сюда не нужно, он приедет вместе с реестром. Раньше блоки были
+    перечислены руками, и забытый провайдер молча уезжал в «прочие»."""
+    groups = {pid: [] for pid in PROVIDERS}
+    groups["other"] = []
     seen = set()
 
     for model_name, meta in AVAILABLE_MODELS.items():
@@ -315,24 +320,23 @@ def period_totals(start_utc: str, end_utc: str,
         if base_left is not None and cur_left is not None:
             burned[model_name] = base_left - cur_left
 
-    img_spent, img_manual = _spent(current.get("image_cost", 0.0), base.get("image_cost", 0.0),
-                                   float(carry.get("image_cost", 0.0)))
-    qw_spent, qw_manual = _spent(current.get("qwen_cost", 0.0), base.get("qwen_cost", 0.0),
-                                 float(carry.get("qwen_cost", 0.0)))
-    ds_spent, ds_manual = _spent(current.get("deepseek_cost", 0.0), base.get("deepseek_cost", 0.0))
-    xm_spent, xm_manual = _spent(current.get("xiaomi_cost", 0.0), base.get("xiaomi_cost", 0.0))
-    or_spent, or_manual = _spent(current.get("openrouter_cost", 0.0), base.get("openrouter_cost", 0.0))
-
-    return {
+    out = {
         "calls": calls,
         "burned": burned,
         "qwen_reset": [name for name, value in burned.items() if value < 0],
-        "image_cost": img_spent, "image_manual": img_manual,
-        "qwen_cost": qw_spent, "qwen_manual": qw_manual,
-        "deepseek_cost": ds_spent, "deepseek_manual": ds_manual,
-        "xiaomi_cost": xm_spent, "xiaomi_manual": xm_manual,
-        "openrouter_cost": or_spent, "openrouter_manual": or_manual,
     }
+    # Расход по каждому провайдеру с копилкой — по реестру. Отложенное
+    # (carry) прибавляется только там, где копилку обнуляет месячный сброс:
+    # у вечных счётчиков переносить нечего, и carry для них всегда пуст.
+    for pid, meta in PROVIDERS.items():
+        if not meta["cost_key"]:
+            continue
+        carried = float(carry.get(f"{pid}_cost", 0.0)) if meta["monthly_reset"] else 0.0
+        spent, manual = _spent(current.get(f"{pid}_cost", 0.0),
+                               base.get(f"{pid}_cost", 0.0), carried)
+        out[f"{pid}_cost"] = spent
+        out[f"{pid}_manual"] = manual
+    return out
 
 
 def _proactive_block(start_utc: str, end_utc: str, total_calls: int) -> str:
@@ -403,50 +407,40 @@ def render(header: str, period_line: str, note: str,
     def _sum(provider: str) -> int:
         return sum(cnt for _, cnt in groups[provider])
 
-    img_spent = totals.get("image_cost", 0.0)
-    qw_spent = totals.get("qwen_cost", 0.0)
-    ds_spent = totals.get("deepseek_cost", 0.0)
-    xm_spent = totals.get("xiaomi_cost", 0.0)
-    or_spent = totals.get("openrouter_cost", 0.0)
     manual_note = " <i>(счётчик правили вручную)</i>"
 
     total_calls = sum(calls.values())
-    total_money = img_spent + qw_spent + ds_spent + xm_spent + or_spent
+    total_money = sum(totals.get(f"{pid}_cost", 0.0) for pid in PROVIDERS)
 
-    text = (
-        f"{header}\n"
-        f"{period_line}\n"
-        f"{note}"
-        f"───────────────────────────\n"
-        f"{PROVIDER_ICONS['gemini']} <b>Вызовы Gemini: {_sum('gemini')}</b>\n"
-        f"{_plain_lines(groups['gemini'])}"
-        f"───────────────────────────\n"
-        f"{PROVIDER_ICONS['image']} <b>Генерация Картинок: {_sum('image')}</b>\n"
-        f"{_plain_lines(groups['image'])}"
-        f"💰 <b>Расход Картинок:</b> ${img_spent:.6f}{manual_note if totals.get('image_manual') else ''}\n"
-        f"   Остаток на счету: <b>${current.get('image_balance', 0.0):.6f}</b>\n"
-        f"───────────────────────────\n"
-        f"{PROVIDER_ICONS['qwen']} <b>Вызовы Qwen: {_sum('qwen')}</b>\n"
-        + "".join(_qwen_line(name, cnt, burned.get(name), cur_tokens.get(name),
-                             name in reset_models)
-                  for name, cnt in groups["qwen"])
-        + f"💰 <b>Расход Qwen:</b> ≈${qw_spent:.6f}{manual_note if totals.get('qwen_manual') else ''}\n"
-        f"───────────────────────────\n"
-        f"{PROVIDER_ICONS['deepseek']} <b>Вызовы DeepSeek: {_sum('deepseek')}</b>\n"
-        f"{_plain_lines(groups['deepseek'])}"
-        f"💰 <b>Расход DeepSeek:</b> ${ds_spent:.6f}{manual_note if totals.get('deepseek_manual') else ''}\n"
-        f"   Остаток на счету: <b>${current.get('deepseek_balance', 0.0):.6f}</b>\n"
-        f"───────────────────────────\n"
-        f"{PROVIDER_ICONS['xiaomi']} <b>Вызовы Xiaomi: {_sum('xiaomi')}</b>\n"
-        f"{_plain_lines(groups['xiaomi'])}"
-        f"💰 <b>Расход Xiaomi:</b> ${xm_spent:.6f}{manual_note if totals.get('xiaomi_manual') else ''}\n"
-        f"   Остаток на счету: <b>${current.get('xiaomi_balance', 0.0):.6f}</b>\n"
-        f"───────────────────────────\n"
-        f"{PROVIDER_ICONS['openrouter']} <b>Вызовы OpenRouter: {_sum('openrouter')}</b>\n"
-        f"{_plain_lines(groups['openrouter'])}"
-        f"💰 <b>Расход OpenRouter:</b> ${or_spent:.6f}{manual_note if totals.get('openrouter_manual') else ''}\n"
-        f"   Остаток на счету: <b>${current.get('openrouter_balance', 0.0):.6f}</b>\n"
-    )
+    # Блоки собираются ИЗ РЕЕСТРА config.PROVIDERS (2026-08-03) — тем же
+    # порядком и по тем же правилам, что панель «📡 Настройки API», чтобы
+    # отчёт читался с ней один в один. Раньше шесть блоков были выписаны
+    # здесь руками, и забытый провайдер молча уезжал в «прочие».
+    # Особенности, заданные полями реестра:
+    #   • quota_tokens — у Qwen вместо простого списка моделей строки с
+    #     остатком бесплатной квоты (_qwen_line);
+    #   • report_approx — «≈» перед суммой: расход Qwen расчётный по прайсу;
+    #   • balance_key — есть счёт, значит под расходом идёт строка остатка.
+    text = f"{header}\n{period_line}\n{note}───────────────────────────\n"
+    for pid, meta in PROVIDERS.items():
+        text += f"{meta['icon']} <b>{meta['calls_label']}: {_sum(pid)}</b>\n"
+        if meta["quota_tokens"]:
+            text += "".join(_qwen_line(name, cnt, burned.get(name), cur_tokens.get(name),
+                                       name in reset_models)
+                            for name, cnt in groups[pid])
+        else:
+            text += _plain_lines(groups[pid])
+        if meta["cost_key"]:
+            spent = totals.get(f"{pid}_cost", 0.0)
+            approx = "≈" if meta["report_approx"] else ""
+            text += (f"💰 <b>{meta['money_label']}:</b> {approx}${spent:.6f}"
+                     f"{manual_note if totals.get(f'{pid}_manual') else ''}\n")
+            if meta["balance_key"]:
+                text += f"   Остаток на счету: <b>${current.get(f'{pid}_balance', 0.0):.6f}</b>\n"
+        text += "───────────────────────────\n"
+    # Хвост «прочих» и итоги дописываются ниже; лишний разделитель в конце
+    # цикла снимаем — раньше его тут не было.
+    text = text[:-len("───────────────────────────\n")]
 
     if groups["other"]:
         text += (f"───────────────────────────\n"
