@@ -547,6 +547,19 @@ def midnight_report(header: str = "📊 <b>РАСХОД ЗА СУТКИ</b>") ->
     return text
 
 
+def _total_money(values) -> float:
+    """
+    Сумма расхода по ВСЕМ провайдерам с копилкой — по реестру `config.PROVIDERS`
+    (2026-08-04). Одна на пять мест, где провайдеры раньше перечислялись руками:
+    «всего денег» в двух хвостах кнопок, среднее за день, копилка недели и её
+    сборка. Забытый в таком списке провайдер молча не попадал бы в итог —
+    ошибка без единого сообщения, ровно та, ради которой заводился реестр.
+    Принимает и totals, и копилку недели: ключи в них одинаковые.
+    """
+    return sum(float(values.get(f"{pid}_cost", 0.0) or 0.0)
+               for pid, meta in PROVIDERS.items() if meta["cost_key"])
+
+
 def _open_day_totals() -> tuple[int, float, datetime | None]:
     """Незакрытый кусок суток: сколько вызовов и денег набежало с последнего
     снимка (обычно с полуночи) по «сейчас». Третьим значением — время снимка.
@@ -562,10 +575,7 @@ def _open_day_totals() -> tuple[int, float, datetime | None]:
     current = collect_counters()
     carry = _carry_read()
     totals = period_totals(last["taken_at_utc"], _utc_str(now), base, current, carry)
-    money = (totals.get("image_cost", 0.0) + totals.get("qwen_cost", 0.0)
-             + totals.get("deepseek_cost", 0.0) + totals.get("xiaomi_cost", 0.0)
-             + totals.get("openrouter_cost", 0.0))
-    return sum((totals.get("calls") or {}).values()), money, start_dt
+    return sum((totals.get("calls") or {}).values()), _total_money(totals), start_dt
 
 
 def today_so_far() -> str:
@@ -657,11 +667,13 @@ def week_add_day(start_utc: str, end_utc: str, totals: dict) -> None:
     acc["burned"] = burned
     acc["qwen_reset"] = sorted(reset)
 
-    for key in ("image_cost", "qwen_cost", "deepseek_cost", "xiaomi_cost", "openrouter_cost"):
-        acc[key] = float(acc.get(key, 0.0)) + float(totals.get(key, 0.0))
-    for key in ("image_manual", "qwen_manual", "deepseek_manual", "xiaomi_manual",
-                "openrouter_manual"):
-        acc[key] = bool(acc.get(key)) or bool(totals.get(key))
+    # Копилка ведётся по реестру: расход и пометка «счётчик правили вручную»
+    # у каждого провайдера, у которого есть копилка.
+    for pid, meta in PROVIDERS.items():
+        if not meta["cost_key"]:
+            continue
+        acc[f"{pid}_cost"] = float(acc.get(f"{pid}_cost", 0.0)) + float(totals.get(f"{pid}_cost", 0.0))
+        acc[f"{pid}_manual"] = bool(acc.get(f"{pid}_manual")) or bool(totals.get(f"{pid}_manual"))
 
     _week_write(acc)
 
@@ -714,9 +726,7 @@ def _week_average(totals: dict, days: int) -> str:
     if days <= 0:
         return ""
     calls = sum((totals.get("calls") or {}).values())
-    money = (totals.get("image_cost", 0.0) + totals.get("qwen_cost", 0.0)
-             + totals.get("deepseek_cost", 0.0) + totals.get("xiaomi_cost", 0.0)
-             + totals.get("openrouter_cost", 0.0))
+    money = _total_money(totals)
     return f"📈 <b>В среднем в день:</b> вызовов {round(calls / days)} · ≈${money / days:.6f}"
 
 
@@ -737,17 +747,13 @@ def weekly_report(header: str = "📅 <b>РАСХОД ЗА НЕДЕЛЮ</b>") ->
         "calls": acc.get("calls") or {},
         "burned": acc.get("burned") or {},
         "qwen_reset": acc.get("qwen_reset") or [],
-        "image_cost": float(acc.get("image_cost", 0.0)),
-        "qwen_cost": float(acc.get("qwen_cost", 0.0)),
-        "deepseek_cost": float(acc.get("deepseek_cost", 0.0)),
-        "xiaomi_cost": float(acc.get("xiaomi_cost", 0.0)),
-        "openrouter_cost": float(acc.get("openrouter_cost", 0.0)),
-        "image_manual": bool(acc.get("image_manual")),
-        "qwen_manual": bool(acc.get("qwen_manual")),
-        "deepseek_manual": bool(acc.get("deepseek_manual")),
-        "xiaomi_manual": bool(acc.get("xiaomi_manual")),
-        "openrouter_manual": bool(acc.get("openrouter_manual")),
     }
+    # Расход и пометки — по реестру, как и всё остальное в отчётах.
+    for pid, meta in PROVIDERS.items():
+        if not meta["cost_key"]:
+            continue
+        totals[f"{pid}_cost"] = float(acc.get(f"{pid}_cost", 0.0))
+        totals[f"{pid}_manual"] = bool(acc.get(f"{pid}_manual"))
 
     text = render(header,
                   _week_label(_parse_utc(acc.get("start_utc") or ""),
@@ -767,10 +773,7 @@ def week_so_far() -> str:
     open_calls, open_money, snapshot_dt = _open_day_totals()
 
     total = sum((acc.get("calls") or {}).values()) + open_calls
-    money = (float(acc.get("image_cost", 0.0)) + float(acc.get("qwen_cost", 0.0))
-             + float(acc.get("deepseek_cost", 0.0)) + float(acc.get("xiaomi_cost", 0.0))
-             + float(acc.get("openrouter_cost", 0.0))
-             + open_money)
+    money = _total_money(acc) + open_money
 
     start_dt = _parse_utc(acc.get("start_utc") or "") or snapshot_dt
     if not start_dt:

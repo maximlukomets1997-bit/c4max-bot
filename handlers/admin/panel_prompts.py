@@ -597,13 +597,6 @@ def _build_prompt_panel_text_and_keyboard(user_id, bot_username=None):
     ai_replies_val = get_setting("ai_replies_enabled", "1")
     btn_ai_label = f"💬 ОТВЕТЫ ИИ: {_onoff(ai_replies_val != '0')}"
 
-    # Тумблер показа «мыслей под капотом» (2026-08-03, просьба Максима).
-    # Настройка ОБЩАЯ: выключена — свёрнутой цитаты с рассуждениями нет
-    # ни в личке, ни в группах, ни в режиме «Сам в разговор».
-    # Состояние читаем через utils_format — там же, где оно и применяется.
-    from utils_format import thoughts_enabled
-    btn_thoughts_label = f"🧠 МЫСЛИ ПОД КАПОТОМ: {_onoff(thoughts_enabled())}"
-
     # Кнопки режима «Сам в разговор»: живые цифры (пауза/порог) и статус
     # НАМЕРЕННО только на кнопках, а не в тексте панели — регуляторы обновляют
     # панель дешёвым edit_message_reply_markup, не трогая текст (нет риска
@@ -626,8 +619,6 @@ def _build_prompt_panel_text_and_keyboard(user_id, bot_username=None):
             InlineKeyboardButton(btn_prompt_label, callback_data="toggle_admin_prompt"),
             InlineKeyboardButton(btn_ai_label, callback_data="toggle_ai_replies"),
         ],
-        # Мысли — своим рядом: надпись длинная, в половину ширины не влезает.
-        [InlineKeyboardButton(btn_thoughts_label, callback_data="toggle_thoughts")],
         [
             InlineKeyboardButton(btn_proactive_label, callback_data="proactive:toggle"),
             InlineKeyboardButton("🧹Очистить РАЗГОВОРЫ", callback_data="proactive:wipe"),
