@@ -46,7 +46,7 @@ import tempfile
 _SKIP_MODULES = {"preflight", "main", "reset_db", "watchdog_local"}
 
 # Папки проекта, по которым ходим в поисках модулей.
-_PACKAGES = ("services", "handlers", "database", "data")
+_PACKAGES = ("services", "handlers", "database", "data", "jobs")
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
