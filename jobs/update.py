@@ -127,7 +127,7 @@ async def forget_update_notice(application, stale_only: bool = False) -> None:
 
 async def auto_update_loop(application):
     """
-    Раз в AUTO_UPDATE_INTERVAL_SEC (10 минут) спрашивает GitHub, нет ли новой
+    Раз в AUTO_UPDATE_INTERVAL_SEC (5 минут) спрашивает GitHub, нет ли новой
     версии, и если есть — забирает её и перезапускается. Решение Максима
     2026-07-27.
 
@@ -197,7 +197,7 @@ async def auto_update_loop(application):
 
             last_check = time.monotonic()
             # quiet_nochange: «нового кода нет» в лог не пишем — проверка идёт
-            # каждые 10 минут, и эта строка забивала бы лог целиком. Все прочие
+            # каждые 5 минут, и эта строка забивала бы лог целиком. Все прочие
             # исходы (обновился, откатился, не достучался) пишутся как обычно.
             res = await deploy.update(quiet_nochange=True)
             status = res.get("STATUS")
@@ -215,6 +215,6 @@ async def auto_update_loop(application):
                 await _notify(f"⚠️ Самообновление: {res.get('MSG', '')}\n"
                               f"Бот продолжает работать на прежней версии.")
             # NOCHANGE и NETFAIL — молча, только в логе (решение Максима:
-            # 144 сообщения в сутки «нового нет» никому не нужны).
+            # 288 сообщений в сутки «нового нет» никому не нужны).
         except Exception as e:
             logger.error("⚠️ Цикл самообновления споткнулся: %s", e)
