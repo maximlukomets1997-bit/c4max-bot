@@ -23,6 +23,7 @@ from telegram.ext import ContextTypes
 
 from database.history import (
     clear_quiz_failures,
+    delete_all_quiz_questions,
     delete_quiz_drafts,
     delete_quiz_question,
     get_quiz_bank_counts,
@@ -173,6 +174,17 @@ def _build_panel(context):
         rows.append([InlineKeyboardButton("⚠️ Что не вышло", callback_data="quiz:fails")])
     if counts["drafts"]:
         rows.append([InlineKeyboardButton("🗑 Очистить черновики", callback_data="quiz:wipe")])
+
+    # Эталонный набор — вопросы, написанные вручную и приехавшие файлом в
+    # обновлении кода (2026-08-05, решение Максима после негодной машинной
+    # сборки). Кнопка показывается, только когда файл на месте и в нём что-то
+    # есть, иначе она врала бы про несуществующий набор.
+    seed = quiz_bank.seed_stats()
+    if seed["questions"]:
+        rows.append([InlineKeyboardButton(f"📥 Загрузить мои вопросы ({seed['questions']})",
+                                          callback_data="quiz:seed")])
+    if counts["approved"] or counts["drafts"]:
+        rows.append([InlineKeyboardButton("🗑 Стереть ВСЕ вопросы", callback_data="quiz:nuke")])
     rows.append(_adm_back_row())
     return text, InlineKeyboardMarkup(rows)
 
@@ -276,6 +288,8 @@ async def _handle_quiz_callback(query, context, data: str, chat_id: int, user_id
       quiz:back:<id>          — вернуть игровой вопрос в черновики
       quiz:del:<режим>:<id>   — удалить вопрос совсем
       quiz:wipe / quiz:wipe_yes — очистить ВСЕ черновики (с подтверждением)
+      quiz:seed               — загрузить вопросы из файла репозитория
+      quiz:nuke / quiz:nuke_yes — стереть ВЕСЬ банк, включая игровые
       quiz:noop               — заглушка счётчика листания
     """
     parts = data.split(":")
@@ -353,6 +367,48 @@ async def _handle_quiz_callback(query, context, data: str, chat_id: int, user_id
             logger.info("🎮 Админ %s удалил вопрос #%s", user_id, qid)
         await query.answer("🗑 Вопрос удалён")
         await _show_card(context.bot, chat_id, context, mode, None)
+        return
+
+    if action == "seed":
+        from services import quiz_bank
+        seed = quiz_bank.seed_stats()
+        if not seed["questions"]:
+            await _popup(query, context, chat_id,
+                         "⚠️ Файла с вопросами нет — он приезжает вместе с обновлением кода.")
+            return
+        result = quiz_bank.load_seed()
+        _audit(user_id, "quiz_seed", 0,
+               f"добавлено {result['added']}, дублей {result['skipped']}")
+        logger.info("🎮 Админ %s загрузил эталонные вопросы: добавлено %d, дублей %d, негодных %d",
+                    user_id, result["added"], result["skipped"], result["bad"])
+        text = f"📥 Загружено вопросов: {result['added']} (в игру, сразу)."
+        if result["skipped"]:
+            text += f"\nУже были в банке: {result['skipped']}."
+        if result["bad"]:
+            text += f"\n⚠️ Не прошли проверку: {result['bad']}."
+        await _popup(query, context, chat_id, text)
+        await send_quiz_panel(context.bot, chat_id, context)
+        return
+
+    if action == "nuke":
+        # Полная очистка спрашивает подтверждения, как и очистка черновиков:
+        # тут сносятся и вопросы, которые уже играют.
+        await query.answer()
+        try:
+            await query.edit_message_reply_markup(InlineKeyboardMarkup([[
+                InlineKeyboardButton("❗️ Да, стереть ВСЁ", callback_data="quiz:nuke_yes"),
+                InlineKeyboardButton("Отмена", callback_data="quiz:panel"),
+            ]]))
+        except Exception as e:
+            logger.warning("⚠️ Не удалось показать подтверждение полной очистки: %s", e)
+        return
+
+    if action == "nuke_yes":
+        removed = delete_all_quiz_questions()
+        _audit(user_id, "quiz_nuke", 0, f"стёрто вопросов: {removed}")
+        logger.info("🎮 Админ %s стёр ВЕСЬ банк вопросов (%d шт.)", user_id, removed)
+        await query.answer(f"🗑 Стёрто вопросов: {removed}")
+        await send_quiz_panel(context.bot, chat_id, context)
         return
 
     if action == "wipe":
