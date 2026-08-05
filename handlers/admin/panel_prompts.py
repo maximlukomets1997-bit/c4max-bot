@@ -6,6 +6,7 @@ import html
 import json
 import logging
 import os
+import re
 import time
 
 import logging_setup
@@ -424,6 +425,57 @@ async def _handle_proactive_wipe(query, user_id: int, confirmed: bool, from_adm:
         logger.debug("🔧 Не удалось вернуть клавиатуру после очистки разговоров: %s", e)
 
 
+# ─────────────────────────────────────────────
+#  Страховка от лимита Telegram (2026-08-05)
+# ─────────────────────────────────────────────
+#
+#  У панели промптов ШЕСТЬ превью (система, дополнения, новости, RAG, участие,
+#  разбор медиа) по 600 символов каждое — в сумме 3600 при постоянной части
+#  ~1400. Задай Максим все промпты длинными, и панель перевалит за 4096:
+#  Telegram отобьёт отправку целиком, и панель просто перестанет открываться.
+#
+#  Поэтому перед отправкой текст прогоняется через `_fit_panel_text`: он
+#  ужимает СОДЕРЖИМОЕ свёрнутых цитат (самое длинное — первым), пока текст
+#  не влезет. Режем именно внутри `<blockquote expandable>…</blockquote>`,
+#  а не текст целиком: обрезка «по живому» рассекла бы HTML-тег, и отправка
+#  упала бы всё равно, только уже с непонятной ошибкой разметки.
+#
+#  ⚠️ НЕ «оптимизировать» до обычного text[:4096] — см. абзац выше.
+_PANEL_TEXT_MAX = 4000       # запас к лимиту 4096 на служебную разметку
+_PREVIEW_FLOOR = 80          # короче этого превью ужимать бессмысленно
+
+
+def _fit_panel_text(text: str, limit: int = _PANEL_TEXT_MAX) -> str:
+    """
+    Ужимает превью в тексте панели, пока он не влезет в лимит Telegram.
+
+    Возвращает текст как есть, если он и так короче лимита (обычный случай —
+    ужимание включается только на длинных кастомных промптах).
+    """
+    if len(text) <= limit:
+        return text
+
+    for _ in range(20):   # потолок проходов: страховка от вечного цикла
+        blocks = list(re.finditer(r"<blockquote expandable>(.*?)</blockquote>",
+                                  text, re.DOTALL))
+        # Самая длинная цитата — её и режем: так текст выравнивается сам собой.
+        longest = max((b for b in blocks if len(b.group(1)) > _PREVIEW_FLOOR),
+                      key=lambda b: len(b.group(1)), default=None)
+        if longest is None:
+            break
+        body = longest.group(1)
+        # Режем ровно на лишнее (плюс «…»), но не ниже пола.
+        keep = max(_PREVIEW_FLOOR, len(body) - (len(text) - limit) - 1)
+        # ⚠️ Внутри превью текст УЖЕ экранирован (&amp;, &lt;): обрезка может
+        # рассечь мнемонику пополам — хвост вида «&am» убираем целиком,
+        # иначе Telegram отобьёт сообщение ошибкой разметки.
+        clipped = re.sub(r"&[a-z]*$", "", body[:keep]) + "…"
+        text = text[:longest.start(1)] + clipped + text[longest.end(1):]
+        if len(text) <= limit:
+            break
+    return text
+
+
 def _build_prompt_panel_text_and_keyboard(user_id, bot_username=None):
     additions = get_setting("prompt_additions")
     prompt_text, _, _ = get_active_system_prompt()
@@ -569,17 +621,16 @@ def _build_prompt_panel_text_and_keyboard(user_id, bot_username=None):
     # ⚠️ Промпт ОДИН на все три вида медиа и по умолчанию ПУСТ — пустой
     # означает «модели уходит только файл» (решение Максима 2026-07-24),
     # поэтому здесь, как у промпта новостей, есть ветка «(не задан)».
-    # ⚠️ Превью здесь КОРОЧЕ остальных (200 символов против 600): текст панели
-    # без этой секции уже занимает ~3000 из 4096, и шесть превью по 600 в сумме
-    # выбивают лимит, если все промпты заданы длинными. Промпт разбора — это
-    # одна-две фразы («опиши, что на картинке»), полные 600 ему не нужны;
-    # целиком он всё равно доступен файлом по кнопке «📄 Показать полные PROMPTы».
+    # Превью — общей длины PROMPT_PREVIEW_MAX (600), как у остальных блоков
+    # (просьба Максима 2026-08-05; в первой сборке было ужато до 200 ради
+    # запаса по лимиту Telegram). ⚠️ Запас теперь держит `_fit_panel_text`
+    # в конце сборки: шесть превью по 600 в сумме выбивают 4096, и без обрезки
+    # панель просто не открылась бы.
     media_prompt = get_proactive_media_prompt()
-    media_preview = media_prompt[:200] + ("…" if len(media_prompt) > 200 else "")
     media_section = (
         "\n───────────────────────────\n"
         f"🖼<b>PROMPT РАЗБОРА МЕДИА:</b> {_num(len(media_prompt))} <i>символов</i>\n"
-        f"{_expandable_preview(media_preview)}\n"
+        f"{_expandable_preview(media_prompt)}\n"
         "🤖 <i>Уходит gemini-3.1-flash-lite вместе с фото, голосовым или видео "
         "из группы; его разбор попадает в стенограмму вместо вложения.</i>\n"
         "⚠️ <i>Не задан — модель получает голый файл и отвечает как хочет.</i>\n"
@@ -670,7 +721,9 @@ def _build_prompt_panel_text_and_keyboard(user_id, bot_username=None):
         _adm_back_row(),
     ]
 
-    return full_text, InlineKeyboardMarkup(keyboard)
+    # Последним делом — страховка от лимита Telegram: на обычных промптах
+    # ничего не меняет, на длинных ужимает превью (см. _fit_panel_text).
+    return _fit_panel_text(full_text), InlineKeyboardMarkup(keyboard)
 
 
 # ─────────────────────────────────────────────
