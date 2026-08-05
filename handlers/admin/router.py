@@ -330,7 +330,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await query.answer(
             "⬇️ Самообновление выключено — правки с GitHub бот сам забирать не будет."
             if now_on else
-            "⬇️ Самообновление включено — раз в 10 минут бот проверяет GitHub.",
+            "⬇️ Самообновление включено — раз в 5 минут бот проверяет GitHub.",
             show_alert=True
         )
         try:

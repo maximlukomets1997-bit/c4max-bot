@@ -44,7 +44,7 @@ PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _LOG_LIMIT = 200
 
 # Журнал git меняется только при обновлении бота, то есть в лучшем случае раз
-# в 10 минут (jobs/update.py). Держим разобранный ответ в памяти, чтобы
+# в 5 минут (jobs/update.py). Держим разобранный ответ в памяти, чтобы
 # листание страниц панели не дёргало git на каждое нажатие.
 _CACHE_TTL = 60
 _cache: dict = {"ts": 0.0, "items": []}

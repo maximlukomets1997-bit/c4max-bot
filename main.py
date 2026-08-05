@@ -326,7 +326,7 @@ async def post_init(application):
         # владелец узнаёт о выключенном компьютере, пропавшем интернете или
         # умершем боте. WATCHDOG_URL не задан в .env — задача завершается сразу.
         asyncio.create_task(watchdog_loop(application)),
-        # Самообновление: раз в 10 минут смотрит, нет ли на GitHub новой
+        # Самообновление: раз в 5 минут смотрит, нет ли на GitHub новой
         # версии, и забирает её в тишине (см. jobs.auto_update_loop).
         # Дома завершается сразу — там код с GitHub не забирается.
         asyncio.create_task(auto_update_loop(application)),
