@@ -187,6 +187,15 @@ def _supports_video(model_name: str) -> bool:
 
 
 # ── Лёгкие хелперы для проактивного режима (без истории, без RAG) ──
+#
+#  ⚠️ ЕДИНСТВЕННЫЙ ИСТОЧНИК СЛОВ, которые уходят модели вместе с медиа, —
+#  настраиваемый промпт `hist.get_proactive_media_prompt()` (2026-08-05).
+#  Он ОДИН на фото, голосовое и видео и правится ТОЛЬКО из Телеграма (панель
+#  промптов, /media_prompt_set). Пустой промпт = модели уходит голый файл,
+#  ровно как с 2026-07-24. Зашитых фраз здесь быть не должно ни одной:
+#  сочинять формулировки от имени бота запрещено решением Максима — теперь
+#  у него есть панель, чтобы задать их самому.
+
 
 def _proactive_describe_image(image_base64: str) -> str:
     """
@@ -194,22 +203,24 @@ def _proactive_describe_image(image_base64: str) -> str:
     к Gemini (gemini-3.1-flash-lite — самая быстрая и дешёвая vision-модель).
     Без истории, системного промпта и RAG — только описание картинки.
 
-    Возвращает описание (1–2 предложения) или пустую строку при любой ошибке.
-    Ошибка описания НЕ должна ломать проактивную проверку — тогда триггером
-    останется оригинальная подпись (возможно, пустая).
+    Что просят у модели — задаёт промпт разбора медиа из настроек; не задан —
+    уходит только файл, и модель отвечает как сочтёт нужным.
+
+    Возвращает описание или пустую строку при любой ошибке. Ошибка описания
+    НЕ должна ломать проактивную проверку — тогда триггером останется
+    оригинальная подпись (возможно, пустая).
     """
     try:
+        # Промпт впереди картинки: инструкция должна быть прочитана до файла.
+        content = []
+        media_prompt = hist.get_proactive_media_prompt()
+        if media_prompt:
+            content.append({"type": "text", "text": media_prompt})
+        content.append({"type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}})
         payload = {
             "model": "gemini-3.1-flash-lite",
-            "messages": [
-                # 2026-07-24 (решение Максима): зашитая фраза-инструкция УДАЛЕНА —
-                # модели уходит только сам файл. Он не хочет, чтобы бот подсказывал
-                # моделям формулировки от себя. Не возвращать без его просьбы.
-                {"role": "user", "content": [
-                    {"type": "image_url",
-                     "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}},
-                ]}
-            ],
+            "messages": [{"role": "user", "content": content}],
             "stream": False,
         }
         start = time.perf_counter()
@@ -234,22 +245,20 @@ def _proactive_transcribe_audio(audio_base64: str) -> str:
     """
     Расшифровывает голосовое для проактивного триггера: лёгкий запрос к native
     Gemini generateContent (gemini-3.1-flash-lite). Без истории и системного
-    промпта — только расшифровка аудиодорожки.
+    промпта — только сам файл и, если задан, промпт разбора медиа из настроек.
 
     Возвращает текст расшифровки или пустую строку при любой ошибке.
     Ошибка расшифровки НЕ ломает проактивную проверку — тогда бот просто
     не отреагирует на голосовое (как и раньше).
     """
     try:
-        payload = {
-            "contents": [
-                # 2026-07-24 (решение Максима): зашитая фраза-инструкция УДАЛЕНА,
-                # уходит только аудиофайл. Не возвращать без его просьбы.
-                {"role": "user", "parts": [
-                    {"inlineData": {"mimeType": "audio/ogg", "data": audio_base64}},
-                ]}
-            ],
-        }
+        # Промпт впереди файла — как у фото и видео (тот же ключ настроек).
+        parts = []
+        media_prompt = hist.get_proactive_media_prompt()
+        if media_prompt:
+            parts.append({"text": media_prompt})
+        parts.append({"inlineData": {"mimeType": "audio/ogg", "data": audio_base64}})
+        payload = {"contents": [{"role": "user", "parts": parts}]}
         url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent"
         start = time.perf_counter()
         response = _http().post(
@@ -271,27 +280,26 @@ def _proactive_transcribe_audio(audio_base64: str) -> str:
 
 def _proactive_describe_video(video_base64: str, mime_type: str = "video/mp4") -> str:
     """
-    Коротко описывает ВИДЕО для проактивного триггера (2026-07-24) — устроено
-    как _proactive_describe_image/_proactive_transcribe_audio: лёгкий запрос
+    Описывает ВИДЕО для проактивного триггера (2026-07-24) — устроено как
+    _proactive_describe_image/_proactive_transcribe_audio: лёгкий запрос
     к gemini-3.1-flash-lite без истории и системного промпта.
 
-    Просим КРАТКО: описание идёт в стенограмму беседы, а не пользователю, —
-    развёрнутый пересказ ролика только зашумил бы контекст.
-    Таймаут больше, чем у фото и аудио: разбор видео дольше.
+    Насколько кратко описывать — дело промпта разбора медиа из настроек:
+    описание идёт в стенограмму беседы, а не пользователю, и развёрнутый
+    пересказ ролика только зашумит контекст. Не задан промпт — уходит голый
+    файл. Таймаут больше, чем у фото и аудио: разбор видео дольше.
 
     Возвращает описание или пустую строку при любой ошибке — сбой разбора
     НЕ ломает проактивную проверку, бот просто не отреагирует на видео.
     """
     try:
-        payload = {
-            "contents": [
-                # 2026-07-24 (решение Максима): зашитая фраза-инструкция УДАЛЕНА,
-                # уходит только видеофайл. Не возвращать без его просьбы.
-                {"role": "user", "parts": [
-                    {"inlineData": {"mimeType": mime_type, "data": video_base64}},
-                ]}
-            ],
-        }
+        # Промпт впереди файла — как у фото и голосового (тот же ключ настроек).
+        parts = []
+        media_prompt = hist.get_proactive_media_prompt()
+        if media_prompt:
+            parts.append({"text": media_prompt})
+        parts.append({"inlineData": {"mimeType": mime_type, "data": video_base64}})
+        payload = {"contents": [{"role": "user", "parts": parts}]}
         url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent"
         start = time.perf_counter()
         response = _http().post(
