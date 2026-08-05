@@ -23,6 +23,7 @@ from telegram.ext import ContextTypes
 
 from database.history import (
     clear_quiz_failures,
+    get_all_quiz_stats,
     delete_all_quiz_questions,
     delete_quiz_drafts,
     delete_quiz_question,
@@ -30,6 +31,7 @@ from database.history import (
     get_quiz_question,
     list_quiz_failures,
     list_quiz_questions,
+    reset_all_quiz_stats,
     set_quiz_question_approved,
 )
 from utils import delete_user_message_safe, schedule_delete
@@ -131,6 +133,7 @@ def _build_panel(context):
 
     counts = get_quiz_bank_counts()
     kb = quiz_bank.stats()
+    players = len(get_all_quiz_stats())
 
     if _gen_running(context):
         status = "⏳ Идёт сборка вопросов — итог придёт сообщением."
@@ -156,6 +159,7 @@ def _build_panel(context):
         f"✅ В игре: <code>{counts['approved']}</code>\n"
         f"📝 Черновиков: <code>{counts['drafts']}</code>\n"
         f"📚 Статей в базе знаний: <code>{kb['articles_total']}</code>\n"
+        f"🎖 Игроков со статистикой: <code>{players}</code>\n"
         f"{failed_line}"
         f"{_LINE}\n"
         f"{status}"
@@ -185,6 +189,12 @@ def _build_panel(context):
                                           callback_data="quiz:seed")])
     if counts["approved"] or counts["drafts"]:
         rows.append([InlineKeyboardButton("🗑 Стереть ВСЕ вопросы", callback_data="quiz:nuke")])
+    # ⚠️ Обнуление статистики ИГРОКОВ стоит отдельным рядом и ниже всего
+    # остального: соседняя кнопка стирает ВОПРОСЫ, эта — заслуги людей, и
+    # перепутать их нажатием не должно быть возможно.
+    if players:
+        rows.append([InlineKeyboardButton(f"🧹 Обнулить статистику игроков ({players})",
+                                          callback_data="quiz:zero")])
     rows.append(_adm_back_row())
     return text, InlineKeyboardMarkup(rows)
 
@@ -290,6 +300,7 @@ async def _handle_quiz_callback(query, context, data: str, chat_id: int, user_id
       quiz:wipe / quiz:wipe_yes — очистить ВСЕ черновики (с подтверждением)
       quiz:seed               — загрузить вопросы из файла репозитория
       quiz:nuke / quiz:nuke_yes — стереть ВЕСЬ банк, включая игровые
+      quiz:zero / quiz:zero_yes — обнулить статистику викторины У ВСЕХ ИГРОКОВ
       quiz:noop               — заглушка счётчика листания
     """
     parts = data.split(":")
@@ -408,6 +419,28 @@ async def _handle_quiz_callback(query, context, data: str, chat_id: int, user_id
         _audit(user_id, "quiz_nuke", 0, f"стёрто вопросов: {removed}")
         logger.info("🎮 Админ %s стёр ВЕСЬ банк вопросов (%d шт.)", user_id, removed)
         await query.answer(f"🗑 Стёрто вопросов: {removed}")
+        await send_quiz_panel(context.bot, chat_id, context)
+        return
+
+    if action == "zero":
+        # Подтверждение обязательно: заслуги людей восстановить нечем.
+        await query.answer()
+        try:
+            await query.edit_message_reply_markup(InlineKeyboardMarkup([[
+                InlineKeyboardButton("❗️ Да, обнулить всем", callback_data="quiz:zero_yes"),
+                InlineKeyboardButton("Отмена", callback_data="quiz:panel"),
+            ]]))
+        except Exception as e:
+            logger.warning("⚠️ Не удалось показать подтверждение обнуления статистики: %s", e)
+        return
+
+    if action == "zero_yes":
+        removed = reset_all_quiz_stats()
+        _audit(user_id, "quiz_zero", 0, f"обнулено игроков: {removed}")
+        logger.info("🎮 Админ %s обнулил статистику викторины у всех (%d чел.)", user_id, removed)
+        await _popup(query, context, chat_id,
+                     f"🧹 Статистика обнулена: {removed} чел.\n"
+                     f"Все начинают путь заново — с Рядового.")
         await send_quiz_panel(context.bot, chat_id, context)
         return
 
