@@ -274,6 +274,24 @@ def _create_schema(conn):
         -- options — JSON-список вариантов ответа, correct_idx — номер верного.
         -- asked_count — сколько раз вопрос уже задавали (выбор идёт среди
         -- наименее заданных, поэтому база не крутит одно и то же).
+        -- Статьи, по которым сборка вопросов НЕ ДАЛАСЬ (2026-08-05, просьба
+        -- Максима после первой сборки: 11 статей из 40 остались без
+        -- результата, и повторить именно их было нечем). Строка живёт ровно
+        -- до первого удачного захода: `clear_quiz_failure` снимает её, как
+        -- только по статье собрался хоть один вопрос.
+        --   reason   — человеческая причина («модель не ответила», «не
+        --              разобрать ответ», «все вопросы отбракованы»): по ней
+        --              видно, ждать ли толку от повтора вообще;
+        --   attempts — сколько раз уже пробовали: статья, не дающаяся третий
+        --              раз, почти наверняка не даётся из-за себя самой, а не
+        --              из-за молчащей модели.
+        CREATE TABLE IF NOT EXISTS quiz_failed (
+            article  TEXT PRIMARY KEY,
+            ts       REAL    NOT NULL,
+            reason   TEXT,
+            attempts INTEGER DEFAULT 1
+        );
+
         CREATE TABLE IF NOT EXISTS quiz_bank (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             article     TEXT    NOT NULL,
@@ -1061,6 +1079,62 @@ def delete_quiz_question(qid: int) -> None:
         conn = _get_connection()
         conn.execute("DELETE FROM quiz_bank WHERE id=?", (qid,))
         conn.commit()
+
+
+def note_quiz_failure(article: str, reason: str) -> None:
+    """
+    Отмечает, что по статье собрать вопросы не вышло. Повторная неудача не
+    заводит вторую строку, а растит счётчик попыток и обновляет причину:
+    список неудач — это очередь на повтор, а не журнал (для журнала есть лог).
+    """
+    with _lock:
+        conn = _get_connection()
+        conn.execute(
+            """INSERT INTO quiz_failed (article, ts, reason, attempts)
+               VALUES (?, ?, ?, 1)
+               ON CONFLICT(article)
+               DO UPDATE SET ts = excluded.ts,
+                             reason = excluded.reason,
+                             attempts = attempts + 1""",
+            (article, time.time(), reason),
+        )
+        conn.commit()
+
+
+def clear_quiz_failure(article: str) -> None:
+    """Снимает статью с учёта неудач (по ней наконец собрались вопросы)."""
+    with _lock:
+        conn = _get_connection()
+        conn.execute("DELETE FROM quiz_failed WHERE article=?", (article,))
+        conn.commit()
+
+
+def list_quiz_failures(limit: int = 50) -> list[dict]:
+    """Статьи, по которым сборка не далась: свежие сверху (для экрана панели)."""
+    with _lock:
+        conn = _get_connection()
+        rows = conn.execute(
+            "SELECT * FROM quiz_failed ORDER BY ts DESC LIMIT ?", (limit,)
+        ).fetchall()
+    return [{"article": r["article"], "ts": r["ts"], "reason": r["reason"] or "",
+             "attempts": r["attempts"]} for r in rows]
+
+
+def count_quiz_failures() -> int:
+    """Сколько статей ждёт повторной попытки (число на кнопке панели)."""
+    with _lock:
+        conn = _get_connection()
+        row = conn.execute("SELECT COUNT(*) AS n FROM quiz_failed").fetchone()
+    return row["n"] or 0
+
+
+def clear_quiz_failures() -> int:
+    """Забыть весь список неудач разом (кнопка «🗑 Забыть список»)."""
+    with _lock:
+        conn = _get_connection()
+        cur = conn.execute("DELETE FROM quiz_failed")
+        conn.commit()
+        return cur.rowcount or 0
 
 
 def delete_quiz_drafts() -> int:

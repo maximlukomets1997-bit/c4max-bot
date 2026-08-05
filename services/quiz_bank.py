@@ -23,7 +23,8 @@ import re
 
 from config import (QUIZ_EXPLANATION_MAX, QUIZ_GEN_MAX_ARTICLES, QUIZ_GEN_PER_ARTICLE,
                     QUIZ_OPTION_MAX, QUIZ_OPTIONS_COUNT, QUIZ_QUESTION_MAX)
-from database.history import add_quiz_question, get_quiz_articles_covered
+from database.history import (add_quiz_question, clear_quiz_failure, count_quiz_failures,
+                              get_quiz_articles_covered, list_quiz_failures, note_quiz_failure)
 from services import knowledge_store
 
 logger = logging.getLogger(__name__)
@@ -106,21 +107,44 @@ def _extract_json(body: str) -> list | None:
         return None
 
     decoder = json.JSONDecoder()
-    fallback = None
     for idx, char in enumerate(body):
-        if char not in "[{":
+        if char != "[":
             continue
         try:
             data, _end = decoder.raw_decode(body[idx:])
         except ValueError:
             continue
-        if _looks_like_questions(data):
-            return [data] if isinstance(data, dict) else data
-        # Разобралось, но на вопросы не похоже (например, массив из
-        # рассуждений) — запоминаем как крайний вариант и ищем дальше.
-        if fallback is None and isinstance(data, list) and data:
-            fallback = data
-    return fallback
+        if isinstance(data, list) and _looks_like_questions(data):
+            return data
+        # ⚠️ Разобравшийся, но НЕ похожий на вопросы массив пропускаем молча и
+        # ищем дальше. Первым таким почти всегда оказывается список вариантов
+        # ответа («options») внутри вопроса или перечисление из рассуждений —
+        # вернуть его значило бы отдать мусор вместо вопросов и получить в
+        # причине неудачи «все вопросы отбракованы» вместо честного «не
+        # разобрать ответ».
+
+    # ⚠️ ПОСЛЕДНИЙ ЗАХОД — ПО ОТДЕЛЬНЫМ ОБЪЕКТАМ (2026-08-05, по итогам сборки,
+    # где 11 статей из 40 остались без результата). Массив целиком мог не
+    # разобраться по двум причинам: ответ ОБОРВАЛСЯ на середине (ни `max_tokens`,
+    # ни `finish_reason` мы не задаём и не проверяем, а думающая модель пишет
+    # длинно) или модель насыпала объекты без обрамляющих скобок. Спасать тут
+    # есть что: первые вопросы в таком ответе целые и годные, а мы выбрасывали
+    # весь оплаченный запрос целиком.
+    salvaged = []
+    pos = 0
+    while True:
+        start = body.find("{", pos)
+        if start == -1:
+            break
+        try:
+            item, end = decoder.raw_decode(body[start:])
+        except ValueError:
+            pos = start + 1
+            continue
+        pos = start + end
+        if isinstance(item, dict) and item.get("question"):
+            salvaged.append(item)
+    return salvaged or None
 
 
 def _clean_question(item: dict) -> dict | None:
@@ -190,22 +214,29 @@ def articles_without_questions() -> list[dict]:
             if a["folder"] == "approved" and a["fname"] not in covered]
 
 
-def generate_for_article(article: dict, per_article: int = None) -> list[dict]:
+def generate_for_article(article: dict, per_article: int = None) -> tuple[list, str]:
     """
     Собирает вопросы по ОДНОЙ статье и кладёт их в банк черновиками.
-    Возвращает список записанных вопросов (пустой — модель не справилась).
+
+    Возвращает пару (записанные вопросы, причина неудачи). Причина — короткая
+    человеческая строка («модель не ответила», «не разобрать ответ», …) или
+    пустая, если всё вышло. ⚠️ Возвращать просто пустой список, как было до
+    2026-08-05, оказалось мало: 11 статей из 40 остались без вопросов, и по
+    итогу нельзя было понять НИ какие именно, НИ почему — а значит, и повторить
+    было нечем. Причину пишет вызывающий (`generate_batch`) в таблицу
+    `quiz_failed`, откуда её берёт кнопка «🔁 Повторить неудачные».
     """
     per_article = per_article or QUIZ_GEN_PER_ARTICLE
     try:
         _, text = knowledge_store.read_article(article["folder"], article["fname"])
     except OSError as e:
         logger.warning("⚠️ Викторина: не прочитать статью %s: %s", article["fname"], e)
-        return []
+        return [], "не прочитать файл статьи"
 
     text = text.strip()
     if len(text) < 200:
         logger.info("🎮 Викторина: статья %s слишком короткая для вопросов", article["fname"])
-        return []
+        return [], "статья слишком короткая"
 
     prompt = _SYSTEM_PROMPT.format(
         count=per_article, options=QUIZ_OPTIONS_COUNT,
@@ -234,21 +265,21 @@ def generate_for_article(article: dict, per_article: int = None) -> list[dict]:
     data, used_model = _gemini_chat_request(messages, kind="викторина")
     if data is None:
         logger.warning("⚠️ Викторина: модель не ответила по статье %s", article["fname"])
-        return []
+        return [], "модель не ответила"
 
     try:
         body = data["choices"][0]["message"]["content"]
     except (KeyError, IndexError):
         logger.warning("⚠️ Викторина: неожиданный формат ответа по статье %s", article["fname"])
-        return []
+        return [], "неожиданный формат ответа"
 
     items = _extract_json(body)
     if not items:
         # Кусок ответа в логе — иначе такую неудачу нечем разбирать: запрос
         # уже оплачен, а что именно прислала модель, никто не увидит.
-        logger.warning("⚠️ Викторина: не разобрать JSON по статье %s (модель %s). Ответ: %s",
+        logger.warning("⚠️ Викторина: не разобрать ответ по статье %s (модель %s). Ответ: %s",
                        article["fname"], used_model, (body or "")[:300].replace("\n", " "))
-        return []
+        return [], "не разобрать ответ модели"
 
     saved = []
     for item in items[:per_article]:
@@ -263,7 +294,37 @@ def generate_for_article(article: dict, per_article: int = None) -> list[dict]:
 
     logger.info("🎮 Викторина: по статье %s собрано вопросов %d из %d",
                 article["fname"], len(saved), len(items))
-    return saved
+    if not saved:
+        # Модель ответила, разбор прошёл, а годного не осталось: варианты
+        # повторялись, не влезли в лимиты Telegram или всё это уже есть в
+        # банке. Причина отдельная от «не разобрать» — повтор тут помогает
+        # реже, и по списку неудач это должно быть видно.
+        return [], "все вопросы отбракованы"
+    return saved, ""
+
+
+def _run_over(batch: list, left: int) -> dict:
+    """
+    Общий проход по списку статей — им пользуются ОБЕ кнопки: и «🧠 Собрать
+    вопросы», и «🔁 Повторить неудачные». Второй сборки этого цикла заводить
+    нельзя: учёт неудач разъедется с учётом успехов при первой же правке.
+
+    Здесь же ведётся таблица `quiz_failed`: удача снимает статью с учёта,
+    неудача заводит её туда (или растит счётчик попыток) вместе с причиной.
+    """
+    saved = failed = 0
+    for article in batch:
+        got, reason = generate_for_article(article)
+        if got:
+            saved += len(got)
+            clear_quiz_failure(article["fname"])
+        else:
+            failed += 1
+            note_quiz_failure(article["fname"], reason or "не вышло")
+
+    logger.info("🎮 Викторина: заход окончен — статей %d, вопросов %d, "
+                "неудач %d, осталось статей %d", len(batch), saved, failed, left)
+    return {"articles": len(batch), "saved": saved, "failed": failed, "left": left}
 
 
 def generate_batch(limit_articles: int = None) -> dict:
@@ -281,22 +342,47 @@ def generate_batch(limit_articles: int = None) -> dict:
     limit_articles = limit_articles or QUIZ_GEN_MAX_ARTICLES
     pending = articles_without_questions()
     batch = pending[:limit_articles]
+    return _run_over(batch, max(len(pending) - len(batch), 0))
 
-    saved = failed = 0
-    for article in batch:
-        got = generate_for_article(article)
-        if got:
-            saved += len(got)
+
+def retry_failed(limit_articles: int = None) -> dict:
+    """
+    Заход кнопки «🔁 Повторить неудачные»: идёт РОВНО по тем статьям, что
+    записаны в `quiz_failed`, и ни по каким другим.
+
+    Зачем отдельная кнопка, если обычная сборка их и так подхватит: подхватит,
+    но вперемешку с новыми и в порядке общего списка — то есть при 41 статье
+    в очереди до неудачных руки дойдут не в этот заход, а человек ждёт именно
+    их. Здесь же видно и результат: сколько из проблемных наконец далось.
+
+    ⚠️ Статья, которой уже нет в базе знаний (удалили или переименовали),
+    молча снимается с учёта: держать в очереди на повтор то, чего не
+    существует, — это вечная строка «⚠️ Не разобрались: 1» без способа её убрать.
+
+    ⚠️ СИНХРОННАЯ И ДОЛГАЯ — звать через run_in_executor.
+    """
+    limit_articles = limit_articles or QUIZ_GEN_MAX_ARTICLES
+    known = {a["fname"]: a for a in knowledge_store.list_articles() if a["folder"] == "approved"}
+
+    batch, gone = [], 0
+    for row in list_quiz_failures(limit=limit_articles):
+        article = known.get(row["article"])
+        if article:
+            batch.append(article)
         else:
-            failed += 1
+            clear_quiz_failure(row["article"])
+            gone += 1
+    if gone:
+        logger.info("🎮 Викторина: снято с учёта неудач статей, которых больше нет: %d", gone)
 
-    left = max(len(pending) - len(batch), 0)
-    logger.info("🎮 Викторина: сборка окончена — статей %d, вопросов %d, "
-                "неудач %d, осталось статей %d", len(batch), saved, failed, left)
-    return {"articles": len(batch), "saved": saved, "failed": failed, "left": left}
+    result = _run_over(batch, max(count_quiz_failures() - len(batch), 0))
+    result["gone"] = gone
+    return result
 
 
 def stats() -> dict:
-    """Цифры для шапки панели: сколько статей всего и сколько ещё без вопросов."""
+    """Цифры для шапки панели: статьи всего, без вопросов и в очереди на повтор."""
     approved = [a for a in knowledge_store.list_articles() if a["folder"] == "approved"]
-    return {"articles_total": len(approved), "articles_left": len(articles_without_questions())}
+    return {"articles_total": len(approved),
+            "articles_left": len(articles_without_questions()),
+            "failed": count_quiz_failures()}
