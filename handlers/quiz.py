@@ -3,8 +3,8 @@ import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from config import IMAGE_DAILY_LIMIT, ADMIN_IDS
-from database.history import get_user_stats, add_quiz_attempt, get_remaining_image_calls
-from data.quiz_questions import get_random_question
+from database.history import (get_user_stats, add_quiz_attempt, get_remaining_image_calls,
+                              get_random_quiz_question, note_quiz_question_asked)
 import asyncio
 from telegram.constants import ParseMode
 from utils import register_and_clean_bot_message, delete_user_message_safe
@@ -31,15 +31,35 @@ async def send_quiz_question(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     """
     Отправляет случайный тактический опрос в режиме викторины (Quiz Poll)
     и регистрирует его в ACTIVE_QUIZZES.
+
+    ⚠️ ВОПРОСЫ БЕРУТСЯ ИЗ БАНКА В БАЗЕ (2026-08-05, решение Максима), а не из
+    списка в коде: их собирает по статьям базы знаний панель /quizadm, и в игру
+    идут только ОДОБРЕННЫЕ там. Пустой банк — штатный случай (сразу после
+    выкатки он именно такой), поэтому здесь не ошибка, а понятная людям
+    строчка: играть пока нечем.
     """
     # Защитная очистка памяти: если отслеживаемых опросов слишком много, убираем старые
     if len(ACTIVE_QUIZZES) > 500:
         oldest_keys = list(ACTIVE_QUIZZES.keys())[:100]
         for k in oldest_keys:
             ACTIVE_QUIZZES.pop(k, None)
-            
-    q = get_random_question()
-    
+
+    q = get_random_quiz_question()
+    if not q:
+        logger.info("🎮 Викторина: банк вопросов пуст (чат %s)", chat_id)
+        try:
+            sent_msg = await context.bot.send_message(
+                chat_id=chat_id,
+                text=("🎮 <b>Вопросов пока нет.</b>\n"
+                      "Штаб готовит новые задания по базе знаний — загляни чуть позже."),
+                parse_mode=ParseMode.HTML,
+            )
+            if sent_msg:
+                await register_and_clean_bot_message(context.bot, chat_id, sent_msg.message_id)
+        except Exception as e:
+            logger.warning("⚠️ Не удалось сообщить о пустом банке вопросов: %s", e)
+        return
+
     try:
         # Отправляем родной опрос Telegram в режиме Quiz
         poll_msg = await context.bot.send_poll(
@@ -48,7 +68,10 @@ async def send_quiz_question(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
             options=q["options"],
             type="quiz",
             correct_option_id=q["correct_idx"],
-            explanation=q["explanation"],
+            # Пустая строка разбора — не то же самое, что «разбора нет»:
+            # Telegram на пустой explanation отвечает ошибкой, и вопрос не
+            # уходит вовсе. Модель разбор даёт почти всегда, но «почти».
+            explanation=q["explanation"] or None,
             explanation_parse_mode=ParseMode.HTML,
             is_anonymous=False
         )
@@ -61,6 +84,10 @@ async def send_quiz_question(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
             "options": q["options"],
             "explanation": q["explanation"]
         }
+        # Отметку «вопрос задан» ставим ТОЛЬКО после удачной отправки: она
+        # опускает вопрос в конец очереди выбора, и считать заданным то, что
+        # в чат не ушло, значит незаметно выдавливать вопросы из игры.
+        note_quiz_question_asked(q["id"])
         logger.info("🎮 Новая викторина отправлена (чат %s)", chat_id)
 
         # Авто-удаление этой викторины через 60 сек — и отвеченной, и неотвеченной.

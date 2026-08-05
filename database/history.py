@@ -259,6 +259,33 @@ def _create_schema(conn):
             total_attempts    INTEGER DEFAULT 0
         );
 
+        -- Банк вопросов викторины (2026-08-05, решение Максима). Раньше
+        -- вопросы лежали СПИСКОМ В КОДЕ (data/quiz_questions.py, 12 штук на
+        -- весь бот) — их выучивали за пару вечеров. Теперь их собирает по
+        -- статьям базы знаний кнопка «🧠 Собрать вопросы» панели /quizadm
+        -- (services/quiz_bank.py), а хранятся они здесь.
+        --   approved = 0  черновик: собран, но в игру НЕ идёт;
+        --   approved = 1  одобрен владельцем, викторина берёт только такие.
+        -- ⚠️ В БАЗЕ, А НЕ В ФАЙЛЕ: файл, который бот переписывает сам, ломает
+        -- обновление кода с GitHub (на этом уже наступили с
+        -- knowledge_base_vectors.json — см. карту проекта).
+        -- article — имя файла статьи-источника: по нему видно, какие статьи
+        -- вопросами уже покрыты, и по нему же кнопка догоняет только новые.
+        -- options — JSON-список вариантов ответа, correct_idx — номер верного.
+        -- asked_count — сколько раз вопрос уже задавали (выбор идёт среди
+        -- наименее заданных, поэтому база не крутит одно и то же).
+        CREATE TABLE IF NOT EXISTS quiz_bank (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            article     TEXT    NOT NULL,
+            question    TEXT    NOT NULL,
+            options     TEXT    NOT NULL,
+            correct_idx INTEGER NOT NULL,
+            explanation TEXT,
+            approved    INTEGER DEFAULT 0,
+            created_at  REAL    NOT NULL,
+            asked_count INTEGER DEFAULT 0
+        );
+
         CREATE TABLE IF NOT EXISTS bot_sent_messages (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
             chat_id    INTEGER NOT NULL,
@@ -484,6 +511,8 @@ def _create_schema(conn):
         CREATE INDEX IF NOT EXISTS idx_modlog_ts ON moderation_log(ts);
         CREATE INDEX IF NOT EXISTS idx_evidence_log ON mute_evidence(log_id);
         CREATE INDEX IF NOT EXISTS idx_kblog_ts ON knowledge_log(ts);
+        -- Выбор вопроса викторины: только одобренные, реже всего заданные
+        CREATE INDEX IF NOT EXISTS idx_quiz_bank_pick ON quiz_bank(approved, asked_count);
         CREATE INDEX IF NOT EXISTS idx_stafflog_ts ON staff_log(ts);
         CREATE INDEX IF NOT EXISTS idx_proactive_log_ts ON proactive_log(ts);
         CREATE INDEX IF NOT EXISTS idx_join_log_ts ON join_log(ts);
@@ -879,6 +908,168 @@ def get_user_stats(user_id: int) -> dict:
         "next_rank_needed": next_rank_needed,
         "rank_min": current_rank["min"]
     }
+
+
+# ───────────────────────────────────────────────
+#  Банк вопросов викторины (таблица quiz_bank)
+# ───────────────────────────────────────────────
+#
+# Вопросы собирает по статьям базы знаний services/quiz_bank.py, показывает и
+# одобряет панель /quizadm, а берёт в игру handlers/quiz.py. Сама эта половина
+# знает только про строки таблицы: ни про модель, ни про Telegram.
+#
+# ⚠️ options хранится СТРОКОЙ JSON — sqlite списков не умеет. Разбор и сборка
+# спрятаны здесь (_row_to_question / add_quiz_question), наружу всегда уходит
+# готовый список: разложить json.loads по вызывающим — верный способ однажды
+# забыть его в новом месте и получить строку вместо вариантов ответа.
+
+def _row_to_question(row) -> dict | None:
+    """Строка таблицы → словарь вопроса. Битый JSON вариантов = вопроса нет."""
+    if row is None:
+        return None
+    try:
+        options = json.loads(row["options"])
+    except (TypeError, ValueError):
+        logger.warning("⚠️ Вопрос %s: не разобрать варианты ответа", row["id"])
+        return None
+    if not isinstance(options, list) or len(options) < 2:
+        return None
+    return {
+        "id": row["id"],
+        "article": row["article"],
+        "question": row["question"],
+        "options": options,
+        "correct_idx": row["correct_idx"],
+        "explanation": row["explanation"] or "",
+        "approved": bool(row["approved"]),
+        "asked_count": row["asked_count"],
+    }
+
+
+def add_quiz_question(article: str, question: str, options: list,
+                      correct_idx: int, explanation: str) -> int | None:
+    """
+    Кладёт собранный вопрос в банк ЧЕРНОВИКОМ (approved=0).
+
+    Возвращает id новой записи или None, если такой вопрос уже есть: сборку
+    можно жать сколько угодно раз, повторы в базу не полезут (сверяем по паре
+    «статья + текст вопроса» — модель на одной статье часто повторяется).
+    """
+    with _lock:
+        conn = _get_connection()
+        exists = conn.execute(
+            "SELECT 1 FROM quiz_bank WHERE article=? AND question=?",
+            (article, question),
+        ).fetchone()
+        if exists:
+            return None
+        cur = conn.execute(
+            """INSERT INTO quiz_bank
+                   (article, question, options, correct_idx, explanation, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (article, question, json.dumps(options, ensure_ascii=False),
+             int(correct_idx), explanation, time.time()),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def get_random_quiz_question() -> dict | None:
+    """
+    Случайный ОДОБРЕННЫЙ вопрос для викторины — из тех, что задавали реже
+    всего. None означает «банк пуст»: вопросов нет вовсе или ни один ещё не
+    одобрен. Решение, что сказать людям, принимает вызывающий код.
+    """
+    with _lock:
+        conn = _get_connection()
+        row = conn.execute(
+            """SELECT * FROM quiz_bank WHERE approved=1
+               ORDER BY asked_count ASC, RANDOM() LIMIT 1"""
+        ).fetchone()
+    return _row_to_question(row)
+
+
+def note_quiz_question_asked(qid: int) -> None:
+    """Отмечает, что вопрос ушёл в чат: он опустится в конец очереди выбора."""
+    with _lock:
+        conn = _get_connection()
+        conn.execute("UPDATE quiz_bank SET asked_count = asked_count + 1 WHERE id=?", (qid,))
+        conn.commit()
+
+
+def get_quiz_bank_counts() -> dict:
+    """Сколько вопросов в игре, сколько черновиков и сколько статей покрыто."""
+    with _lock:
+        conn = _get_connection()
+        row = conn.execute(
+            """SELECT SUM(approved=1) AS approved,
+                      SUM(approved=0) AS drafts,
+                      COUNT(DISTINCT article) AS articles
+               FROM quiz_bank"""
+        ).fetchone()
+    return {
+        "approved": row["approved"] or 0,
+        "drafts": row["drafts"] or 0,
+        "articles": row["articles"] or 0,
+    }
+
+
+def get_quiz_articles_covered() -> set:
+    """
+    Имена файлов статей, по которым вопросы уже собирали (в любом виде —
+    и одобренные, и черновики, и отклонённые остатки). Нужно кнопке сборки,
+    чтобы догонять ТОЛЬКО новые статьи, а не платить за базу заново.
+    """
+    with _lock:
+        conn = _get_connection()
+        rows = conn.execute("SELECT DISTINCT article FROM quiz_bank").fetchall()
+    return {r["article"] for r in rows}
+
+
+def list_quiz_questions(approved: bool, limit: int = 50, offset: int = 0) -> list[dict]:
+    """Вопросы банка для листания в панели: черновики (0) или игровые (1)."""
+    with _lock:
+        conn = _get_connection()
+        rows = conn.execute(
+            """SELECT * FROM quiz_bank WHERE approved=?
+               ORDER BY id ASC LIMIT ? OFFSET ?""",
+            (1 if approved else 0, limit, offset),
+        ).fetchall()
+    return [q for q in (_row_to_question(r) for r in rows) if q]
+
+
+def get_quiz_question(qid: int) -> dict | None:
+    """Один вопрос по номеру (карточка в панели)."""
+    with _lock:
+        conn = _get_connection()
+        row = conn.execute("SELECT * FROM quiz_bank WHERE id=?", (qid,)).fetchone()
+    return _row_to_question(row)
+
+
+def set_quiz_question_approved(qid: int, approved: bool) -> None:
+    """Отправляет вопрос в игру (True) или возвращает в черновики (False)."""
+    with _lock:
+        conn = _get_connection()
+        conn.execute("UPDATE quiz_bank SET approved=? WHERE id=?",
+                     (1 if approved else 0, qid))
+        conn.commit()
+
+
+def delete_quiz_question(qid: int) -> None:
+    """Убирает вопрос из банка совсем."""
+    with _lock:
+        conn = _get_connection()
+        conn.execute("DELETE FROM quiz_bank WHERE id=?", (qid,))
+        conn.commit()
+
+
+def delete_quiz_drafts() -> int:
+    """Стирает ВСЕ черновики разом (кнопка «очистить черновики»). Игровые не трогает."""
+    with _lock:
+        conn = _get_connection()
+        cur = conn.execute("DELETE FROM quiz_bank WHERE approved=0")
+        conn.commit()
+        return cur.rowcount or 0
 
 
 def register_bot_message(chat_id: int, message_id: int):

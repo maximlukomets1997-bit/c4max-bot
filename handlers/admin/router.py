@@ -31,6 +31,7 @@ from .panel_mod import _handle_mod_callback, send_mod_panel
 from .panel_prompts import (_build_prompt_panel_text_and_keyboard, _handle_proactive_callback,
                             _handle_proactive_wipe, handle_prompt_reset,
                             send_prompts_panel, send_prompt_files)
+from .panel_quiz import _handle_quiz_callback, send_quiz_panel
 from .panel_rag import _end_kb_test, _handle_kb_callback, send_rag_panel
 from .panel_updates import _handle_updates_callback, send_updates_panel
 from .panel_users import _handle_users_callback, send_users_panel
@@ -524,6 +525,16 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     # Префикс dig:<действие> — обработчик в panel_digest.py.
     if data.startswith("dig:"):
         await _handle_digest_callback(query, context, data, chat_id, user_id)
+        return
+
+    # ── 🎮 Викторина (панель /quizadm) ──────────────────────────────────
+    # Префикс quiz:<действие> — обработчик в panel_quiz.py: сборка вопросов по
+    # статьям базы знаний, разбор черновиков, одобрение и удаление.
+    # ⚠️ НЕ путать с публичной кнопкой `quiz_start` (запуск игры), которая
+    # разбирается в самом верху роутера, ДО гейта прав: она для всех, а эти —
+    # владельческие (в _CALLBACK_RULES приставки нет = запрет по умолчанию).
+    if data.startswith("quiz:"):
+        await _handle_quiz_callback(query, context, data, chat_id, user_id)
         return
 
     # ── ⬇️ Обновления (экран в панели статистики) ────────────────────────
