@@ -1,6 +1,6 @@
 from telegram.ext import CommandHandler, MessageHandler, CallbackQueryHandler, ChatMemberHandler, InlineQueryHandler, PollAnswerHandler, filters
 from .commands import cmd_start, cmd_help, cmd_clear, cmd_subscribe, cmd_unsubscribe, handle_unknown_command, log_incoming_command
-from .admin import cmd_prompt_set, cmd_prompt_add, cmd_prompt_reset, cmd_stats, cmd_mod, cmd_adm, cmd_rag, cmd_unmute, cmd_users, handle_callback_query, cmd_news_prompt_set, cmd_news_prompt_reset, cmd_rag_prompt_set, cmd_rag_prompt_reset, cmd_proactive_prompt_set, cmd_proactive_prompt_reset, handle_kb_document
+from .admin import cmd_prompt_set, cmd_prompt_add, cmd_prompt_reset, cmd_stats, cmd_mod, cmd_adm, cmd_rag, cmd_unmute, cmd_users, handle_callback_query, cmd_news_prompt_set, cmd_news_prompt_reset, cmd_rag_prompt_set, cmd_rag_prompt_reset, cmd_proactive_prompt_set, cmd_proactive_prompt_reset, cmd_quiz_admin, handle_kb_document
 from .media import cmd_imagine
 from .messages import handle_message, handle_photo, handle_voice, handle_video, collect_group_message
 from .quiz import cmd_rank, handle_poll_answer
@@ -45,6 +45,10 @@ def setup_handlers(application):
     application.add_handler(CommandHandler('rag', cmd_rag))
     application.add_handler(CommandHandler('unmute', cmd_unmute))
     application.add_handler(CommandHandler('users', cmd_users))
+    # 🎮 Панель викторины (2026-08-05): сборка вопросов по статьям базы знаний
+    # и их одобрение. ⚠️ НЕ путать с публичной кнопкой запуска игры
+    # (callback quiz_start) — здесь только управление банком вопросов.
+    application.add_handler(CommandHandler('quizadm', cmd_quiz_admin))
     # block=False: генерация картинки — долгая операция (до ~90 сек), обработчик
     # не должен блокировать общую очередь апдейтов. Лимит картинок из-за этого
     # списывается ДО генерации (см. cmd_imagine) — иначе залп команд /imagine

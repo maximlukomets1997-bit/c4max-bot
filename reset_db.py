@@ -25,6 +25,7 @@ USER_TABLES = [
     "messages",
     "user_context",
     "quiz_stats",
+    "quiz_bank",
     "user_token_usage",
     "user_image_calls",
     "api_calls",

@@ -46,7 +46,10 @@ import tempfile
 _SKIP_MODULES = {"preflight", "main", "reset_db", "watchdog_local"}
 
 # Папки проекта, по которым ходим в поисках модулей.
-_PACKAGES = ("services", "handlers", "database", "data", "jobs")
+# ⚠️ Пакет `data` УДАЛЁН 2026-08-05 вместе с последним своим файлом
+# (data/quiz_questions.py — 12 вопросов викторины, зашитых в код). Вопросы
+# теперь живут в базе, собираются по статьям базы знаний панелью /quizadm.
+_PACKAGES = ("services", "handlers", "database", "jobs")
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
@@ -419,6 +422,7 @@ def check_panels():
     from handlers.admin.panel_mod import _build_mod_panel_text_and_keyboard
     from handlers.admin.panel_prompts import (_build_proactive_stats_panel,
                                               _build_prompt_panel_text_and_keyboard)
+    from handlers.admin.panel_quiz import _build_panel as _build_quiz_panel
     from handlers.admin.panel_rag import _build_rag_panel
     from handlers.admin.panel_updates import _build_updates_panel
     from handlers.admin.panel_users import _build_staff_log_panel, _build_users_panel
@@ -448,6 +452,7 @@ def check_panels():
         # обязана и на пустой истории.
         "обновления": lambda: _build_updates_panel(0),
         "база знаний": lambda: _build_rag_panel(ctx, owner),
+        "викторина": lambda: _build_quiz_panel(ctx),
     }
 
     problems = []
