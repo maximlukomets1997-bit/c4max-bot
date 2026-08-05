@@ -1146,6 +1146,24 @@ def delete_quiz_drafts() -> int:
         return cur.rowcount or 0
 
 
+def delete_all_quiz_questions() -> int:
+    """
+    Стирает ВЕСЬ банк вопросов — и черновики, и те, что уже в игре
+    (кнопка «🗑 Стереть ВСЕ вопросы», 2026-08-05, решение Максима).
+
+    ⚠️ Заодно чистится очередь неудачных статей: после полной очистки банка
+    пуст и он, и разговор о том, по каким статьям «не вышло», начинается
+    заново — иначе в панели висело бы «⚠️ Не разобрались: N» про вопросы,
+    которых больше нет.
+    """
+    with _lock:
+        conn = _get_connection()
+        cur = conn.execute("DELETE FROM quiz_bank")
+        conn.execute("DELETE FROM quiz_failed")
+        conn.commit()
+        return cur.rowcount or 0
+
+
 def register_bot_message(chat_id: int, message_id: int):
     """Регистрирует отправленное ботом сообщение в БД."""
     with _lock:

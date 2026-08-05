@@ -19,12 +19,14 @@ Mobile — это сотни честных вопросов, и каждая н
 
 import json
 import logging
+import os
 import re
 
 from config import (QUIZ_EXPLANATION_MAX, QUIZ_GEN_MAX_ARTICLES, QUIZ_GEN_PER_ARTICLE,
                     QUIZ_OPTION_MAX, QUIZ_OPTIONS_COUNT, QUIZ_QUESTION_MAX)
 from database.history import (add_quiz_question, clear_quiz_failure, count_quiz_failures,
-                              get_quiz_articles_covered, list_quiz_failures, note_quiz_failure)
+                              get_quiz_articles_covered, list_quiz_failures, note_quiz_failure,
+                              set_quiz_question_approved)
 from services import knowledge_store
 
 logger = logging.getLogger(__name__)
@@ -386,3 +388,90 @@ def stats() -> dict:
     return {"articles_total": len(approved),
             "articles_left": len(articles_without_questions()),
             "failed": count_quiz_failures()}
+
+
+# ───────────────────────────────────────────────
+#  Эталонный набор вопросов (файл в репозитории)
+# ───────────────────────────────────────────────
+#
+# ⚠️ ЗАЧЕМ ОН ЕСТЬ (2026-08-05, решение Максима). Первая машинная сборка дала
+# негодный результат: модель писала вопросы вида «максимальное пробитие» и
+# «максимальная скорость назад» ОДИНАКОВЫЕ для всех танков — формально
+# правильные, играть в такое невозможно. Максим забраковал набор целиком и
+# поручил составить вопросы вручную, по каждой статье.
+#
+# Написанные вручную вопросы лежат в репозитории (`quiz/questions.json`) и
+# приезжают на сервер обычным обновлением кода — писать в боевую базу с
+# машины разработки нельзя, её видит только сам бот. Кнопка «📥 Загрузить мои
+# вопросы» переносит их из файла в банк.
+#
+# ⚠️ ФАЙЛ ТОЛЬКО ЧИТАЕТСЯ, бот в него не пишет НИКОГДА. Файл, который бот
+# переписывает сам, ломает обновление кода с GitHub — на этом уже наступили с
+# knowledge_base_vectors.json.
+
+SEED_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                         "quiz", "questions.json")
+
+
+def seed_stats() -> dict:
+    """
+    Что лежит в эталонном файле: сколько вопросов и по скольким статьям.
+    Пустой словарь — файла нет или он битый (кнопка загрузки тогда не нужна).
+    """
+    try:
+        with open(SEED_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {"questions": 0, "articles": 0}
+    if not isinstance(data, list):
+        return {"questions": 0, "articles": 0}
+    return {"questions": len(data),
+            "articles": len({item.get("article") for item in data if isinstance(item, dict)})}
+
+
+def load_seed(approved: bool = True) -> dict:
+    """
+    Переносит вопросы из эталонного файла в банк.
+
+    approved=True — сразу В ИГРУ: это выверенные вручную вопросы, а не машинная
+    заготовка, и гонять их через одобрение по одному (а там третья сотня) —
+    работа ради работы. Кнопки удаления никуда не делись: плохой вопрос всегда
+    можно убрать из списка «✅ В игре».
+
+    Повторное нажатие безопасно: `add_quiz_question` не заводит дубль по паре
+    «статья + текст вопроса», такие вопросы просто пропускаются.
+
+    Возвращает {"added": сколько добавлено, "skipped": сколько уже было,
+    "bad": сколько не прошло проверку, "total": сколько всего в файле}.
+    """
+    try:
+        with open(SEED_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError) as e:
+        logger.error("⚠️ Викторина: не прочитать эталонный файл вопросов: %s", e)
+        return {"added": 0, "skipped": 0, "bad": 0, "total": 0}
+
+    if not isinstance(data, list):
+        logger.error("⚠️ Викторина: эталонный файл вопросов — не список")
+        return {"added": 0, "skipped": 0, "bad": 0, "total": 0}
+
+    added = skipped = bad = 0
+    for item in data:
+        clean = _clean_question(item) if isinstance(item, dict) else None
+        article = (item or {}).get("article") if isinstance(item, dict) else None
+        if not clean or not article:
+            bad += 1
+            continue
+        qid = add_quiz_question(article, clean["question"], clean["options"],
+                                clean["correct_idx"], clean["explanation"])
+        if qid is None:
+            skipped += 1
+            continue
+        added += 1
+        if approved:
+            set_quiz_question_approved(qid, True)
+
+    logger.info("🎮 Викторина: эталонные вопросы загружены — добавлено %d, "
+                "пропущено как дубли %d, негодных %d (всего в файле %d)",
+                added, skipped, bad, len(data))
+    return {"added": added, "skipped": skipped, "bad": bad, "total": len(data)}
