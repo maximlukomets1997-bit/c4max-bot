@@ -69,39 +69,58 @@ def _article_title(text: str) -> str:
     return ""
 
 
+def _looks_like_questions(data) -> bool:
+    """Похоже ли разобранное на список вопросов (а не на случайный массив)."""
+    if isinstance(data, dict):
+        data = [data]
+    if not isinstance(data, list) or not data:
+        return False
+    return any(isinstance(item, dict) and item.get("question") for item in data)
+
+
 def _extract_json(body: str) -> list | None:
     """
-    Достаёт массив JSON из ответа модели.
+    Достаёт массив вопросов из ответа модели.
 
-    ⚠️ Модели регулярно оборачивают ответ в ```json … ``` или добавляют
-    «Вот вопросы:» перед ним, даже когда просишь этого не делать. Поэтому
-    сначала пробуем разобрать как есть, потом снимаем обёртку кода, и только
-    затем — вырезаем от первой «[» до последней «]». Отказ на первом же
-    неудачном json.loads стоил бы половины собранных вопросов.
+    ⚠️ ГЛАВНОЕ, НА ЧЁМ ЗДЕСЬ УЖЕ НАСТУПИЛИ (2026-08-05, боевая сборка на
+    qwen3.7-max): у ДУМАЮЩИХ моделей ответ приходит как
+    «<thought>рассуждения</thought>\\nответ» (см. gemini._openai_stream_request),
+    и в рассуждениях почти всегда есть свои скобки — модель вслух прикидывает
+    варианты. Прежний разбор «от первой [ до последней ]» захватывал кусок
+    размышлений и падал на трети статей, причём деньги за запрос уже были
+    потрачены. Поэтому: сначала СРЕЗАЕМ блок размышлений, а потом ищем JSON
+    не одним срезом, а перебором — json.JSONDecoder().raw_decode пробуется в
+    КАЖДОЙ позиции, где начинается «[» или «{», и берётся первый разобранный
+    кусок, который похож на список вопросов. Обёртка ```json при таком разборе
+    перестаёт что-либо значить сама собой.
     """
     body = (body or "").strip()
     if not body:
         return None
-    candidates = [body]
 
-    fence = re.search(r"```(?:json)?\s*(.+?)```", body, re.DOTALL)
-    if fence:
-        candidates.append(fence.group(1).strip())
+    # Блок размышлений вырезаем целиком; незакрытый <thought> (ответ обрезан
+    # на середине) — вместе со всем хвостом, годного JSON там всё равно нет.
+    body = re.sub(r"<thought>.*?</thought>", " ", body, flags=re.DOTALL)
+    body = re.sub(r"<thought>.*$", " ", body, flags=re.DOTALL).strip()
+    if not body:
+        return None
 
-    start, end = body.find("["), body.rfind("]")
-    if start != -1 and end > start:
-        candidates.append(body[start:end + 1])
-
-    for candidate in candidates:
+    decoder = json.JSONDecoder()
+    fallback = None
+    for idx, char in enumerate(body):
+        if char not in "[{":
+            continue
         try:
-            data = json.loads(candidate)
+            data, _end = decoder.raw_decode(body[idx:])
         except ValueError:
             continue
-        if isinstance(data, list):
-            return data
-        if isinstance(data, dict):
-            return [data]
-    return None
+        if _looks_like_questions(data):
+            return [data] if isinstance(data, dict) else data
+        # Разобралось, но на вопросы не похоже (например, массив из
+        # рассуждений) — запоминаем как крайний вариант и ищем дальше.
+        if fallback is None and isinstance(data, list) and data:
+            fallback = data
+    return fallback
 
 
 def _clean_question(item: dict) -> dict | None:
@@ -200,8 +219,17 @@ def generate_for_article(article: dict, per_article: int = None) -> list[dict]:
     # Тот же вход в модели, что у форматирования новостей: активная модель с
     # цепочкой подстраховки, учётом расходов и токенов. Своего похода в сеть
     # здесь заводить нельзя — расход мимо статистики бота.
+    #
+    # ⚠️ thinking_override=False — РАЗМЫШЛЕНИЯ ВЫКЛЮЧЕНЫ НАМЕРЕННО (2026-08-05,
+    # по итогам первой боевой сборки). На qwen3.7-max один вопрос обходился в
+    # 3900 токенов, из которых 2200 — «размышления»: модель вслух прикидывала
+    # варианты ответа, то есть больше половины цены уходило в никуда. Задача
+    # служебная и механическая — достать из готовой статьи факт и разложить его
+    # по четырём вариантам, — рассуждать тут не о чем. Побочная выгода: ответ
+    # приходит без блока <thought>, из-за которого ломался разбор JSON, и
+    # приходит В РАЗЫ быстрее (было 45–50 сек на статью).
     from services.gemini import _gemini_chat_request
-    data, used_model = _gemini_chat_request(messages, kind="викторина")
+    data, used_model = _gemini_chat_request(messages, kind="викторина", thinking_override=False)
     if data is None:
         logger.warning("⚠️ Викторина: модель не ответила по статье %s", article["fname"])
         return []
@@ -214,8 +242,10 @@ def generate_for_article(article: dict, per_article: int = None) -> list[dict]:
 
     items = _extract_json(body)
     if not items:
-        logger.warning("⚠️ Викторина: не разобрать JSON по статье %s (модель %s)",
-                       article["fname"], used_model)
+        # Кусок ответа в логе — иначе такую неудачу нечем разбирать: запрос
+        # уже оплачен, а что именно прислала модель, никто не увидит.
+        logger.warning("⚠️ Викторина: не разобрать JSON по статье %s (модель %s). Ответ: %s",
+                       article["fname"], used_model, (body or "")[:300].replace("\n", " "))
         return []
 
     saved = []
