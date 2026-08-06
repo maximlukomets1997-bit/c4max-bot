@@ -139,14 +139,21 @@ async def _handle_digest_callback(query, context, data: str, chat_id: int, user_
             await query.answer("❌ Текст дайджеста потерялся — открой экран заново.",
                                show_alert=True)
             return
-        await query.answer("⏳ Отправляю…")
+        # ⚠️ На нажатие отвечаем РОВНО ОДИН раз — либо успехом, либо причиной
+        # отказа. Раннего «⏳ Отправляю…» здесь намеренно НЕТ: после него
+        # Telegram отбивал повторный ответ, объяснение отказа не доходило, и
+        # кнопка выглядела зависшей ровно в том случае, ради которого ветка и
+        # написана (бота выгнали из группы, отняли право писать). Одно сообщение
+        # в одну группу — не долгая операция, 15-секундный предел ей не грозит.
         try:
             await context.bot.send_message(chat_id=target, text=text,
                                            parse_mode=ParseMode.HTML)
         except Exception as e:
             logger.warning("⚠️ %s Дайджест не ушёл в группу %s: %s", _ICON, target, e)
-            await query.answer(f"❌ Не удалось отправить: {e}", show_alert=True)
+            # Текст всплывающего окна ≤200 символов, иначе оно не покажется вовсе.
+            await query.answer(f"❌ Не удалось отправить: {e}"[:200], show_alert=True)
             return
+        await query.answer("✅ Дайджест отправлен в группу.")
         logger.info("%s Владелец %s отправил дайджест в группу %s", _ICON, user_id, target)
         _audit(user_id, "digest", 0, f"дайджест отправлен в чат {target}")
         # Кнопку отправки убираем: второе нажатие прислало бы в группу дубль.

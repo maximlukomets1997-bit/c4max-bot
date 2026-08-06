@@ -356,6 +356,16 @@ def _callback_literals():
                             "handlers/admin/panel_prompts.py (собрана f-строкой)", 0))
     except Exception:
         pass
+
+    # Та же болезнь у кнопок подтверждения «🧹Очистить РАЗГОВОРЫ»:
+    # f"{prefix}:wipe_yes", где prefix — "adm" или "proactive", смотря из какой
+    # панели открыли (_handle_proactive_wipe). Приставка стоит В НАЧАЛЕ, значит
+    # неизменного начала у строки нет и разбор выше её не видит. Достраиваем
+    # обе пары руками — переменных всего две, таблицы для них нет.
+    for prefix in ("adm", "proactive"):
+        for action in ("wipe_yes", "wipe_no"):
+            out.append((f"{prefix}:{action}",
+                        "handlers/admin/panel_prompts.py (собрана f-строкой)", 0))
     return out
 
 

@@ -529,6 +529,10 @@ def _create_schema(conn):
         CREATE INDEX IF NOT EXISTS idx_modlog_ts ON moderation_log(ts);
         CREATE INDEX IF NOT EXISTS idx_evidence_log ON mute_evidence(log_id);
         CREATE INDEX IF NOT EXISTS idx_kblog_ts ON knowledge_log(ts);
+        -- Вызовы моделей по времени: таблица чистится только раз в месяц и к
+        -- концу месяца набирает десятки тысяч строк, а по времени её перебирают
+        -- суточный и недельный отчёты (count_api_calls_between) и панель /stats.
+        CREATE INDEX IF NOT EXISTS idx_api_calls_ts ON api_calls(called_at);
         -- Выбор вопроса викторины: только одобренные, реже всего заданные
         CREATE INDEX IF NOT EXISTS idx_quiz_bank_pick ON quiz_bank(approved, asked_count);
         CREATE INDEX IF NOT EXISTS idx_stafflog_ts ON staff_log(ts);
