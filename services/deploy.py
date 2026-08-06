@@ -58,6 +58,15 @@ SCRIPT_COPY = os.path.join(os.path.expanduser("~"), ".c4max-deploy-run.sh")
 # изменился requirements.txt и ставятся библиотеки.
 TIMEOUT_SEC = 300
 
+# ⚠️ ЗАМОК НА ДВА ВХОДА. Обновление зовут ДВОЕ: автоматический цикл раз в пять
+# минут (jobs/update.py) и кнопка «🔄 ПЕРЕЗАПУСК» в панели. Оба готовят себе
+# сценарий в ОДИН И ТОТ ЖЕ файл SCRIPT_COPY — и нажатие кнопки посреди работы
+# цикла переписало бы файл прямо под уже работающим bash (тот дочитывает
+# сценарий с диска по ходу выполнения). flock внутри самого deploy.sh от этого
+# не спасает: он срабатывает уже ПОСЛЕ копирования.
+# Оба входа живут в одном цикле событий, поэтому хватает asyncio-замка.
+_update_lock = asyncio.Lock()
+
 
 def can_update() -> bool:
     """
@@ -123,8 +132,16 @@ async def update(quiet_nochange: bool = False) -> dict:
     настоящие события (решение Максима 2026-07-27). Все ПРОЧИЕ исходы пишутся
     всегда — молчать о неудаче нельзя.
     """
-    loop = asyncio.get_running_loop()
-    res = await loop.run_in_executor(None, _run_blocking)
+    # Обновление уже идёт (второй вход) — НЕ ждём его в очереди: ожидание до
+    # TIMEOUT_SEC пережгло бы 15-секундный предел ответа на нажатие кнопки.
+    # Отвечаем тем же исходом BUSY, что печатает сам deploy.sh при занятом
+    # flock, — для позвавшего разницы нет.
+    if _update_lock.locked():
+        res = {"STATUS": "BUSY", "MSG": "Обновление уже идёт, подожди несколько секунд."}
+    else:
+        async with _update_lock:
+            loop = asyncio.get_running_loop()
+            res = await loop.run_in_executor(None, _run_blocking)
     if not (quiet_nochange and res.get("STATUS") == "NOCHANGE"):
         logger.info("⬇️ Обновление: %s — %s", res.get("STATUS"), res.get("MSG"))
     if res.get("ERR"):

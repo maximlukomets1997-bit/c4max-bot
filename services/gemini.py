@@ -27,6 +27,7 @@
 
 import logging
 import re
+import threading
 import time
 import json
 import base64
@@ -68,6 +69,9 @@ import database.history as hist
 # TLS с сервером стоит 130–200 мс и раньше платилось на КАЖДЫЙ запрос.
 # Подробности и запрет на повторы — в services/http.py.
 from services.http import session as _http
+# Единственная «витрина» среза мыслей — своей второй копии не заводить.
+# utils_format ничего из services не импортирует, кольца зависимостей нет.
+from utils_format import strip_thoughts
 
 logger = logging.getLogger(__name__)
 
@@ -105,15 +109,22 @@ def compress_newlines(text: str) -> str:
 # не должно ломать ответ пользователю.
 _FALLBACK_NOTIFY_COOLDOWN = 3600  # секунд (1 час)
 _last_fallback_notify = 0.0
+# ⚠️ Замок к метке времени: запросы к моделям идут из РАЗНЫХ рабочих потоков
+# (run_in_executor), и без него два одновременно отказавших запроса успевали
+# оба пройти проверку «прошёл ли час» до того, как первый обновит метку —
+# в личку прилетала пара одинаковых уведомлений вместо одного.
+_fallback_notify_lock = threading.Lock()
 
 
 def _notify_admins_fallback(active_model: str, used_model: str) -> None:
     """Шлёт админам в личку «активная модель не ответила, работаю на запасной»."""
     global _last_fallback_notify
     now = time.monotonic()
-    if _last_fallback_notify and now - _last_fallback_notify < _FALLBACK_NOTIFY_COOLDOWN:
-        return
-    _last_fallback_notify = now
+    # Проверка «прошёл ли час» и обновление метки — одной неделимой операцией.
+    with _fallback_notify_lock:
+        if _last_fallback_notify and now - _last_fallback_notify < _FALLBACK_NOTIFY_COOLDOWN:
+            return
+        _last_fallback_notify = now
 
     active_name = AVAILABLE_MODELS.get(active_model, {}).get("name", active_model)
     used_name = AVAILABLE_MODELS.get(used_model, {}).get("name", used_model)
@@ -764,7 +775,14 @@ def _gemini_chat_request(messages: list, kind: str = "текст", has_image: bo
     for i, model_name in enumerate(chain):
         data = _try_model(model_name, attempts=(2 if model_name == active_model else 1))
         if data is not None:
-            hist.register_api_call(model_name)
+            # ⚠️ Учёт вызова — под своим try, как соседние записи расхода ниже.
+            # Модель уже ответила, токены потрачены: сорвавшаяся запись в
+            # статистику не вправе уронить функцию и отобрать у человека
+            # ответ, за который заплачено.
+            try:
+                hist.register_api_call(model_name)
+            except Exception as e:
+                logger.warning("⚠️ Не удалось учесть вызов модели в статистике: %s", e)
             # Ответила запасная модель — сообщаем админам (не чаще раза в час).
             # При vision-reroute НЕ сообщаем: обход «слепой» модели на фото —
             # штатный режим (как у голосовых), а не сбой активной модели.
@@ -964,7 +982,11 @@ def ask_gemini_audio(chat_id: int, user_id: int, audio_base64: str) -> str:
         logger.error("⚠️ Не удалось получить аудио-ответ — недоступны все модели цепочки (пользователь %s)", user_id)
         return SOFT_FAIL_MESSAGE
 
-    hist.register_api_call(used_model)
+    # Учёт вызова — под своим try: ответ уже получен и оплачен (см. текстовый путь).
+    try:
+        hist.register_api_call(used_model)
+    except Exception as e:
+        logger.warning("⚠️ Не удалось учесть вызов модели в статистике: %s", e)
     # Ответила запасная модель вместо активной — сообщаем админам (не чаще раза
     # в час). Если активная модель аудио вообще не принимает, обход цепочки —
     # штатный режим, а не сбой, поэтому уведомления нет.
@@ -1112,7 +1134,11 @@ def ask_gemini_video(chat_id: int, user_id: int, video_base64: str,
         logger.error("⚠️ Не удалось разобрать видео — недоступны все модели цепочки (пользователь %s)", user_id)
         return SOFT_FAIL_MESSAGE
 
-    hist.register_api_call(used_model)
+    # Учёт вызова — под своим try: ответ уже получен и оплачен (см. текстовый путь).
+    try:
+        hist.register_api_call(used_model)
+    except Exception as e:
+        logger.warning("⚠️ Не удалось учесть вызов модели в статистике: %s", e)
     # Ответила запасная вместо активной — уведомляем админов (не чаще раза в час).
     # Если активная видео вообще не принимает, обход цепочки — штатный режим
     # (как у аудио и у vision-reroute), поэтому уведомления нет.
@@ -1305,7 +1331,18 @@ def format_news_as_colonel(title: str, description: str, tag: str, article_text:
     data, _ = _gemini_chat_request(messages)
     if data is not None:
         try:
-            return compress_newlines(data["choices"][0]["message"]["content"].strip())
+            answer = data["choices"][0]["message"]["content"]
+            # ⚠️ СРЕЗАЕМ РАЗМЫШЛЕНИЯ. Думающая модель возвращает ответ вместе с
+            # блоком <thought>…</thought> впереди (его ставит _openai_stream_request
+            # у Qwen/DeepSeek/Xiaomi и просит include_thoughts у Gemini). Дальше
+            # новость уходит подписчикам, и короткая — через convert_md, который
+            # мыслей НЕ разбирает: без этой строки в рассылку уезжали бы черновые
+            # рассуждения модели прямо со служебными тегами. Тем же текстом
+            # новость пишется в архив групп (jobs/news.py) — то есть мысли
+            # попадали бы ещё и в стенограмму режима «Сам в разговор».
+            # ⚠️ Лечить это выключением размышлений (thinking_override=False)
+            # НЕЛЬЗЯ — думающая модель должна думать, устойчивым обязан быть разбор.
+            return compress_newlines(strip_thoughts(answer))
         except (KeyError, IndexError):
             logger.error("⚠️ Неожиданный формат ответа при форматировании новости")
 
