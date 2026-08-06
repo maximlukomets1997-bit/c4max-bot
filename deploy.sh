@@ -106,6 +106,24 @@ fi
 
 NEW_VER=$(cat VERSION 2>/dev/null || echo "?")
 
+# ── 2а. Как назвать то, что приехало (2026-08-06) ────────────
+# Номер в VERSION поднимает ТОЛЬКО «Отправить изменения на GitHub.bat», то есть
+# отправка с ПК Максима. Правка, приехавшая через pull request из сессии Claude,
+# номер не двигает — и сообщение получалось «Забрал v3.95 (было v3.95)»,
+# читающееся как «обновление впустую». Это не сбой (код РАЗНЫЙ, совпал только
+# номер), но объяснять его пришлось трижды: v3.11, v3.84, v3.95.
+# Поэтому когда номер не изменился, называем то, что реально изменилось, —
+# короткий номер коммита (ту самую метку сборки, что панель /adm показывает
+# рядом с версией), — и одной скобкой говорим, почему номер прежний.
+NEW_SHA=$(git rev-parse --short "$NEW_COMMIT" 2>/dev/null || echo "?")
+if [ "$NEW_VER" = "$WAS_VER" ]; then
+    GOT_TEXT="Забрал новый код: сборка $NEW_SHA, версия прежняя — v$NEW_VER (её поднимает только отправка с ПК)"
+    BAD_TEXT="Новый код (сборка $NEW_SHA) не запускается"
+else
+    GOT_TEXT="Забрал v$NEW_VER (было v$WAS_VER)"
+    BAD_TEXT="Новый код v$NEW_VER не запускается"
+fi
+
 # ── 3. Библиотеки, если список изменился ─────────────────────
 if git diff --name-only "$WAS_COMMIT" "$NEW_COMMIT" 2>/dev/null | grep -qx "requirements.txt"; then
     if ! "$PIP" install -q -r "$BOT/requirements.txt" 2>/dev/null; then
@@ -151,7 +169,7 @@ if [ -n "$PROBLEM" ]; then
     git reset --hard -q "$WAS_COMMIT"
     echo "STATUS=ROLLBACK"
     echo "VERSION=$WAS_VER"
-    echo "MSG=Новый код v$NEW_VER не запускается ($PROBLEM). Вернулся на v$WAS_VER."
+    echo "MSG=$BAD_TEXT ($PROBLEM). Вернулся на v$WAS_VER."
     echo "ERR=$(echo "$ERRTEXT" | tail -3 | tr '\n' ' ')"
     exit 0
 fi
@@ -160,5 +178,5 @@ fi
 echo "STATUS=UPDATED"
 echo "WAS=$WAS_VER"
 echo "VERSION=$NEW_VER"
-echo "MSG=Забрал v$NEW_VER (было v$WAS_VER), проверка пройдена."
+echo "MSG=$GOT_TEXT, проверка пройдена."
 exit 0
