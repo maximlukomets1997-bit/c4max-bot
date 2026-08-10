@@ -137,6 +137,11 @@ async def send_stats_panel(bot, chat_id: int, user_id: int):
     # ⬇️ «Обновления» (2026-08-04, просьба Максима) — тоже здесь: это
     # статистика про самого бота (сколько правок и когда), а каждая строка
     # экрана открывается ссылкой на GitHub.
+    # 💾 «Копия базы» (2026-08-10, просьба Максима) переехала СЮДА из главной
+    # панели /adm — снимает копию прямо сейчас и присылает файлом. Кнопка
+    # владельческая (в _CALLBACK_RULES её нет), как и вся эта панель, поэтому
+    # отбор по правам ей не нужен. Обработчик нажатия при переезде НЕ менялся —
+    # он один, ветка `adm_backup` в router.py.
     from services import group_digest
     keyboard = [
         [InlineKeyboardButton("⬇️ Обновления", callback_data="upd:list")],
@@ -144,6 +149,7 @@ async def send_stats_panel(bot, chat_id: int, user_id: int):
         [InlineKeyboardButton(
             f"📰 Дайджест по понедельникам: {_onoff(group_digest.is_enabled())}",
             callback_data="dig:toggle")],
+        [InlineKeyboardButton("💾 Копия базы", callback_data="adm_backup")],
         _adm_back_row(),
     ]
     await _send_panel_message(bot, chat_id, text, InlineKeyboardMarkup(keyboard))
@@ -326,13 +332,12 @@ def _adm_rows():
         # ждут одобрения. Стоит СРАЗУ ЗА базой знаний намеренно — это её
         # продолжение: сначала статьи, потом вопросы по ним.
         [InlineKeyboardButton("🎮 Настройки Викторины", callback_data="quiz:panel")],
-        # Логи и копия базы — одним рядом в два столбца: обе выдают файл на
-        # руки и обе владельческие (в _CALLBACK_RULES их нет), поэтому у
-        # модератора ряд пропадает целиком, заглушек в нём не остаётся.
-        [
-            InlineKeyboardButton("📜 Логи бота", callback_data="adm_logs"),
-            InlineKeyboardButton("💾 Копия базы", callback_data="adm_backup"),
-        ],
+        # Логи бота — владельческая кнопка (в _CALLBACK_RULES её нет), поэтому
+        # у модератора ряд пропадает целиком.
+        # 2026-08-10: соседкой в этом ряду стояла «💾 Копия базы» — по просьбе
+        # Максима она переехала в панель «💬 СТАТИСТИКА» (send_stats_panel).
+        # Ряд остался в один столбец; обратно кнопку не возвращать.
+        [InlineKeyboardButton("📜 Логи бота", callback_data="adm_logs")],
         # Две уборочные кнопки под рукой, чтобы не ходить за ними по панелям
         # (2026-07-26 добавлены на время тестов, 2026-07-31 по решению Максима
         # ОСТАВЛЕНЫ НАВСЕГДА — «мне нужны эти кнопки, ими удобно пользоваться
