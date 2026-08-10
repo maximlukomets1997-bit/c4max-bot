@@ -592,10 +592,12 @@ async def notify_owners_ai_mute(bot, chat_id: int, user_id: int, name: str,
     Сообщает ВЛАДЕЛЬЦАМ в личку, что бот сам выдал мут в режиме «Сам в разговор»
     (2026-07-20), и даёт кнопку «🔓 Размутить».
 
-    Почему владельцам, а не модераторам (как у автоматики антиспама): решение
-    принял не человек и не понятное правило, а модель — за этим должен следить
-    хозяин бота. Добавить сюда модераторов с правом «mod» — одна строка,
-    как в _notify_moderators_mute.
+    ⚠️ 2026-08-11: ШЛЁМ И МОДЕРАТОРАМ с правом «🛡DDoS-Guard» (просьба
+    Максима — «кнопка разблокировать у админа и модераторов не появилась»).
+    До этого уведомление уходило ТОЛЬКО владельцам: считалось, что за решением
+    модели должен следить хозяин бота. На деле мут снимает тот, кто первым
+    увидел, а модераторы про него попросту не знали — снять несправедливый мут
+    было некому, пока владелец не заглянет в личку.
 
     В сообщение кладём ЦИТАТУ сообщения, за которое прилетел мут: без неё
     невозможно понять, справедливо ли решение, а журнал улик для этого типа
@@ -604,7 +606,14 @@ async def notify_owners_ai_mute(bot, chat_id: int, user_id: int, name: str,
     """
     try:
         from config import ADMIN_IDS
-        if not ADMIN_IDS:
+        from services.roles import list_moderators, can
+        # Владельцы + модераторы с правом «mod» (кнопка у остальных не нажмётся).
+        # dict.fromkeys — порядок сохраняем, дубли убираем: владелец может
+        # оказаться и в списке модераторов.
+        recipients = list(dict.fromkeys(
+            list(ADMIN_IDS) + [uid for uid in list_moderators() if can(uid, "mod")]
+        ))
+        if not recipients:
             return
 
         title = str(chat_id)
@@ -626,11 +635,11 @@ async def notify_owners_ai_mute(bot, chat_id: int, user_id: int, name: str,
         text = (f"🗣 Бот сам выдал мут: {name} на {seconds // 60} мин {seconds % 60} сек.\n"
                 f"Группа: {title}\n"
                 f"Сообщение: {snippet or '(без текста)'}")
-        for uid in ADMIN_IDS:
+        for uid in recipients:
             try:
                 await bot.send_message(chat_id=uid, text=text, reply_markup=kb)
             except Exception as e:
-                logger.debug("🛡 Не удалось уведомить владельца %s о муте от бота: %s", uid, e)
+                logger.debug("🛡 Не удалось уведомить %s о муте от бота: %s", uid, e)
     except Exception as e:
         logger.debug("🛡 Ошибка уведомления о муте от бота: %s", e)
 

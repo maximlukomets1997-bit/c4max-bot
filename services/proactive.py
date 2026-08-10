@@ -63,6 +63,7 @@ from config import (
 )
 from database.history import get_setting, log_proactive_check, save_group_message
 from services.gemini import (ask_group_proactive, ask_group_proactive_media,
+                             note_proactive_outcome,
                              _proactive_describe_image,
                              _proactive_transcribe_audio, _proactive_describe_video)
 from utils import should_respond_in_group, keep_chat_action
@@ -162,7 +163,7 @@ def _extract_mute(answer: str) -> tuple[str, int | None]:
 
 
 async def _apply_mute(bot, chat_id: int, user_id: int | None, seconds: int,
-                      trigger_text: str) -> None:
+                      trigger_text: str, message_id: int | None = None) -> bool:
     """
     Выдаёт мут, решённый моделью, и уведомляет владельцев.
 
@@ -172,9 +173,19 @@ async def _apply_mute(bot, chat_id: int, user_id: int | None, seconds: int,
 
     actor_id=None намеренно: в antispam._manual_guard это означает «персонал
     бота не трогаем» — владельцы и модераторы защищены от мута моделью.
+
+    ⚠️ УДАЛЯЕТ СООБЩЕНИЕ, ЗА КОТОРОЕ ВЫДАН МУТ (2026-08-11, просьба Максима:
+    «сообщение не удалилось, хотя такие функции делали когда-то»). Такие
+    функции и правда есть — но у АВТОМАТИКИ антиспама (_delete_messages при
+    флуде и ссылках); путь «мут решила модель» их не звал вовсе, и грубость
+    оставалась висеть в чате при замолчавшем авторе.
+
+    Возвращает True, если сообщение удалено, — вызывающий по этому признаку
+    отправляет реплику БЕЗ Reply: ссылаться на удалённое незачем.
+    Удаление тихое: нет прав или сообщение уже стёрли — мут всё равно выдан.
     """
     if not user_id:
-        return
+        return False
     from services.antispam import mute_user, notify_owners_ai_mute
 
     err = await mute_user(bot, chat_id, user_id, seconds,
@@ -182,10 +193,21 @@ async def _apply_mute(bot, chat_id: int, user_id: int | None, seconds: int,
                           actor_id=None, action="mute_ai")
     if err:
         logger.warning("🤖 Чат %s: бот решил замутить %s, но не вышло: %s", chat_id, user_id, err)
-        return
+        return False
 
     logger.info("🤖 Чат %s: бот сам выдал мут %s на %d сек", chat_id, user_id, seconds)
     await notify_owners_ai_mute(bot, chat_id, user_id, str(user_id), seconds, trigger_text)
+
+    deleted = False
+    if message_id:
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=message_id)
+            deleted = True
+            logger.info("🤖 Чат %s: сообщение %s, за которое выдан мут, удалено", chat_id, message_id)
+        except Exception as e:
+            logger.warning("🤖 Чат %s: мут выдан, но сообщение %s удалить не вышло: %s",
+                           chat_id, message_id, e)
+    return deleted
 
 
 def note_bot_group_reply(chat_id: int) -> None:
@@ -554,6 +576,10 @@ async def _run_proactive_once(bot, chat_id: int, trigger_message_id: int, trigge
             )
         if not answer:
             logger.info("🤖 Чат %s: решение — промолчать", chat_id)
+            # Запоминаем исход: в стенограмме следующей проверки появится
+            # «Ты: уже видел, решил промолчать» — чтобы модель не вернулась к
+            # этому поводу через минуту как к новости (случай Максима 11.08).
+            note_proactive_outcome(chat_id, True)
             _note("silent")
             return
 
@@ -569,14 +595,17 @@ async def _run_proactive_once(bot, chat_id: int, trigger_message_id: int, trigge
             # Ответ состоял из одной пометки — говорить нечего, но наказать можно.
             logger.info("🤖 Чат %s: реплика пустая после разбора пометки", chat_id)
             if mute_sec:
-                await _apply_mute(bot, chat_id, trigger_user_id, mute_sec, trigger_text)
+                await _apply_mute(bot, chat_id, trigger_user_id, mute_sec,
+                                  trigger_text, trigger_message_id)
             _note("empty")
             return
 
         # Мут — ДО реплики: между решением и словами человек не должен успеть
         # написать ещё пару сообщений.
+        deleted = False
         if mute_sec:
-            await _apply_mute(bot, chat_id, trigger_user_id, mute_sec, trigger_text)
+            deleted = await _apply_mute(bot, chat_id, trigger_user_id, mute_sec,
+                                        trigger_text, trigger_message_id)
 
         # Ответ приходит с блоком <thought> (в чате он станет свёрнутыми
         # «Мыслями»); паузу и лог считаем по ВИДИМОЙ части реплики.
@@ -589,7 +618,10 @@ async def _run_proactive_once(bot, chat_id: int, trigger_message_id: int, trigge
 
         # Reply на сообщение-триггер: даёт привязку к контексту и заодно
         # кладёт реплику в нужную тему форум-группы.
-        await send_formatted(bot, chat_id, answer, reply_to=trigger_message_id)
+        # Сообщение-нарушение удалено — отвечать не на что: Reply на стёртое
+        # показывается как «сообщение недоступно».
+        await send_formatted(bot, chat_id, answer,
+                             reply_to=None if deleted else trigger_message_id)
 
         # Свою реплику — в архив групп: следующая стенограмма увидит её («Ты: …»),
         # бот не будет повторяться. В архив — БЕЗ мыслей (как и личная память).
@@ -599,6 +631,7 @@ async def _run_proactive_once(bot, chat_id: int, trigger_message_id: int, trigge
             logger.debug("🤖 Не удалось сохранить свою реплику в архив групп: %s", e)
 
         _last_reply_ts[chat_id] = time.monotonic()
+        note_proactive_outcome(chat_id, False)
         logger.info("🤖 Чат %s: бот сам вступил в разговор (%d символов)", chat_id, len(visible))
         _note("reply_mute" if mute_sec else "reply", len(visible))
     except Exception as e:
