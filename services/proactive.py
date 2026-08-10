@@ -371,8 +371,13 @@ async def _run_proactive(bot, chat_id: int, trigger_message_id: int, trigger_tex
                     None, _proactive_describe_image, image_base64,
                 )
                 if description:
+                    # ⚠️ ВРЕМЕННО БЕЗ ОБРЕЗКИ (2026-08-10, просьба Максима на
+                    # время теста): было description[:120] — отметка «сработало»,
+                    # а не содержимое. Вернуть [:120] вместе с отладочным блоком
+                    # «🧪 ЧТО УХОДИТ МОДЕЛИ» в gemini.py: разбор бывает на
+                    # полстраницы, и в обычной работе он засоряет лог.
                     logger.info("🤖 Чат %s: фото проанализировано — «%s»",
-                                chat_id, description[:120])
+                                chat_id, description)
                     # ⚠️ ОПИСАНИЕ ОБЁРНУТО В «[на фото: …]» — 2026-08-10, разбор
                     # жалобы Максима «бот шутит про ИИ, и людей это бесит».
                     # Дальше по пути (gemini.py, сборка стенограммы) этот текст
@@ -409,7 +414,7 @@ async def _run_proactive(bot, chat_id: int, trigger_message_id: int, trigger_tex
                 )
                 if transcription:
                     logger.info("🤖 Чат %s: голосовое расшифровано — «%s»",
-                                chat_id, transcription[:120])
+                                chat_id, transcription)   # ⚠️ ВРЕМЕННО без [:120], см. фото выше
                     enriched_text = transcription
             except Exception as e:
                 logger.debug("🤖 Чат %s: не удалось скачать/расшифровать голосовое: %s", chat_id, e)
@@ -427,7 +432,7 @@ async def _run_proactive(bot, chat_id: int, trigger_message_id: int, trigger_tex
                 )
                 if description:
                     logger.info("🤖 Чат %s: видео проанализировано — «%s»",
-                                chat_id, description[:120])
+                                chat_id, description)   # ⚠️ ВРЕМЕННО без [:120], см. фото выше
                     # Описание ПОВЕРХ подписи — как у фото, и так же обёрнуто
                     # в «[на видео: …]» (2026-08-10): причина та же, описание
                     # ролика — не слова участника. Подробности у фото выше.
