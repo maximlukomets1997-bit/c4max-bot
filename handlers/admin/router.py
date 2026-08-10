@@ -270,17 +270,21 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     # ── Кнопка «💾 Копия базы»: снять копию прямо сейчас ─────────────────
-    # Та же копия, что уходит владельцу каждую ночь (jobs.nightly_backup),
-    # только по требованию: перед правкой настроек, перед выкаткой, «просто
-    # чтобы была свежая». Ночной метки НЕ трогает — ручная копия не отменяет
-    # ночную и не приближает её.
+    # Та же копия, что делается каждую ночь (jobs.nightly_backup), только по
+    # требованию: перед правкой настроек, перед выкаткой, «просто чтобы была
+    # свежая». Ночной метки НЕ трогает — ручная копия не отменяет ночную и не
+    # приближает её.
+    # ⚠️ С 2026-08-10 ФАЙЛ В ЛИЧКУ ПРИХОДИТ ТОЛЬКО ОТСЮДА: ночью он уезжает в
+    # облако, а в переписку идёт лишь строчка-доклад. Кнопка — единственный
+    # способ взять копию в руки, поэтому она же кладёт её и в облако: нажимают
+    # её перед риском, и точка возврата нужна в обоих местах сразу.
     # ⚠️ Файл идёт МИМО гигиены панелей и БЕЗ таймера самоудаления, в отличие
     # от логов: это последняя копия базы, она обязана остаться в переписке.
     if data == "adm_backup":
         # Отвечаем ДО работы: у Telegram ~15 секунд на ответ callback, а тут
-        # диск — снимок базы и сжатие.
+        # диск (снимок базы и сжатие) и сеть (загрузка в облако).
         await query.answer("⏳ Делаю копию базы…")
-        from services import backup
+        from services import backup, cloud_backup
         loop = asyncio.get_running_loop()
         try:
             path, size = await loop.run_in_executor(None, backup.make_backup)
@@ -293,6 +297,22 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             )
             return
         logger.info("🔧 Админ %s сделал копию базы вручную", user_id)
+
+        # Облако — своим try: не увезли, так файл всё равно уйдёт в чат.
+        # Пока облако не подключено, строка пустая: обещать в подписи то, чего
+        # ещё нет, хуже, чем промолчать.
+        cloud_line = ""
+        if await loop.run_in_executor(None, cloud_backup.configured):
+            try:
+                await loop.run_in_executor(None, cloud_backup.upload, path)
+                in_cloud = await loop.run_in_executor(None, cloud_backup.count)
+                cloud_line = ("☁️ И в Google Drive"
+                              + (f" (в облаке: {in_cloud})" if in_cloud else "") + ".\n")
+            except Exception as e:
+                logger.error("⚠️ ☁️ Копия базы по кнопке не уехала в облако: %s", e)
+                cloud_line = (f"⚠️ В облако увезти НЕ удалось: "
+                              f"<code>{html.escape(str(e)[:200])}</code>\n")
+
         with open(path, "rb") as f:
             blob = f.read()
         fname = os.path.basename(path)
@@ -304,6 +324,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             caption=(
                 f"💾 <b>Копия базы бота</b>\n"
                 f"<code>{html.escape(fname)}</code> · {backup.human_size(size)}\n"
+                f"{cloud_line}"
                 f"<i>Сохрани у себя: промпты, настройки, счета и квоты, личные "
                 f"дела, звания и журналы — этого нет на GitHub. "
                 f"На сервере хранится копий: {kept}.</i>"
