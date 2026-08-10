@@ -516,10 +516,26 @@ def _qwen_chat_request(model_name: str, messages: list, thinking_override: bool 
 
 def _deepseek_chat_request(model_name: str, messages: list, thinking_override: bool | None = None):
     """Запрос к DeepSeek. Рассуждения включаются параметром thinking
-    ({"type": "enabled"/"disabled", "reasoning_effort": "xhigh"} — формат DeepSeek V4).
-    reasoning_effort="xhigh" — экстремальная глубина размышлений."""
+    ({"type": "enabled"/"disabled", "reasoning_effort": "max"} — формат DeepSeek V4).
+
+    ⚠️ reasoning_effort="max" — ВЕРХНЯЯ ступень (2026-08-10, решение Максима
+    «менять для обеих моделей»). До этого здесь стоял "xhigh" с подписью
+    «экстремальная глубина», и это оказалось неправдой: у DeepSeek V4 шкала
+    low / high / max, а "xhigh" — устаревшее значение, которое приводится к
+    "high", то есть к уровню ПО УМОЛЧАНИЮ. Бот честно думал средне, а комментарий
+    обещал максимум. Скорее всего, когда это писалось, "xhigh" и был верхом —
+    шкалу DeepSeek с тех пор переделали (у них и цены дважды менялись за месяц).
+
+    ⚠️ Значение применяется к ОБЕИМ моделям (v4-flash и v4-pro) — ветка тут
+    одна. У v4-pro на 2026-08-10 работают только "high" и "max" ("low" тоже
+    подтягивается до "high"); три полноценные ступени обещаны в начале августа.
+
+    ⚠️ ЦЕНА: рассуждения тарифицируются как обычный ответ (v4-pro $0.87, v4-flash
+    $0.28 за млн токенов) — на "max" их заметно больше, и ответы дольше.
+    Сверять при правках цен в config.DEEPSEEK_PRICES.
+    """
     if _is_thinking(model_name, thinking_override):
-        extra = {"thinking": {"type": "enabled", "reasoning_effort": "xhigh"}}
+        extra = {"thinking": {"type": "enabled", "reasoning_effort": "max"}}
     else:
         extra = {"thinking": {"type": "disabled"}}
     return _openai_stream_request(
@@ -531,8 +547,15 @@ def _xiaomi_chat_request(model_name: str, messages: list, thinking_override: boo
     """Запрос к Xiaomi MiMo (2026-07-25). Формат управления рассуждениями —
     ТОТ ЖЕ, что у DeepSeek: {"thinking": {"type": "enabled"/"disabled"}}.
     Проверено живыми запросами: с "disabled" размышлений ноль, с
-    reasoning_effort="xhigh" их вдвое больше — как у DeepSeek, максимум
-    (решение Максима о глубине мышления)."""
+    reasoning_effort="xhigh" их вдвое больше (решение Максима о глубине).
+
+    ⚠️ ЗДЕСЬ "xhigh" ОСТАВЛЕН НАМЕРЕННО и «как у DeepSeek» больше НЕ читать:
+    2026-08-10 у DeepSeek перешли на "max", потому что там "xhigh" оказался
+    устаревшим синонимом уровня по умолчанию. У Xiaomi шкала СВОЯ и в их
+    документации не описана — "xhigh" выбран не по бумаге, а по живому замеру
+    (размышлений вдвое больше). Менять на "max" вслепую нельзя: неизвестное
+    значение MiMo может молча проглотить и думать как обычно. Нужен такой же
+    живой замер — сравнить длину reasoning_content на "xhigh" и "max"."""
     if _is_thinking(model_name, thinking_override):
         extra = {"thinking": {"type": "enabled", "reasoning_effort": "xhigh"}}
     else:
