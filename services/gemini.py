@@ -34,6 +34,7 @@ import base64
 import requests
 
 from config import (
+    PROACTIVE_MEDIA_CHAIN,
     GEMINI_API_URL,
     GEMINI_MODEL,
     GEMINI_TIMEOUT,
@@ -206,50 +207,100 @@ def _supports_video(model_name: str) -> bool:
 #  ровно как с 2026-07-24. Зашитых фраз здесь быть не должно ни одной:
 #  сочинять формулировки от имени бота запрещено решением Максима — теперь
 #  у него есть панель, чтобы задать их самому.
+#
+#  ⚠️ 2026-08-10, две просьбы Максима разом:
+#   1. ЦЕПОЧКА ПОДСТРАХОВКИ вместо одной зашитой модели — `PROACTIVE_MEDIA_CHAIN`.
+#      Раньше единственная flash-lite не ответила → описания нет → для фото и
+#      видео без подписи бот молча пропускал сообщение.
+#   2. МАКСИМАЛЬНОЕ МЫШЛЕНИЕ у разборщиков (`thinking_budget: -1` — динамический
+#      максимум, тот же, что у обычных ответов бота).
+#
+#  ⚠️ МЫСЛИ ЗАПРАШИВАЮТСЯ, НО НЕ ПОКАЗЫВАЮТСЯ (`include_thoughts: False`), и
+#  это не мелочь: результат разбора идёт В СТЕНОГРАММУ как реплика участника.
+#  Придут мысли — активная модель прочтёт «размышляю: кажется, это танк…» как
+#  слова человека. Плюс `_native_text_only` ниже на всякий случай выбрасывает
+#  части с флагом thought: нативный разбор раньше брал parts[0], а первой
+#  частью у думающей модели приходит как раз мысль.
+
+
+def _native_text_only(data: dict) -> str:
+    """
+    Текст ответа нативного API БЕЗ мыслей: части с флагом "thought" отброшены.
+
+    Отдельная от `_native_answer_with_thoughts` намеренно: та собирает ответ
+    ДЛЯ ЧЕЛОВЕКА и заворачивает мысли в <thought>, чтобы Телеграм показал их
+    свёрнутой цитатой. Здесь ответ идёт в стенограмму для другой модели —
+    мысли в нём не нужны ни в каком виде.
+    """
+    parts = data["candidates"][0]["content"]["parts"]
+    texts = [p.get("text", "") for p in parts if not p.get("thought")]
+    return "".join(texts).strip()
+
+
+def _media_thinking_native() -> dict:
+    """Максимальное мышление для нативных запросов (аудио, видео), без показа мыслей."""
+    return {"thinkingConfig": {"includeThoughts": False, "thinkingBudget": -1}}
+
+
+def _media_thinking_openai() -> dict:
+    """То же для OpenAI-совместимого пути (фото): формат у Google другой."""
+    return {"google": {"thinking_config": {"include_thoughts": False, "thinking_budget": -1}}}
 
 
 def _proactive_describe_image(image_base64: str) -> str:
     """
-    Описывает фото для проактивного триггера: лёгкий нестриминговый запрос
-    к Gemini (gemini-3.1-flash-lite — самая быстрая и дешёвая vision-модель).
+    Описывает фото для проактивного триггера: нестриминговый запрос к Gemini
+    ПО ЦЕПОЧКЕ `PROACTIVE_MEDIA_CHAIN` — первая ответившая модель и выигрывает.
     Без истории, системного промпта и RAG — только описание картинки.
+    Мышление на максимуме, мысли в ответ не запрашиваются (см. шапку блока).
 
     Что просят у модели — задаёт промпт разбора медиа из настроек; не задан —
     уходит только файл, и модель отвечает как сочтёт нужным.
 
-    Возвращает описание или пустую строку при любой ошибке. Ошибка описания
-    НЕ должна ломать проактивную проверку — тогда триггером останется
-    оригинальная подпись (возможно, пустая).
+    Возвращает описание или пустую строку, если НИ ОДНА модель цепочки не
+    ответила. Провал разбора НЕ должен ломать проактивную проверку — тогда
+    триггером останется оригинальная подпись (возможно, пустая).
     """
-    try:
-        # Промпт впереди картинки: инструкция должна быть прочитана до файла.
-        content = []
-        media_prompt = hist.get_proactive_media_prompt()
-        if media_prompt:
-            content.append({"type": "text", "text": media_prompt})
-        content.append({"type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}})
-        payload = {
-            "model": "gemini-3.1-flash-lite",
-            "messages": [{"role": "user", "content": content}],
-            "stream": False,
-        }
-        start = time.perf_counter()
-        response = _http().post(
-            GEMINI_API_URL,
-            json=payload,
-            headers={"Authorization": f"Bearer {GEMINI_API_KEY}"},
-            timeout=30,
-        )
-        response.raise_for_status()
-        data = response.json()
-        elapsed = time.perf_counter() - start
-        text = data["choices"][0]["message"]["content"].strip()
-        logger.info("🤖 Ответ от gemini-3.1-flash-lite за %.1f с (описание фото для proactive)", elapsed)
-        return text
-    except Exception as e:
-        logger.debug("🤖 Не удалось описать фото для проактивной проверки: %s", e)
-        return ""
+    # Промпт впереди картинки: инструкция должна быть прочитана до файла.
+    content = []
+    media_prompt = hist.get_proactive_media_prompt()
+    if media_prompt:
+        content.append({"type": "text", "text": media_prompt})
+    content.append({"type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}})
+
+    for model_name in PROACTIVE_MEDIA_CHAIN:
+        try:
+            payload = {
+                "model": model_name,
+                "messages": [{"role": "user", "content": content}],
+                "stream": False,
+                "extra_body": _media_thinking_openai(),
+            }
+            start = time.perf_counter()
+            response = _http().post(
+                GEMINI_API_URL,
+                json=payload,
+                headers={"Authorization": f"Bearer {GEMINI_API_KEY}"},
+                timeout=30,
+            )
+            response.raise_for_status()
+            data = response.json()
+            elapsed = time.perf_counter() - start
+            text = (data["choices"][0]["message"]["content"] or "").strip()
+            if not text:
+                # Пустой ответ — тоже отказ: идём к следующей модели, иначе в
+                # стенограмму уйдут пустые скобки вместо разбора.
+                logger.warning("🤖 %s вернула пустое описание фото — пробую следующую", model_name)
+                continue
+            logger.info("🤖 Ответ от %s за %.1f с (описание фото для proactive)", model_name, elapsed)
+            return text
+        except Exception as e:
+            # ⚠️ warning, а не debug (2026-08-10): молчаливый сбой разбора
+            # выглядит как «бот проигнорировал сообщение» и не находится в логе.
+            logger.warning("🤖 %s не описала фото для проактивной проверки: %s", model_name, e)
+    logger.error("⚠️ 🤖 Фото для проактивной проверки не описала НИ ОДНА модель цепочки")
+    return ""
 
 
 def _proactive_transcribe_audio(audio_base64: str) -> str:
@@ -258,35 +309,47 @@ def _proactive_transcribe_audio(audio_base64: str) -> str:
     Gemini generateContent (gemini-3.1-flash-lite). Без истории и системного
     промпта — только сам файл и, если задан, промпт разбора медиа из настроек.
 
-    Возвращает текст расшифровки или пустую строку при любой ошибке.
-    Ошибка расшифровки НЕ ломает проактивную проверку — тогда бот просто
+    Идёт ПО ЦЕПОЧКЕ `PROACTIVE_MEDIA_CHAIN`, мышление на максимуме, мысли в
+    ответ не запрашиваются и на всякий случай отбрасываются (`_native_text_only`).
+
+    Возвращает текст расшифровки или пустую строку, если не ответила ни одна
+    модель цепочки. Провал НЕ ломает проактивную проверку — тогда бот просто
     не отреагирует на голосовое (как и раньше).
     """
-    try:
-        # Промпт впереди файла — как у фото и видео (тот же ключ настроек).
-        parts = []
-        media_prompt = hist.get_proactive_media_prompt()
-        if media_prompt:
-            parts.append({"text": media_prompt})
-        parts.append({"inlineData": {"mimeType": "audio/ogg", "data": audio_base64}})
-        payload = {"contents": [{"role": "user", "parts": parts}]}
-        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent"
-        start = time.perf_counter()
-        response = _http().post(
-            url,
-            json=payload,
-            headers={"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY},
-            timeout=30,
-        )
-        response.raise_for_status()
-        data = response.json()
-        elapsed = time.perf_counter() - start
-        text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-        logger.info("🤖 Ответ от gemini-3.1-flash-lite за %.1f с (расшифровка аудио для proactive)", elapsed)
-        return text
-    except Exception as e:
-        logger.debug("🤖 Не удалось расшифровать голосовое для проактивной проверки: %s", e)
-        return ""
+    # Промпт впереди файла — как у фото и видео (тот же ключ настроек).
+    parts = []
+    media_prompt = hist.get_proactive_media_prompt()
+    if media_prompt:
+        parts.append({"text": media_prompt})
+    parts.append({"inlineData": {"mimeType": "audio/ogg", "data": audio_base64}})
+
+    for model_name in PROACTIVE_MEDIA_CHAIN:
+        try:
+            payload = {
+                "contents": [{"role": "user", "parts": parts}],
+                "generationConfig": _media_thinking_native(),
+            }
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+            start = time.perf_counter()
+            response = _http().post(
+                url,
+                json=payload,
+                headers={"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY},
+                timeout=30,
+            )
+            response.raise_for_status()
+            data = response.json()
+            elapsed = time.perf_counter() - start
+            text = _native_text_only(data)
+            if not text:
+                logger.warning("🤖 %s вернула пустую расшифровку — пробую следующую", model_name)
+                continue
+            logger.info("🤖 Ответ от %s за %.1f с (расшифровка аудио для proactive)", model_name, elapsed)
+            return text
+        except Exception as e:
+            logger.warning("🤖 %s не расшифровала голосовое для проактивной проверки: %s", model_name, e)
+    logger.error("⚠️ 🤖 Голосовое для проактивной проверки не расшифровала НИ ОДНА модель цепочки")
+    return ""
 
 
 def _proactive_describe_video(video_base64: str, mime_type: str = "video/mp4") -> str:
@@ -300,34 +363,52 @@ def _proactive_describe_video(video_base64: str, mime_type: str = "video/mp4") -
     пересказ ролика только зашумит контекст. Не задан промпт — уходит голый
     файл. Таймаут больше, чем у фото и аудио: разбор видео дольше.
 
-    Возвращает описание или пустую строку при любой ошибке — сбой разбора
-    НЕ ломает проактивную проверку, бот просто не отреагирует на видео.
+    Идёт ПО ЦЕПОЧКЕ `PROACTIVE_MEDIA_CHAIN`, мышление на максимуме, мысли не
+    показываются и отбрасываются (`_native_text_only`).
+
+    Возвращает описание или пустую строку, если не ответила ни одна модель —
+    сбой НЕ ломает проактивную проверку, бот просто не отреагирует на видео.
+
+    ⚠️ ХУДШИЙ СЛУЧАЙ ПО ВРЕМЕНИ ЗДЕСЬ САМЫЙ ДОЛГИЙ: таймаут 90 секунд на
+    модель, в цепочке их четыре — при полном отказе Google перебор займёт до
+    шести минут. Проверка идёт фоновой задачей и никого не блокирует, но
+    реплика к тому времени уже никому не нужна. Станет мешать — резать надо
+    цепочку для видео, а не общий таймаут: 90 секунд ролику нужны честно.
     """
-    try:
-        # Промпт впереди файла — как у фото и голосового (тот же ключ настроек).
-        parts = []
-        media_prompt = hist.get_proactive_media_prompt()
-        if media_prompt:
-            parts.append({"text": media_prompt})
-        parts.append({"inlineData": {"mimeType": mime_type, "data": video_base64}})
-        payload = {"contents": [{"role": "user", "parts": parts}]}
-        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent"
-        start = time.perf_counter()
-        response = _http().post(
-            url,
-            json=payload,
-            headers={"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY},
-            timeout=90,
-        )
-        response.raise_for_status()
-        data = response.json()
-        elapsed = time.perf_counter() - start
-        text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-        logger.info("🤖 Ответ от gemini-3.1-flash-lite за %.1f с (описание видео для proactive)", elapsed)
-        return text
-    except Exception as e:
-        logger.debug("🤖 Не удалось описать видео для проактивной проверки: %s", e)
-        return ""
+    # Промпт впереди файла — как у фото и голосового (тот же ключ настроек).
+    parts = []
+    media_prompt = hist.get_proactive_media_prompt()
+    if media_prompt:
+        parts.append({"text": media_prompt})
+    parts.append({"inlineData": {"mimeType": mime_type, "data": video_base64}})
+
+    for model_name in PROACTIVE_MEDIA_CHAIN:
+        try:
+            payload = {
+                "contents": [{"role": "user", "parts": parts}],
+                "generationConfig": _media_thinking_native(),
+            }
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+            start = time.perf_counter()
+            response = _http().post(
+                url,
+                json=payload,
+                headers={"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY},
+                timeout=90,
+            )
+            response.raise_for_status()
+            data = response.json()
+            elapsed = time.perf_counter() - start
+            text = _native_text_only(data)
+            if not text:
+                logger.warning("🤖 %s вернула пустое описание видео — пробую следующую", model_name)
+                continue
+            logger.info("🤖 Ответ от %s за %.1f с (описание видео для proactive)", model_name, elapsed)
+            return text
+        except Exception as e:
+            logger.warning("🤖 %s не описала видео для проактивной проверки: %s", model_name, e)
+    logger.error("⚠️ 🤖 Видео для проактивной проверки не описала НИ ОДНА модель цепочки")
+    return ""
 
 
 def _openai_stream_request(model_name: str, messages: list, api_url: str,

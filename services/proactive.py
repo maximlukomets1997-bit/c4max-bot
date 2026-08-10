@@ -398,9 +398,14 @@ async def _run_proactive(bot, chat_id: int, trigger_message_id: int, trigger_tex
                     # модель любит отвечать списком, и многострочный разбор
                     # разъезжался бы на несколько мнимых реплик.
                     described = "[" + " ".join(description.split()) + "]"
-                    # Подпись пользователя — ЧЕРЕЗ ПРОБЕЛ, а не с новой строки,
-                    # по той же причине: «Вася: [текст модели] смотрите какой».
-                    enriched_text = f"{described} {trigger_text}" if trigger_text else described
+                    # ⚠️ ПОДПИСЬ ВПЕРЕДИ РАЗБОРА (решение Максима 2026-08-10):
+                    # «Вася: смотрите какой бой [На изображении танк…]». Сначала
+                    # то, что человек написал САМ, потом служебный разбор
+                    # картинки — так строка читается как реплика с приложением,
+                    # а не как машинный текст, к которому приписали пару слов.
+                    # Через пробел, а не с новой строки: одно сообщение — одна
+                    # строка стенограммы.
+                    enriched_text = f"{trigger_text} {described}" if trigger_text else described
             except Exception as e:
                 logger.debug("🤖 Чат %s: не удалось скачать/проанализировать фото: %s", chat_id, e)
 
@@ -441,7 +446,7 @@ async def _run_proactive(bot, chat_id: int, trigger_message_id: int, trigger_tex
                     # (2026-08-10): причина та же, описание ролика — не слова
                     # участника. Подробности у фото выше.
                     described = "[" + " ".join(description.split()) + "]"
-                    enriched_text = f"{described} {trigger_text}" if trigger_text else described
+                    enriched_text = f"{trigger_text} {described}" if trigger_text else described
             except Exception as e:
                 logger.debug("🤖 Чат %s: не удалось скачать/проанализировать видео: %s", chat_id, e)
 
