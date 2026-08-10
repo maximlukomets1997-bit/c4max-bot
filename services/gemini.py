@@ -1765,7 +1765,24 @@ def _build_proactive_parts(chat_id: int, bot_id: int, trigger_text: str,
         is_media = r["has_photo"] or r["has_voice"] or r.get("has_video")
         if not is_media and len(text) > _PROACTIVE_LINE_MAX:
             text = text[:_PROACTIVE_LINE_MAX] + "…"
-        lines.append(f"{name}: {text}")
+
+        # ⚠️ КТО ГОВОРИТ, А КТО ПРИСЛАЛ КАРТИНКУ (2026-08-11, решение Максима
+        # после живого случая). Разбор фото хранится под ником автора, и на
+        # скриншотах с текстом он неотличим от речи: модель прочитала надпись
+        # «Поздравляю! Вы получили VT-4» и в стенограмме это выглядело так,
+        # будто Максим сам это написал. Одних скобок мало — нужна пометка
+        # СНАРУЖИ, в самой строке.
+        #
+        # ⚠️ ГОЛОСОВЫЕ ПОМЕТКИ НЕ ПОЛУЧАЮТ: там расшифровка и ЕСТЬ слова
+        # человека — «Вася прислал голосовое: привет» было бы неправдой, он
+        # именно сказал «привет». Та же логика, по которой голосовые не
+        # оборачиваются в скобки.
+        if r["has_photo"]:
+            lines.append(f"{name} прислал фото: {text}")
+        elif r.get("has_video"):
+            lines.append(f"{name} прислал видео: {text}")
+        else:
+            lines.append(f"{name}: {text}")
         last_row_added = (i == len(rows) - 1)
     if not lines:
         return None
