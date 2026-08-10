@@ -75,6 +75,14 @@ _msgs_since_check: dict[int, int] = {}    # chat_id → новых сообще�
 _last_judge_ts: dict[int, float] = {}     # chat_id → monotonic последней проверки моделью
 _last_reply_ts: dict[int, float] = {}     # chat_id → monotonic последней реплики бота
 _in_flight: set[int] = set()              # чаты с проверкой «в полёте» (защёлка от гонки)
+# ⏱ Сообщение, пришедшее ВО ВРЕМЯ проверки (2026-08-11, решение Максима).
+# Раньше такие просто отсеивались: пока бот полминуты разбирал картинку,
+# в чате успевали написать что угодно — включая прямое оскорбление, на
+# которое он имел право ответить мутом, — и проверка по ним не шла вовсе.
+# Теперь последнее из них ждёт здесь, и сразу после основной проверки бот
+# делает по нему ЕЩЁ ОДНУ, догоняющую. Ровно одну: иначе в живом чате бот
+# гнался бы за собственным хвостом бесконечно.
+_pending: dict[int, tuple] = {}
 
 # ─── счётчик отсева дешёвыми фильтрами (2026-07-31) ──────────────────
 #
@@ -227,6 +235,18 @@ def consider_message(update, context) -> None:
         # Каждый отсев отмечаем в счётчике: порядок проверок НЕ менялся,
         # добавились только строчки _skip(...) — они ничего не читают.
         if chat_id in _in_flight:
+            # ⏱ НЕ ПРОСТО ОТБРАСЫВАЕМ (2026-08-11, решение Максима). Пока идёт
+            # проверка, чат живёт: именно в это окно 11.08 проскочило прямое
+            # оскорбление, на которое бот имел право ответить мутом. Держим
+            # ПОСЛЕДНЕЕ такое сообщение — обёртка _run_proactive прогонит по
+            # нему догоняющую проверку, как только освободится.
+            # ⚠️ Держим именно последнее, а не очередь: догоняющая проверка
+            # читает стенограмму целиком, и всё пропущенное она в ней увидит.
+            # Отсев в счётчике отмечаем по-прежнему — цифры участия честные.
+            if not user.is_bot and not (message.text or "").startswith("/"):
+                _pending[chat_id] = (message.message_id,
+                                     message.text or message.caption or "",
+                                     user.id, *_media_args(message, chat_id))
             _skip("в полёте")
             return
         if user.is_bot:
@@ -264,37 +284,11 @@ def consider_message(update, context) -> None:
         _last_judge_ts[chat_id] = now
         _in_flight.add(chat_id)
 
-        # Инфо о медиа-вложениях: если триггером стало фото, голосовое или видео,
-        # передаём file_id в _run_proactive — она скачает и проанализирует
-        # медиа через vision-/audio-/video-модель ДО вызова ask_group_proactive.
-        has_photo = bool(message.photo)
-        has_voice = bool(message.voice or message.audio)
-        # Видео (2026-07-24) берём ТОЛЬКО в пределах PROACTIVE_VIDEO_MAX_BYTES:
-        # проактив срабатывает на каждое видео в группе, и тяжёлые ролики тут
-        # разбирать незачем (см. комментарий к константе в config.py).
-        # Размер неизвестен (file_size пуст) — считаем, что ролик слишком большой:
-        # лучше пропустить, чем вслепую тянуть 20 МБ на каждой проверке.
-        _video = message.video
-        has_video = bool(_video) and bool(_video.file_size) and _video.file_size <= PROACTIVE_VIDEO_MAX_BYTES
-
-        # ⚠️ ПОЧЕМУ ПРОПУСТИЛИ — ГОВОРИМ ВСЛУХ (2026-08-10, после живого теста
-        # Максима: он прислал ролик на 24 МБ, бот молча его не заметил, и в
-        # логе стояло только «триггер пуст после анализа медиа»). Отказ без
-        # причины неотличим от поломки — а тут отказ штатный.
-        if _video and not has_video:
-            if not _video.file_size:
-                logger.info("🤖 Чат %s: Telegram не сообщил размер видео — разбор пропущен "
-                            "(тянуть вслепую до 20 МБ на каждой проверке незачем)", chat_id)
-            else:
-                logger.info("🤖 Чат %s: видео %.1f МБ больше потолка %.0f МБ — разбор пропущен. "
-                            "Выше не поднять: столько отдаёт ботам сам Telegram",
-                            chat_id,
-                            _video.file_size / (1024 * 1024),
-                            PROACTIVE_VIDEO_MAX_BYTES / (1024 * 1024))
-        photo_file_id = message.photo[-1].file_id if has_photo else None
-        voice_file_id = (message.voice or message.audio).file_id if has_voice else None
-        video_file_id = _video.file_id if has_video else None
-        video_mime = (_video.mime_type or "video/mp4") if has_video else "video/mp4"
+        # Инфо о медиа-вложениях собирает _media_args (2026-08-11 вынесено в
+        # функцию: тот же сбор нужен очереди пропущенных сообщений, а два
+        # одинаковых куска кода неизбежно разъедутся).
+        (has_photo, photo_file_id, has_voice, voice_file_id,
+         has_video, video_file_id, video_mime) = _media_args(message, chat_id)
 
         try:
             context.application.create_task(
@@ -309,7 +303,68 @@ def consider_message(update, context) -> None:
         logger.debug("🤖 Ошибка проактивной проверки: %s", e)
 
 
-async def _run_proactive(bot, chat_id: int, trigger_message_id: int, trigger_text: str,
+def _media_args(message, chat_id: int) -> tuple:
+    """
+    Что за вложение пришло и какие file_id отдавать проверке.
+    Вынесено из consider_message 2026-08-11 — тем же кодом пользуется очередь
+    пропущенных сообщений (_pending), иначе сбор пришлось бы дублировать.
+    """
+    has_photo = bool(message.photo)
+    has_voice = bool(message.voice or message.audio)
+    # Видео (2026-07-24) берём ТОЛЬКО в пределах PROACTIVE_VIDEO_MAX_BYTES:
+    # проактив срабатывает на каждое видео в группе, и тяжёлые ролики тут
+    # разбирать незачем (см. комментарий к константе в config.py).
+    # Размер неизвестен (file_size пуст) — считаем, что ролик слишком большой:
+    # лучше пропустить, чем вслепую тянуть 20 МБ на каждой проверке.
+    _video = message.video
+    has_video = bool(_video) and bool(_video.file_size) and _video.file_size <= PROACTIVE_VIDEO_MAX_BYTES
+
+    # ⚠️ ПОЧЕМУ ПРОПУСТИЛИ — ГОВОРИМ ВСЛУХ (2026-08-10, после живого теста
+    # Максима: он прислал ролик на 24 МБ, бот молча его не заметил, и в
+    # логе стояло только «триггер пуст после анализа медиа»). Отказ без
+    # причины неотличим от поломки — а тут отказ штатный.
+    if _video and not has_video:
+        if not _video.file_size:
+            logger.info("🤖 Чат %s: Telegram не сообщил размер видео — разбор пропущен "
+                        "(тянуть вслепую до 20 МБ на каждой проверке незачем)", chat_id)
+        else:
+            logger.info("🤖 Чат %s: видео %.1f МБ больше потолка %.0f МБ — разбор пропущен. "
+                        "Выше не поднять: столько отдаёт ботам сам Telegram",
+                        chat_id,
+                        _video.file_size / (1024 * 1024),
+                        PROACTIVE_VIDEO_MAX_BYTES / (1024 * 1024))
+    photo_file_id = message.photo[-1].file_id if has_photo else None
+    voice_file_id = (message.voice or message.audio).file_id if has_voice else None
+    video_file_id = _video.file_id if has_video else None
+    video_mime = (_video.mime_type or "video/mp4") if has_video else "video/mp4"
+    return (has_photo, photo_file_id, has_voice, voice_file_id,
+            has_video, video_file_id, video_mime)
+
+
+async def _run_proactive(bot, chat_id: int, *args):
+    """
+    Обёртка: основная проверка, следом — ОДНА догоняющая, если во время
+    основной в чате успели написать (2026-08-11, решение Максима).
+
+    ⚠️ Защёлка `_in_flight` снимается ЗДЕСЬ и только здесь — она держится и на
+    время догоняющей, иначе третья проверка влезла бы посередине.
+    ⚠️ Догоняющая ровно одна и сама догоняющих не порождает: `_pending` для
+    этого чата снимается перед её запуском и очищается в конце в любом случае.
+    """
+    try:
+        await _run_proactive_once(bot, chat_id, *args)
+        pending = _pending.pop(chat_id, None)
+        if pending:
+            logger.info("🤖 Чат %s: во время проверки писали — догоняющая проверка", chat_id)
+            await _run_proactive_once(bot, chat_id, *pending)
+    except Exception as e:
+        logger.warning("⚠️ Проактивная проверка сорвалась (чат %s): %s", chat_id, e)
+    finally:
+        _in_flight.discard(chat_id)
+        _pending.pop(chat_id, None)
+
+
+async def _run_proactive_once(bot, chat_id: int, trigger_message_id: int, trigger_text: str,
                          trigger_user_id: int | None = None,
                          has_photo: bool = False, photo_file_id: str | None = None,
                          has_voice: bool = False, voice_file_id: str | None = None,
@@ -549,5 +604,5 @@ async def _run_proactive(bot, chat_id: int, trigger_message_id: int, trigger_tex
     except Exception as e:
         logger.warning("⚠️ Не удалось выполнить проактивную проверку (чат %s): %s", chat_id, e)
         _note("error")
-    finally:
-        _in_flight.discard(chat_id)
+    # ⚠️ Защёлку снимает ОБЁРТКА `_run_proactive` — здесь её трогать нельзя:
+    # между основной и догоняющей проверкой чат обязан оставаться занятым.

@@ -258,6 +258,28 @@ def _media_thinking_native() -> dict:
                                "thinkingLevel": _MEDIA_THINKING_LEVEL}}
 
 
+def _media_answer_thinking() -> dict:
+    """
+    Мышление для ОТВЕТА на медиа в группе — верхняя ступень (2026-08-11,
+    решение Максима). Здесь модель не описывает картинку, а решает, вступать
+    ли в чужой разговор, и пишет реплику от лица бота: думать есть о чём.
+
+    ⚠️ Отдельно от `_native_thinking_config`, которой пользуются обычные ответы
+    на аудио и видео: там до сих пор `thinkingBudget: -1` — параметр 2.5-й
+    серии, означающий «думай сколько сочтёшь нужным». Здесь явный
+    `thinkingLevel: "high"` — по живому замеру 11.08 это ~855 токенов мыслей
+    против ~672 у динамического (gemini-3.6-flash, 3 прогона).
+
+    ⚠️ Мысли ЗАПРАШИВАЮТСЯ (в отличие от разбора): реплика уходит человеку
+    через send_formatted, который показывает их свёрнутой цитатой.
+
+    ⚠️ ЦЕНА: ответ стал думать дольше, а пока идёт проверка, сообщения чата
+    отсеиваются защёлкой `_in_flight`. Это и есть причина, по которой вместе
+    с этой правкой заведена догоняющая проверка (services/proactive.py).
+    """
+    return {"thinkingConfig": {"includeThoughts": True, "thinkingLevel": "high"}}
+
+
 def _media_thinking_openai() -> dict:
     """То же для OpenAI-совместимого пути (фото): формат у Google другой."""
     return {"google": {"thinking_config": {"include_thoughts": False,
@@ -1857,9 +1879,7 @@ def ask_group_proactive_media(chat_id: int, bot_id: int, trigger_text: str,
             continue
         try:
             req = dict(base)
-            thinking = _native_thinking_config(model_name)
-            if thinking:
-                req["generationConfig"] = thinking
+            req["generationConfig"] = _media_answer_thinking()
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
             logger.info("🤖 Запрос к модели %s (проактивный ответ на %s)", model_name, kind)
             start = time.perf_counter()
