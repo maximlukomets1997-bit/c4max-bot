@@ -237,14 +237,67 @@ def _native_text_only(data: dict) -> str:
     return "".join(texts).strip()
 
 
+#  ⚠️ РАЗБОРУ МЫШЛЕНИЕ НЕ НУЖНО (2026-08-11, решение Максима). Сутки до этого
+#  здесь стоял «максимум» — и он стоил 9 секунд на КАЖДОЕ фото: разбор не
+#  рассуждает, он описывает, что видит. Из-за этих секунд проактивная проверка
+#  растягивалась за полминуты, а всё, что люди писали в чат за это время,
+#  отсеивалось защёлкой `_in_flight` — бот пропустил прямое оскорбление,
+#  потому что «был занят» разбором картинки.
+#
+#  ⚠️ Уровень называется `thinkingLevel` (minimal / low / medium / high) — это
+#  параметр ПОКОЛЕНИЯ GEMINI 3. Прежний `thinkingBudget: -1` — из 2.5-й серии;
+#  он работает (живой замер 11.08: с ним мысли есть, с `minimal` их ровно 0),
+#  но означает «думай сколько сочтёшь нужным», а не максимум. Мышление ОТВЕТА
+#  (`ask_group_proactive_media`) при этом не трогаем — там оно по делу.
+_MEDIA_THINKING_LEVEL = "minimal"
+
+
 def _media_thinking_native() -> dict:
-    """Максимальное мышление для нативных запросов (аудио, видео), без показа мыслей."""
-    return {"thinkingConfig": {"includeThoughts": False, "thinkingBudget": -1}}
+    """Настройка мышления для разбора медиа (аудио, видео) — нативный формат."""
+    return {"thinkingConfig": {"includeThoughts": False,
+                               "thinkingLevel": _MEDIA_THINKING_LEVEL}}
 
 
 def _media_thinking_openai() -> dict:
     """То же для OpenAI-совместимого пути (фото): формат у Google другой."""
-    return {"google": {"thinking_config": {"include_thoughts": False, "thinking_budget": -1}}}
+    return {"google": {"thinking_config": {"include_thoughts": False,
+                                           "thinking_level": _MEDIA_THINKING_LEVEL}}}
+
+
+# ── Модель, исчерпавшая квоту, уходит на скамейку ────────────────────────
+#
+#  ⚠️ 2026-08-11 (решение Максима). У `gemini-3.5-flash` кончилась квота, и
+#  бот стучался в неё на КАЖДОМ медиа: сначала в разборе, потом в ответе.
+#  Каждая попытка — впустую потраченное время в чужом чате, где счёт идёт на
+#  секунды. Теперь модель, вернувшая 429, пропускается следующие
+#  `_QUOTA_COOLDOWN_SEC`, и цепочка сразу идёт к живой.
+#
+#  ⚠️ В памяти процесса, как счётчики антиспама: перезапуск обнуляет — и это
+#  правильно, квоты Google к тому времени могли и восстановиться.
+#  ⚠️ Касается ТОЛЬКО цепочки разбора и проактивного ответа на медиа. Обычные
+#  пути (ask_gemini / аудио / видео при прямом обращении) не тронуты: там свои
+#  фолбэки и уведомления админам, и лезть туда этой правкой не просили.
+_QUOTA_COOLDOWN_SEC = 600
+_quota_blocked: dict[str, float] = {}
+
+
+def _quota_blocked_now(model_name: str) -> bool:
+    """Стоит ли пропустить модель: она недавно ответила «квота исчерпана»."""
+    return _quota_blocked.get(model_name, 0.0) > time.monotonic()
+
+
+def _note_quota_error(model_name: str, err: Exception) -> bool:
+    """
+    True, если ошибка — это 429 (квота). Тогда модель отправляется на скамейку.
+    Проверяем по тексту ошибки: requests отдаёт HTTPError со строкой вида
+    «429 Client Error: Too Many Requests for url: …».
+    """
+    if "429" not in str(err):
+        return False
+    _quota_blocked[model_name] = time.monotonic() + _QUOTA_COOLDOWN_SEC
+    logger.warning("🤖 %s исчерпала квоту — не трогаем её %d минут",
+                   model_name, _QUOTA_COOLDOWN_SEC // 60)
+    return True
 
 
 def _proactive_describe_image(image_base64: str) -> str:
@@ -270,6 +323,8 @@ def _proactive_describe_image(image_base64: str) -> str:
                     "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}})
 
     for model_name in PROACTIVE_MEDIA_CHAIN:
+        if _quota_blocked_now(model_name):
+            continue          # недавно вернула 429 — не тратим время
         try:
             payload = {
                 "model": model_name,
@@ -299,7 +354,8 @@ def _proactive_describe_image(image_base64: str) -> str:
         except Exception as e:
             # ⚠️ warning, а не debug (2026-08-10): молчаливый сбой разбора
             # выглядит как «бот проигнорировал сообщение» и не находится в логе.
-            logger.warning("🤖 %s не описала фото для проактивной проверки: %s", model_name, e)
+            if not _note_quota_error(model_name, e):
+                logger.warning("🤖 %s не описала фото для проактивной проверки: %s", model_name, e)
     logger.error("⚠️ 🤖 Фото для проактивной проверки не описала НИ ОДНА модель цепочки")
     return ""
 
@@ -325,6 +381,8 @@ def _proactive_transcribe_audio(audio_base64: str) -> str:
     parts.append({"inlineData": {"mimeType": "audio/ogg", "data": audio_base64}})
 
     for model_name in PROACTIVE_MEDIA_CHAIN:
+        if _quota_blocked_now(model_name):
+            continue          # недавно вернула 429 — не тратим время
         try:
             payload = {
                 "contents": [{"role": "user", "parts": parts}],
@@ -349,7 +407,8 @@ def _proactive_transcribe_audio(audio_base64: str) -> str:
             logger.info("🤖 Ответ от %s за %.1f с (расшифровка аудио для proactive)", model_name, elapsed)
             return text
         except Exception as e:
-            logger.warning("🤖 %s не расшифровала голосовое для проактивной проверки: %s", model_name, e)
+            if not _note_quota_error(model_name, e):
+                logger.warning("🤖 %s не расшифровала голосовое для проактивной проверки: %s", model_name, e)
     logger.error("⚠️ 🤖 Голосовое для проактивной проверки не расшифровала НИ ОДНА модель цепочки")
     return ""
 
@@ -385,6 +444,8 @@ def _proactive_describe_video(video_base64: str, mime_type: str = "video/mp4") -
     parts.append({"inlineData": {"mimeType": mime_type, "data": video_base64}})
 
     for model_name in PROACTIVE_MEDIA_CHAIN:
+        if _quota_blocked_now(model_name):
+            continue          # недавно вернула 429 — не тратим время
         try:
             payload = {
                 "contents": [{"role": "user", "parts": parts}],
@@ -409,7 +470,8 @@ def _proactive_describe_video(video_base64: str, mime_type: str = "video/mp4") -
             logger.info("🤖 Ответ от %s за %.1f с (описание видео для proactive)", model_name, elapsed)
             return text
         except Exception as e:
-            logger.warning("🤖 %s не описала видео для проактивной проверки: %s", model_name, e)
+            if not _note_quota_error(model_name, e):
+                logger.warning("🤖 %s не описала видео для проактивной проверки: %s", model_name, e)
     logger.error("⚠️ 🤖 Видео для проактивной проверки не описала НИ ОДНА модель цепочки")
     return ""
 
@@ -1787,6 +1849,8 @@ def ask_group_proactive_media(chat_id: int, bot_id: int, trigger_text: str,
     timeout = VIDEO_TIMEOUT if kind == "видео" else 90
 
     for model_name in PROACTIVE_MEDIA_CHAIN:
+        if _quota_blocked_now(model_name):
+            continue          # недавно вернула 429 — не тратим время
         if kind == "видео" and not _supports_video(model_name):
             continue
         if kind == "фото" and not _supports_vision(model_name):
@@ -1830,8 +1894,9 @@ def ask_group_proactive_media(chat_id: int, bot_id: int, trigger_text: str,
                 return ""
             return answer
         except Exception as e:
-            logger.warning("🤖 %s не ответила на %s в проактивной проверке: %s",
-                           model_name, kind, e)
+            if not _note_quota_error(model_name, e):
+                logger.warning("🤖 %s не ответила на %s в проактивной проверке: %s",
+                               model_name, kind, e)
     logger.error("⚠️ 🤖 Проактивный ответ на %s не дала НИ ОДНА модель цепочки — "
                  "уходим на активную модель по стенограмме", kind)
     return None
