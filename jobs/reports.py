@@ -191,24 +191,13 @@ async def weekly_group_digest(application) -> bool:
 
 
 # ───────────────────────────────────────────────
-#  💾 Ночная копия базы (2026-07-31, с 2026-08-10 — в облако)
+#  💾 Ночная копия базы (2026-07-31)
 # ───────────────────────────────────────────────
 
 async def nightly_backup(application) -> bool:
     """
-    Раз в сутки делает копию history.db, увозит её В ОБЛАКО (Google Drive) и
-    присылает владельцу короткую строчку-доклад. Возвращает True, если копия в
-    эту ночь была сделана.
-
-    ⚠️ ДО 2026-08-10 сюда же уходил САМ ФАЙЛ, каждую ночь. Заменено на облако
-    по решению Максима: файл забивал переписку, а взять его в руки можно
-    кнопкой «💾 Копия базы» в /adm в любой момент. Доклад одной строкой
-    оставлен намеренно — молчаливая копия однажды окажется несделанной, и
-    узнают об этом в худший из дней.
-
-    ⚠️ ЗАПАСНОЙ ПУТЬ: облако не настроено или не приняло файл — бот шлёт файл
-    в личку, как раньше, и честно пишет почему. Ночь без копии вне сервера —
-    то, чего эта затея не должна допускать ни при каком раскладе.
+    Раз в сутки делает копию history.db и отправляет её ВЛАДЕЛЬЦУ в личку.
+    Возвращает True, если копия в эту ночь была сделана.
 
     ⚠️ ЖИВЁТ ВНУТРИ ЦИКЛА СУТОЧНОГО ОТЧЁТА, а не своим циклом, и это
     осознанно. Во-первых, порядок: Максим выбрал получать копию СЛЕДОМ за
@@ -222,133 +211,30 @@ async def nightly_backup(application) -> bool:
     что условие отправки отчёта тут не годится: отчёт мог не уйти вовсе,
     а копия нужна всё равно.
 
-    Работа с диском (снимок + сжатие) и с сетью (загрузка в облако) уходит в
-    отдельный поток: она тяжёлая по меркам бота, и на её время он не должен
-    переставать отвечать людям.
+    Работа с диском (снимок + сжатие) уходит в отдельный поток: она тяжёлая
+    по меркам бота, и на её время он не должен переставать отвечать людям.
     """
-    from services import backup, cloud_backup
+    from telegram.constants import ParseMode
+    from config import ADMIN_IDS
+    from services import backup
 
     if not backup.due_today():
         return False
 
     loop = asyncio.get_running_loop()
     path, size = await loop.run_in_executor(None, backup.make_backup)
-    name = os.path.basename(path)
-
-    # ── Увозим в облако ────────────────────────────────────────────────────
-    # Пустая строка здесь означает «доехало». Всё остальное — причина, по
-    # которой придётся будить владельца файлом.
-    if not await loop.run_in_executor(None, cloud_backup.configured):
-        trouble = "облако ещё не подключено"
-    else:
-        trouble = ""
-        try:
-            await loop.run_in_executor(None, cloud_backup.upload, path)
-        except Exception as e:
-            trouble = str(e)
-            logger.error("⚠️ ☁️ Ночная копия базы не уехала в облако: %s", e)
-
-    if trouble:
-        delivered = await _send_backup_file(application, path, name, size, trouble)
-    else:
-        delivered = await _report_backup_in_cloud(application, name, size)
-
-    if delivered:
-        # Метку ставим ТОЛЬКО после удачной доставки: не дошло — на следующем
-        # круге (через час) попробуем снова, а не махнём рукой до завтра.
-        # То же правило, что у тревоги сторожа 2026-07-27.
-        backup.note_done()
-    else:
-        logger.error("⚠️ Копия базы сделана (%s), но доложить о ней НЕ удалось "
-                     "ни одному владельцу", name)
-    return True
-
-
-def _backup_day(name: str) -> str:
-    """
-    День копии из её имени человеческими словами: «10.08».
-    Берём из ИМЕНИ ФАЙЛА, а не из текущего времени: доклад должен называть тот
-    же день, что написан на файле, даже если копию досылают после простоя.
-    """
-    try:
-        stamp = name.split("history-", 1)[1].split("_", 1)[0]   # 2026-08-10
-        year, month, day = stamp.split("-")
-        return f"{day}.{month}"
-    except Exception:
-        return ""
-
-
-async def _report_backup_in_cloud(application, name: str, size: int) -> int:
-    """
-    Копия уехала — короткий доклад владельцу. Возвращает, скольким дошло.
-
-    ⚠️ БЕЗ register_and_clean_bot_message: панели затирают друг друга, а это
-    история — по ней видно, что копии делались каждую ночь.
-    """
-    from telegram.constants import ParseMode
-    from config import ADMIN_IDS
-    from services import backup, cloud_backup
-
-    loop = asyncio.get_running_loop()
-    in_cloud = await loop.run_in_executor(None, cloud_backup.count)
-    day = _backup_day(name)
-
-    text = (
-        f"☁️ <b>Копия базы{f' за {day}' if day else ''} — в Google Drive</b>\n"
-        f"<code>{html.escape(name)}</code> · {backup.human_size(size)}"
-        + (f" · в облаке: {in_cloud}" if in_cloud else "")
-    )
-
-    delivered = 0
-    for admin_id in ADMIN_IDS:
-        try:
-            await application.bot.send_message(
-                chat_id=admin_id, text=text, parse_mode=ParseMode.HTML,
-            )
-            delivered += 1
-        except Exception as e:
-            logger.warning("⚠️ Не удалось доложить о копии базы владельцу %s: %s", admin_id, e)
-
-    if delivered:
-        logger.info("☁️ Ночная копия базы в облаке: %s (%s), всего копий там: %s",
-                    name, backup.human_size(size), in_cloud if in_cloud else "?")
-    return delivered
-
-
-async def _send_backup_file(application, path: str, name: str, size: int, trouble: str) -> int:
-    """
-    Запасной путь: облака нет или оно не приняло файл — шлём САМ ФАЙЛ в личку,
-    как делали до 2026-08-10. Возвращает, скольким дошло.
-
-    Молчать тут нельзя ни в коем случае: копия за эту ночь существует в
-    единственном месте — на сервере, ради переживания смерти которого всё и
-    затевалось. Пока облако не подключено, это штатный режим работы, поэтому
-    формулировка спокойная; когда облако есть, но отказало, — это тревога.
-    """
-    from telegram.constants import ParseMode
-    from config import ADMIN_IDS
-    from services import backup, cloud_backup
 
     with open(path, "rb") as f:
         blob = f.read()
+    name = os.path.basename(path)
 
-    known_trouble = trouble == "облако ещё не подключено"
-    if known_trouble:
-        caption = (
-            f"💾 <b>Копия базы бота</b>\n"
-            f"<code>{html.escape(name)}</code> · {backup.human_size(size)}\n"
-            f"<i>Google Drive пока не подключён, поэтому файл приходит сюда, как "
-            f"раньше. Сохрани у себя: в ней промпты, настройки, счета и квоты, "
-            f"личные дела, звания и журналы — всего этого нет на GitHub.</i>"
-        )
-    else:
-        caption = (
-            f"⚠️ <b>Копия базы НЕ уехала в облако</b>\n"
-            f"<code>{html.escape(name)}</code> · {backup.human_size(size)}\n"
-            f"Причина: <code>{html.escape(trouble[:300])}</code>\n"
-            f"<i>Файл здесь — сохрани его у себя: вне сервера другой копии за "
-            f"эту ночь нет. Папка в облаке: {html.escape(cloud_backup.folder_human())}.</i>"
-        )
+    caption = (
+        f"💾 <b>Копия базы бота</b>\n"
+        f"<code>{html.escape(name)}</code> · {backup.human_size(size)}\n"
+        f"<i>Сохрани у себя: в ней промпты, настройки, счета и квоты, личные "
+        f"дела, звания и журналы — всего этого нет на GitHub. Если сервер "
+        f"пропадёт, восстановиться можно только отсюда.</i>"
+    )
 
     # ⚠️ БЕЗ register_and_clean_bot_message и БЕЗ schedule_delete. Панели
     # затирают друг друга, файлы логов самоудаляются через минуту — здесь
@@ -366,6 +252,12 @@ async def _send_backup_file(application, path: str, name: str, size: int, troubl
             logger.warning("⚠️ Не удалось отправить копию базы владельцу %s: %s", admin_id, e)
 
     if delivered:
-        logger.info("💾 Ночная копия базы отправлена файлом в личку (%s): %s (%s)",
-                    trouble, name, backup.human_size(size))
-    return delivered
+        # Метку ставим ТОЛЬКО после удачной доставки: не дошло — на следующем
+        # круге (через час) попробуем снова, а не махнём рукой до завтра.
+        # То же правило, что у тревоги сторожа 2026-07-27.
+        backup.note_done()
+        logger.info("💾 Ночная копия базы отправлена владельцу: %s (%s)",
+                    name, backup.human_size(size))
+    else:
+        logger.error("⚠️ Копия базы сделана (%s), но НЕ доставлена ни одному владельцу", name)
+    return True
