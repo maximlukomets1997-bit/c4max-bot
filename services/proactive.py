@@ -450,6 +450,22 @@ async def _run_proactive(bot, chat_id: int, trigger_message_id: int, trigger_tex
             except Exception as e:
                 logger.debug("🤖 Чат %s: не удалось скачать/проанализировать видео: %s", chat_id, e)
 
+        # ⚠️ РАЗБОР ОСЕДАЕТ В АРХИВЕ ГРУППЫ (2026-08-10, просьба Максима «в
+        # стенограмме модель должна ВСЕГДА видеть дословную расшифровку, а не
+        # [голосовое]»). До этого разбор жил только в памяти одной проверки:
+        # стенограмма подставляла его ТОЛЬКО последнему сообщению, а всё, что
+        # уехало вглубь истории, снова превращалось в «[голосовое]» и «[фото]»
+        # — модель забывала, о чём был разговор двумя репликами выше.
+        # Пишем ровно то, что уходит модели сейчас (подпись + разбор), чтобы
+        # стенограмма читалась одинаково и в момент триггера, и потом.
+        # «Тихо»: не смогли записать — проверка всё равно идёт своим ходом.
+        if enriched_text.strip() and enriched_text != trigger_text:
+            try:
+                from database.history import update_last_group_message_text
+                update_last_group_message_text(chat_id, trigger_user_id, enriched_text)
+            except Exception as e:
+                logger.debug("🤖 Чат %s: не удалось сохранить разбор медиа в архив: %s", chat_id, e)
+
         if not enriched_text.strip():
             logger.info("🤖 Чат %s: триггер пуст после анализа медиа — пропускаем", chat_id)
             return

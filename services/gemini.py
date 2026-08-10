@@ -1561,7 +1561,12 @@ def _build_proactive_parts(chat_id: int, bot_id: int, trigger_text: str,
 
     # ── Стенограмма беседы: «Имя: текст», свои реплики бота — «Ты: …» ──
     lines = []
-    for r in rows:
+    # Попала ли в стенограмму строка САМОГО ПОСЛЕДНЕГО сообщения. Нужно
+    # подстановке triggerText ниже: с 2026-08-10 строка может и не попасть
+    # (видео без разбора, команда боту), и тогда lines[-1] — ЧУЖАЯ реплика,
+    # которую подстановка молча затёрла бы разбором чужого медиа.
+    last_row_added = False
+    for i, r in enumerate(rows):
         if r["user_id"] == bot_id:
             name = "Ты"
         else:
@@ -1581,17 +1586,32 @@ def _build_proactive_parts(chat_id: int, bot_id: int, trigger_text: str,
         # /stats и запасного источника имён в /users.
         if text.startswith("/"):
             continue
+        # ⚠️ ПОМЕТКА СТАВИТСЯ, ТОЛЬКО ЕСЛИ РАЗБОРА НЕТ (2026-08-10). Разбор
+        # медиа теперь оседает в архиве (proactive.py → update_last_group_message_text),
+        # поэтому у расшифрованного голосового в text лежат САМИ СЛОВА, и
+        # приписывать к ним «[голосовое]» больше не нужно — Максим просил,
+        # чтобы модель всегда видела дословную расшифровку, а не пометку.
+        # У нерасшифрованного пометка остаётся: пусть модель знает, что
+        # человек прислал голосовое, даже если разобрать его не вышло.
         if r["has_voice"]:
-            text = f"[голосовое] {text}".strip()
+            if not text:
+                text = "[голосовое]"
         elif r["has_photo"]:
-            text = f"[фото] {text}".strip()
+            text = text if text else "[фото]"
         elif r.get("has_video"):
-            text = f"[видео] {text}".strip()
+            # ⚠️ ВИДЕО БЕЗ РАЗБОРА В СТЕНОГРАММУ НЕ ПОПАДАЕТ ВОВСЕ (решение
+            # Максима 2026-08-10). Ролики тяжелее 20 МБ бот скачать не может
+            # (предел Telegram) и не разбирает — строка «[видео]» без единого
+            # слова о содержимом модели ничего не даёт, только сбивает: она
+            # видит «участник что-то прислал» и пытается это обсуждать.
+            # Пустая строка ниже отсеется общим `if not text: continue`.
+            pass
         if not text:
             continue
         if len(text) > _PROACTIVE_LINE_MAX:
             text = text[:_PROACTIVE_LINE_MAX] + "…"
         lines.append(f"{name}: {text}")
+        last_row_added = (i == len(rows) - 1)
     if not lines:
         return None
 
@@ -1608,7 +1628,13 @@ def _build_proactive_parts(chat_id: int, bot_id: int, trigger_text: str,
     # модели]» (обёртку ставит services/proactive.py, там же написано почему: без неё
     # бот принимал машинный разбор за речь человека и отвечал шуткой про
     # робота, чем раздражал людей). Снимешь обёртку там — вернёшь и шутки.
-    if trigger_text and rows:
+    #
+    # ⚠️ С 2026-08-10 подстановка нужна РЕДКО: разбор оседает в архиве сразу
+    # после анализа (proactive.py), поэтому текст обычно уже приходит из БД.
+    # Осталась как страховка на случай, когда записать в архив не удалось.
+    # `last_row_added` обязателен: без него подстановка затирала бы ЧУЖУЮ
+    # последнюю строку, если строка самого триггера в стенограмму не попала.
+    if trigger_text and rows and last_row_added:
         last_row = rows[-1]
         if (last_row.get("has_voice") or last_row.get("has_photo")
                 or last_row.get("has_video")) and not (last_row.get("text") or "").strip():
