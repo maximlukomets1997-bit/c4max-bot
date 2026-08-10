@@ -990,17 +990,15 @@ def ask_gemini_audio(chat_id: int, user_id: int, audio_base64: str) -> str:
     # на него отвечать, ей объясняет характер бота (systemInstruction ниже).
     # Не возвращать без его просьбы.
     #
-    # ⚠️ 2026-08-10: ЕДИНСТВЕННЫЕ слова, какие тут допустимы, — промпт разбора
-    # медиа из настроек (просьба Максима «медиа-промпт должен участвовать и в
-    # личных разговорах»). Тот же промпт, что в режиме «Сам в разговор»: до
-    # этого в группе голосовые разбирались по правилам, а в личке — как
-    # придётся. Идёт ПЕРЕД файлом: инструкция читается до содержимого.
-    _voice_parts = []
-    _media_prompt = hist.get_proactive_media_prompt()
-    if _media_prompt:
-        _voice_parts.append({"text": _media_prompt})
-    _voice_parts.append({"inlineData": {"mimeType": "audio/ogg", "data": audio_base64}})
-    native_history.append({"role": "user", "parts": _voice_parts})
+    # ⚠️ ПРОМПТ РАЗБОРА МЕДИА СЮДА НЕ ДОБАВЛЯТЬ: 2026-08-10 его сюда завели по
+    # просьбе Максима и в тот же день откатили по его же решению — он написан
+    # для стенограммы, и в личке бот вместо ответа зачитывал пересказ.
+    native_history.append({
+        "role": "user",
+        "parts": [
+            {"inlineData": {"mimeType": "audio/ogg", "data": audio_base64}}
+        ]
+    })
 
     payload = {
         "contents": native_history,
@@ -1150,15 +1148,10 @@ def ask_gemini_video(chat_id: int, user_id: int, video_base64: str,
     # Без подписи текстовой части в запросе просто нет, остаётся сам файл;
     # что с ним делать, модели объясняет характер бота (systemInstruction ниже).
     # Не возвращать заготовку без просьбы Максима.
-    # ⚠️ 2026-08-10: перед подписью идёт промпт разбора медиа из настроек —
-    # тот же, что в режиме «Сам в разговор» (просьба Максима «медиа-промпт
-    # должен участвовать и в личных разговорах»). Сначала инструкция, потом
-    # слова человека, потом файл.
+    # ⚠️ ПРОМПТ РАЗБОРА МЕДИА СЮДА НЕ ДОБАВЛЯТЬ: заведён и откачен 2026-08-10
+    # (см. ask_gemini / ask_gemini_audio — там та же пометка и причина).
     caption = (user_text or "").strip()
     video_parts = []
-    media_prompt = hist.get_proactive_media_prompt()
-    if media_prompt:
-        video_parts.append({"text": media_prompt})
     if caption:
         video_parts.append({"text": caption})
     video_parts.append({"inlineData": {"mimeType": mime_type, "data": video_base64}})
@@ -1330,21 +1323,13 @@ def ask_gemini(chat_id: int, user_id: int, user_text: str, image_base64: str = N
         except Exception as who_err:
             logger.debug("🤖 Не удалось добавить справку об авторе в запрос: %s", who_err)
 
+    # ⚠️ ПРОМПТ РАЗБОРА МЕДИА СЮДА НЕ ДОБАВЛЯТЬ. 2026-08-10 его сюда завели по
+    # просьбе Максима и в тот же день ОТКАТИЛИ по его же решению: промпт
+    # написан для стенограммы («напиши текстом, что на изображении»), и в
+    # личке бот вместо разговора начинал зачитывать описание картинки.
+    # Он остаётся только там, где и был, — в режиме «Сам в разговор».
     if image_base64:
-        # ⚠️ ПРОМПТ РАЗБОРА МЕДИА УЧАСТВУЕТ И В ЛИЧНЫХ РАЗГОВОРАХ (2026-08-10,
-        # просьба Максима). Раньше он работал только в режиме «Сам в разговор»:
-        # получалось, что в группе бот картинки разбирает по заданным правилам,
-        # а в личке — как придётся. Промпт ОДИН и тот же (settings
-        # `proactive_media_prompt`, правится из /prompt и /media_prompt_set).
-        #
-        # Идёт ПЕРЕД словами пользователя и картинкой: инструкция должна быть
-        # прочитана до содержимого. Не задан — как и было, уходит только
-        # подпись и файл (зашитых фраз здесь по-прежнему быть не должно).
-        media_prompt = hist.get_proactive_media_prompt()
-        user_message_content = []
-        if media_prompt:
-            user_message_content.append({"type": "text", "text": media_prompt})
-        user_message_content += [
+        user_message_content = [
             {"type": "text", "text": user_text if user_text else ""},
             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}}
         ]
