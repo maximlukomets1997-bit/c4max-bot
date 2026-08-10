@@ -275,6 +275,21 @@ def consider_message(update, context) -> None:
         # лучше пропустить, чем вслепую тянуть 20 МБ на каждой проверке.
         _video = message.video
         has_video = bool(_video) and bool(_video.file_size) and _video.file_size <= PROACTIVE_VIDEO_MAX_BYTES
+
+        # ⚠️ ПОЧЕМУ ПРОПУСТИЛИ — ГОВОРИМ ВСЛУХ (2026-08-10, после живого теста
+        # Максима: он прислал ролик на 24 МБ, бот молча его не заметил, и в
+        # логе стояло только «триггер пуст после анализа медиа»). Отказ без
+        # причины неотличим от поломки — а тут отказ штатный.
+        if _video and not has_video:
+            if not _video.file_size:
+                logger.info("🤖 Чат %s: Telegram не сообщил размер видео — разбор пропущен "
+                            "(тянуть вслепую до 20 МБ на каждой проверке незачем)", chat_id)
+            else:
+                logger.info("🤖 Чат %s: видео %.1f МБ больше потолка %.0f МБ — разбор пропущен. "
+                            "Выше не поднять: столько отдаёт ботам сам Telegram",
+                            chat_id,
+                            _video.file_size / (1024 * 1024),
+                            PROACTIVE_VIDEO_MAX_BYTES / (1024 * 1024))
         photo_file_id = message.photo[-1].file_id if has_photo else None
         voice_file_id = (message.voice or message.audio).file_id if has_voice else None
         video_file_id = _video.file_id if has_video else None
