@@ -54,13 +54,26 @@ def _label(item: dict) -> str:
     Версию спрашиваем у git ТОЛЬКО для показанной страницы (см. `version_of`).
     Её может не быть вовсе (файла VERSION в том коммите ещё не было) — тогда
     надпись собирается из даты и названия, без пустого разделителя.
+
+    ⚠️ ВЕРСИЯ НЕ ПОВТОРЯЕТСЯ ДВАЖДЫ (2026-08-11, просьба Максима). Названия
+    коммитов с некоторых пор сами начинаются с номера — «v4.10 — карта проекта
+    приведена…», так их пишет и `Отправить изменения на GitHub.bat`. Со старой
+    сборкой выходило «10.08 · v4.10 · v4.10 — карта проекта…». Теперь: название
+    начинается с номера → показываем только дату и название («10.08 · v4.10 —
+    карта проекта…»), иначе всё как было («04.08 · v3.82 · Каталог техники…»).
+    Так номер виден ВСЕГДА и ровно один раз — в том числе у старых записей и
+    у слияний pull request, где номера в названии нет вовсе.
     """
+    import re
     from services import update_log
 
     title = item["title"]
     day = update_log.fmt_day(item["ts"])
-    version = update_log.version_of(item["sha"])
-    head = f"{day} · v{version}" if version else day
+    if re.match(r"^v\d+\.\d+\b", title):
+        head = day                       # номер уже внутри названия
+    else:
+        version = update_log.version_of(item["sha"])
+        head = f"{day} · v{version}" if version else day
     room = _LABEL_MAX - len(head) - 3  # 3 символа на разделитель « · »
     if len(title) > room:
         title = title[:max(1, room - 1)].rstrip() + "…"
