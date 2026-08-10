@@ -571,13 +571,15 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     # у кнопки в панели промптов, — зовём тот же обработчик, но с флагом
     # from_adm: он вернёт клавиатуру /adm, а не панели промптов.
     # Убрать вместе с кнопкой, когда тесты закончатся.
-    if data in ("adm:wipe", "adm:wipe_yes", "adm:wipe_no"):
-        if data == "adm:wipe_no":
-            await query.answer("Отменено.")
-            try:
-                await query.edit_message_reply_markup(reply_markup=build_adm_keyboard(user_id))
-            except Exception as e:
-                logger.debug("🔧 Не удалось вернуть клавиатуру /adm после отмены: %s", e)
-            return
-        await _handle_proactive_wipe(query, user_id, data == "adm:wipe_yes", from_adm=True)
+    # ⚠️ БЕЗ ПОДТВЕРЖДЕНИЯ (2026-08-10, просьба Максима «вылазит ещё одна
+    # кнопка подтверждения — её нужно убрать»): жмём — и бот сразу забывает
+    # разговоры. Действие обратимое, поэтому спрашивать не о чем: архив НЕ
+    # удаляется, в settings лишь ставится черта времени, старше которой
+    # стенограмма не читается. Та же кнопка в панели промптов подтверждение
+    # СОХРАНЯЕТ — там её жмут реже и не глядя.
+    # Ветки adm:wipe_yes / adm:wipe_no убраны вместе с подтверждением; если
+    # у кого-то висит старое сообщение с теми кнопками, нажатие просто
+    # ничего не сделает.
+    if data == "adm:wipe":
+        await _handle_proactive_wipe(query, user_id, True, from_adm=True)
         return
