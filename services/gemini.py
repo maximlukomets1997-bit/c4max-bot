@@ -1723,6 +1723,120 @@ def _build_proactive_parts(chat_id: int, bot_id: int, trigger_text: str,
     return system_parts
 
 
+def ask_group_proactive_media(chat_id: int, bot_id: int, trigger_text: str,
+                              trigger_user_id: int | None,
+                              media_b64: str, mime_type: str, kind: str) -> str | None:
+    """
+    ⚡ ПРОАКТИВНЫЙ ОТВЕТ НА МЕДИА — отвечает та же модель, что СМОТРИТ файл
+    (2026-08-11, решение Максима: «чтобы отвечала модель-разбиратель, а не
+    активная»). Возвращает текст реплики (с блоком <thought>) или None.
+
+    Зачем: активная модель (сейчас qwen3.7-plus) картинок не видит вовсе, и до
+    этой правки она отвечала ПО ПЕРЕСКАЗУ — по строке разбора в стенограмме.
+    Пересказ и породил всю возню 10 августа: шутки про ИИ над живыми людьми,
+    скобки в стенограмме, споры про обрезку. Теперь на медиа отвечает Gemini
+    из цепочки `PROACTIVE_MEDIA_CHAIN`, получая САМ ФАЙЛ плюс ровно ту же
+    системную часть, что и активная модель: характер, RAG, справку об авторе,
+    инструкцию участия и стенограмму.
+
+    ⚠️ РАЗБОР МЕДИА ПРИ ЭТОМ НЕ ОТМЕНЯЕТСЯ (services/proactive.py). Он нужен не
+    для ответа, а для ПАМЯТИ: через несколько сообщений файла нет ни у кого, а
+    стенограмма живёт — без разбора в истории будет дыра. Итого на медиа два
+    запроса: разбор (для архива) и этот (для реплики).
+
+    ⚠️ ЗАПРОС НАТИВНЫЙ (contents/parts/systemInstruction), а не через
+    OpenAI-совместимый эндпоинт: так фото, голосовое и видео идут ОДНИМ путём,
+    а мысли приходят отдельными частями и собираются готовым
+    `_native_answer_with_thoughts` — тем же, что у обычных ответов на аудио и
+    видео. Мысли здесь ЗАПРАШИВАЮТСЯ (в отличие от разбора): реплика уходит
+    человеку через send_formatted, который показывает их свёрнутой цитатой.
+
+    ⚠️ Модели цепочки, не умеющей нужный вид медиа, запрос не отправляем:
+    у видео проверяем поле "video" (_supports_video), у фото — "vision".
+
+    ЧТО ВОЗВРАЩАЕТ — три разных исхода, не перепутать:
+      • текст реплики (с <thought>) — модель решила вступить;
+      • ПУСТАЯ СТРОКА — модель решила промолчать (штатный и самый частый исход);
+      • None — не ответила НИ ОДНА модель цепочки, и вызывающий уходит на
+        обычный `ask_group_proactive` (активная модель по стенограмме), чтобы
+        бот не онемел из-за отказа Google.
+    ⚠️ Вернуть None вместо пустой строки на «промолчать» = заставить бота
+    переспросить активную модель и заговорить там, где Gemini смолчала.
+
+    Синхронная (requests) — звать через run_in_executor.
+    """
+    system_parts = _build_proactive_parts(chat_id, bot_id, trigger_text, trigger_user_id)
+    if system_parts is None:
+        return None
+
+    task = (
+        "Твоё решение: вступить в разговор (напиши только текст реплики) "
+        f"или промолчать (ответь ровно одним словом: {PROACTIVE_SKIP_MARKER})."
+    )
+
+    # Файл впереди задания: модель сначала смотрит, потом читает, что от неё хотят.
+    parts = [
+        {"inlineData": {"mimeType": mime_type, "data": media_b64}},
+        {"text": task},
+    ]
+    base = {
+        "contents": [{"role": "user", "parts": parts}],
+        "systemInstruction": {"parts": [{"text": "\n\n".join(system_parts)}]},
+    }
+    # Видео разбирается дольше всего — ему свой таймаут, как в ask_gemini_video.
+    timeout = VIDEO_TIMEOUT if kind == "видео" else 90
+
+    for model_name in PROACTIVE_MEDIA_CHAIN:
+        if kind == "видео" and not _supports_video(model_name):
+            continue
+        if kind == "фото" and not _supports_vision(model_name):
+            continue
+        try:
+            req = dict(base)
+            thinking = _native_thinking_config(model_name)
+            if thinking:
+                req["generationConfig"] = thinking
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+            logger.info("🤖 Запрос к модели %s (проактивный ответ на %s)", model_name, kind)
+            start = time.perf_counter()
+            response = _http().post(
+                url, json=req,
+                headers={"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY},
+                timeout=timeout,
+            )
+            response.raise_for_status()
+            data = response.json()
+            elapsed = time.perf_counter() - start
+            answer = _native_answer_with_thoughts(data)
+            if not (answer or "").strip():
+                logger.warning("🤖 %s вернула пустой проактивный ответ на %s — пробую следующую",
+                               model_name, kind)
+                continue
+            hist.register_api_call(model_name)
+            logger.info("🤖 Ответ от %s за %.1f с (проактивный ответ на %s)",
+                        model_name, elapsed, kind)
+            answer = compress_newlines(answer)
+            # ⚠️ РЕШЕНИЕ «ПРОМОЛЧАТЬ» ОТЛИЧАЕТСЯ ОТ ОТКАЗА, и разница здесь
+            # принципиальная. Маркер ищем в ВИДИМОЙ части (без <thought>) —
+            # рассуждая, модель поминает его как вариант, это не ответ.
+            # Промолчала → ПУСТАЯ СТРОКА: вызывающий увидит «не None» и НЕ
+            # пойдёт переспрашивать активную модель. Вернуть тут None значило
+            # бы «Gemini отказала» — и бот полез бы за репликой к активной,
+            # то есть заговорил бы там, где Gemini решила молчать.
+            body = re.sub(r'<thought>.*?</thought>', '', answer,
+                          flags=re.DOTALL | re.IGNORECASE).strip()
+            if _is_proactive_skip(body):
+                logger.info("🤖 %s решила промолчать (%s)", model_name, kind)
+                return ""
+            return answer
+        except Exception as e:
+            logger.warning("🤖 %s не ответила на %s в проактивной проверке: %s",
+                           model_name, kind, e)
+    logger.error("⚠️ 🤖 Проактивный ответ на %s не дала НИ ОДНА модель цепочки — "
+                 "уходим на активную модель по стенограмме", kind)
+    return None
+
+
 def ask_group_proactive(chat_id: int, bot_id: int, trigger_text: str,
                         trigger_user_id: int | None = None) -> str | None:
     """

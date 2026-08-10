@@ -62,7 +62,8 @@ from config import (
     PROACTIVE_VIDEO_MAX_BYTES,
 )
 from database.history import get_setting, log_proactive_check, save_group_message
-from services.gemini import (ask_group_proactive, _proactive_describe_image,
+from services.gemini import (ask_group_proactive, ask_group_proactive_media,
+                             _proactive_describe_image,
                              _proactive_transcribe_audio, _proactive_describe_video)
 from utils import should_respond_in_group, keep_chat_action
 from utils_format import send_formatted, strip_thoughts
@@ -358,6 +359,10 @@ async def _run_proactive(bot, chat_id: int, trigger_message_id: int, trigger_tex
 
         # ── Анализ медиа-триггера (фото / голосовое) ──
         enriched_text = trigger_text
+        # Файл держим под рукой: с 2026-08-11 на медиа отвечает та же
+        # модель, что его смотрит (ask_group_proactive_media), и ей нужен
+        # сам файл, а не пересказ. Пусто — значит скачать не вышло.
+        media_b64 = media_mime = media_kind = ""
         if has_photo and photo_file_id:
             try:
                 import base64 as _b64
@@ -366,6 +371,7 @@ async def _run_proactive(bot, chat_id: int, trigger_message_id: int, trigger_tex
                 photo_file = await bot.get_file(photo_file_id)
                 file_bytes = await photo_file.download_as_bytearray()
                 image_base64 = _b64.b64encode(file_bytes).decode('utf-8')
+                media_b64, media_mime, media_kind = image_base64, "image/jpeg", "фото"
                 description = await loop.run_in_executor(
                     None, _proactive_describe_image, image_base64,
                 )
@@ -416,6 +422,7 @@ async def _run_proactive(bot, chat_id: int, trigger_message_id: int, trigger_tex
                 voice_file = await bot.get_file(voice_file_id)
                 file_bytes = await voice_file.download_as_bytearray()
                 audio_base64 = _b64.b64encode(file_bytes).decode('utf-8')
+                media_b64, media_mime, media_kind = audio_base64, "audio/ogg", "голосовое"
                 transcription = await loop.run_in_executor(
                     None, _proactive_transcribe_audio, audio_base64,
                 )
@@ -433,6 +440,7 @@ async def _run_proactive(bot, chat_id: int, trigger_message_id: int, trigger_tex
                 video_file = await bot.get_file(video_file_id)
                 file_bytes = await video_file.download_as_bytearray()
                 video_base64 = _b64.b64encode(file_bytes).decode('utf-8')
+                media_b64, media_mime, media_kind = video_base64, video_mime, "видео"
                 description = await loop.run_in_executor(
                     None, _proactive_describe_video, video_base64, video_mime,
                 )
@@ -467,10 +475,28 @@ async def _run_proactive(bot, chat_id: int, trigger_message_id: int, trigger_tex
             logger.info("🤖 Чат %s: триггер пуст после анализа медиа — пропускаем", chat_id)
             return
 
-        answer = await loop.run_in_executor(
-            None, ask_group_proactive, chat_id, bot.id, enriched_text,
-            trigger_user_id,
-        )
+        # ⚡ НА МЕДИА ОТВЕЧАЕТ ТА ЖЕ МОДЕЛЬ, ЧТО ЕГО СМОТРИТ (2026-08-11,
+        # решение Максима). Активная модель картинок не видит вовсе и до этой
+        # правки отвечала ПО ПЕРЕСКАЗУ — по строке разбора в стенограмме;
+        # именно пересказ породил шутки про ИИ над живыми людьми 10 августа.
+        # Теперь файл уходит Gemini из цепочки разбора вместе со всей
+        # системной частью, и реплику пишет она.
+        #
+        # ⚠️ ЗАПАСНОЙ ПУТЬ ОБЯЗАТЕЛЕН: не ответила ни одна модель цепочки —
+        # спрашиваем активную по стенограмме, как раньше. Разбор к этому
+        # моменту уже сохранён в архив, так что ей есть что читать, и бот не
+        # онемеет из-за отказа Google.
+        answer = None
+        if media_b64:
+            answer = await loop.run_in_executor(
+                None, ask_group_proactive_media, chat_id, bot.id, enriched_text,
+                trigger_user_id, media_b64, media_mime, media_kind,
+            )
+        if answer is None:
+            answer = await loop.run_in_executor(
+                None, ask_group_proactive, chat_id, bot.id, enriched_text,
+                trigger_user_id,
+            )
         if not answer:
             logger.info("🤖 Чат %s: решение — промолчать", chat_id)
             _note("silent")
