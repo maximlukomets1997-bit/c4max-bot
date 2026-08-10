@@ -358,9 +358,25 @@ async def _run_proactive(bot, chat_id: int, trigger_message_id: int, trigger_tex
                 if description:
                     logger.info("🤖 Чат %s: фото проанализировано — «%s»",
                                 chat_id, description[:120])
-                    # Описание ПОВЕРХ подписи: если пользователь подписал фото,
-                    # подпись уже в trigger_text — добавляем описание перед ней.
-                    enriched_text = f"{description}\n{trigger_text}" if trigger_text else description
+                    # ⚠️ ОПИСАНИЕ ОБЁРНУТО В «[на фото: …]» — 2026-08-10, разбор
+                    # жалобы Максима «бот шутит про ИИ, и людей это бесит».
+                    # Дальше по пути (gemini.py, сборка стенограммы) этот текст
+                    # ПОДМЕНЯЕТ СОБОЙ пометку [фото] и достаётся модели в виде
+                    # «Вася: <текст>», то есть как ПРЯМАЯ РЕЧЬ участника. Без
+                    # обёртки выходило, что живой человек вдруг заговорил
+                    # машинным языком («Based on the silhouettes in the image…»),
+                    # и бот совершенно логично отвечал ему шуткой про робота.
+                    # Скобки возвращают правду: Вася прислал картинку, а внутри
+                    # — что на ней. Голосовые НЕ оборачиваются намеренно: там
+                    # расшифровка и ЕСТЬ слова участника, подмена честная.
+                    # Переносы строк внутри описания схлопываем в пробелы: в
+                    # стенограмме ОДНО сообщение — ОДНА строка «Имя: текст», а
+                    # модель любит отвечать списком, и многострочный разбор
+                    # разъезжался бы на несколько мнимых реплик.
+                    described = "[на фото: " + " ".join(description.split()) + "]"
+                    # Подпись пользователя — ЧЕРЕЗ ПРОБЕЛ, а не с новой строки,
+                    # по той же причине: «Вася: [на фото: …] смотрите какой».
+                    enriched_text = f"{described} {trigger_text}" if trigger_text else described
             except Exception as e:
                 logger.debug("🤖 Чат %s: не удалось скачать/проанализировать фото: %s", chat_id, e)
 
@@ -397,9 +413,11 @@ async def _run_proactive(bot, chat_id: int, trigger_message_id: int, trigger_tex
                 if description:
                     logger.info("🤖 Чат %s: видео проанализировано — «%s»",
                                 chat_id, description[:120])
-                    # Описание ПОВЕРХ подписи — как у фото: подпись пользователя
-                    # уже лежит в trigger_text, описание добавляем перед ней.
-                    enriched_text = f"{description}\n{trigger_text}" if trigger_text else description
+                    # Описание ПОВЕРХ подписи — как у фото, и так же обёрнуто
+                    # в «[на видео: …]» (2026-08-10): причина та же, описание
+                    # ролика — не слова участника. Подробности у фото выше.
+                    described = "[на видео: " + " ".join(description.split()) + "]"
+                    enriched_text = f"{described} {trigger_text}" if trigger_text else described
             except Exception as e:
                 logger.debug("🤖 Чат %s: не удалось скачать/проанализировать видео: %s", chat_id, e)
 
