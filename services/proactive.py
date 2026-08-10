@@ -363,7 +363,6 @@ async def _run_proactive(bot, chat_id: int, trigger_message_id: int, trigger_tex
                 import base64 as _b64
                 logger.info("🤖 Чат %s: триггер — фото, активная модель не видит картинки → описание через Gemini",
                             chat_id)
-                logger.info("🤖 Запрос к модели gemini-3.1-flash-lite (описание фото для proactive)")
                 photo_file = await bot.get_file(photo_file_id)
                 file_bytes = await photo_file.download_as_bytearray()
                 image_base64 = _b64.b64encode(file_bytes).decode('utf-8')
@@ -414,7 +413,6 @@ async def _run_proactive(bot, chat_id: int, trigger_message_id: int, trigger_tex
                 import base64 as _b64
                 logger.info("🤖 Чат %s: триггер — голосовое, активная модель не принимает аудио → расшифровка через Gemini",
                             chat_id)
-                logger.info("🤖 Запрос к модели gemini-3.1-flash-lite (расшифровка аудио для proactive)")
                 voice_file = await bot.get_file(voice_file_id)
                 file_bytes = await voice_file.download_as_bytearray()
                 audio_base64 = _b64.b64encode(file_bytes).decode('utf-8')
@@ -432,7 +430,6 @@ async def _run_proactive(bot, chat_id: int, trigger_message_id: int, trigger_tex
             try:
                 import base64 as _b64
                 logger.info("🤖 Чат %s: триггер — видео → краткое описание через Gemini", chat_id)
-                logger.info("🤖 Запрос к модели gemini-3.1-flash-lite (описание видео для proactive)")
                 video_file = await bot.get_file(video_file_id)
                 file_bytes = await video_file.download_as_bytearray()
                 video_base64 = _b64.b64encode(file_bytes).decode('utf-8')

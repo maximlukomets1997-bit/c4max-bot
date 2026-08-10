@@ -277,6 +277,7 @@ def _proactive_describe_image(image_base64: str) -> str:
                 "stream": False,
                 "extra_body": _media_thinking_openai(),
             }
+            logger.info("🤖 Запрос к модели %s (описание фото для proactive)", model_name)
             start = time.perf_counter()
             response = _http().post(
                 GEMINI_API_URL,
@@ -329,6 +330,7 @@ def _proactive_transcribe_audio(audio_base64: str) -> str:
                 "contents": [{"role": "user", "parts": parts}],
                 "generationConfig": _media_thinking_native(),
             }
+            logger.info("🤖 Запрос к модели %s (расшифровка аудио для proactive)", model_name)
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
             start = time.perf_counter()
             response = _http().post(
@@ -388,6 +390,7 @@ def _proactive_describe_video(video_base64: str, mime_type: str = "video/mp4") -
                 "contents": [{"role": "user", "parts": parts}],
                 "generationConfig": _media_thinking_native(),
             }
+            logger.info("🤖 Запрос к модели %s (описание видео для proactive)", model_name)
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
             start = time.perf_counter()
             response = _http().post(
