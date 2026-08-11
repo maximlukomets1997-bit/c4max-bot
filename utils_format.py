@@ -212,6 +212,18 @@ async def send_formatted(bot, chat_id, raw_answer, reply_to=None, disable_previe
     try:
         text, entities = build_text_and_entities(raw_answer)
         chunks = list(split_entities(text, entities, MAX_UTF16))
+        # ✂️ ДИАГНОСТИКА НАРЕЗКИ (2026-08-11, просьба Максима: «первая часть с
+        # разметкой приходит, а вторая без»). Проверка механизма показала, что
+        # выделения по частям распределяются верно и смещения не съезжают даже
+        # с эмодзи, а Telegram обе части принимает без жалоб — но исходный
+        # текст того ответа не сохранился, и доказать было нечем.
+        # Теперь каждый разрез оставляет след: «0 выделений» во второй части
+        # при видимой разметке в чате = теряем мы; выделения есть, а на экране
+        # их нет = вопрос к Telegram. Пишем ТОЛЬКО когда частей больше одной —
+        # обычные ответы лог не засоряют.
+        if len(chunks) > 1:
+            parts = " + ".join(f"{len(ct)} симв ({len(ce)} выдел.)" for ct, ce in chunks)
+            logger.info("✂️ Ответ разрезан на %d части: %s", len(chunks), parts)
     except Exception as e:
         logger.warning("⚠️ Не удалось отформатировать ответ: %s — отправляю без разметки", e)
         plain = THOUGHT_RE.sub("", raw_answer).strip() or raw_answer
