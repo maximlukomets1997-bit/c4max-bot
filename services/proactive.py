@@ -63,7 +63,6 @@ from config import (
 )
 from database.history import get_setting, log_proactive_check, save_group_message
 from services.gemini import (ask_group_proactive, ask_group_proactive_media,
-                             note_proactive_outcome,
                              _proactive_describe_image,
                              _proactive_transcribe_audio, _proactive_describe_video)
 from utils import should_respond_in_group, keep_chat_action
@@ -76,14 +75,6 @@ _msgs_since_check: dict[int, int] = {}    # chat_id → новых сообще�
 _last_judge_ts: dict[int, float] = {}     # chat_id → monotonic последней проверки моделью
 _last_reply_ts: dict[int, float] = {}     # chat_id → monotonic последней реплики бота
 _in_flight: set[int] = set()              # чаты с проверкой «в полёте» (защёлка от гонки)
-# ⏱ Сообщение, пришедшее ВО ВРЕМЯ проверки (2026-08-11, решение Максима).
-# Раньше такие просто отсеивались: пока бот полминуты разбирал картинку,
-# в чате успевали написать что угодно — включая прямое оскорбление, на
-# которое он имел право ответить мутом, — и проверка по ним не шла вовсе.
-# Теперь последнее из них ждёт здесь, и сразу после основной проверки бот
-# делает по нему ЕЩЁ ОДНУ, догоняющую. Ровно одну: иначе в живом чате бот
-# гнался бы за собственным хвостом бесконечно.
-_pending: dict[int, tuple] = {}
 
 # ─── счётчик отсева дешёвыми фильтрами (2026-07-31) ──────────────────
 #
@@ -257,18 +248,12 @@ def consider_message(update, context) -> None:
         # Каждый отсев отмечаем в счётчике: порядок проверок НЕ менялся,
         # добавились только строчки _skip(...) — они ничего не читают.
         if chat_id in _in_flight:
-            # ⏱ НЕ ПРОСТО ОТБРАСЫВАЕМ (2026-08-11, решение Максима). Пока идёт
-            # проверка, чат живёт: именно в это окно 11.08 проскочило прямое
-            # оскорбление, на которое бот имел право ответить мутом. Держим
-            # ПОСЛЕДНЕЕ такое сообщение — обёртка _run_proactive прогонит по
-            # нему догоняющую проверку, как только освободится.
-            # ⚠️ Держим именно последнее, а не очередь: догоняющая проверка
-            # читает стенограмму целиком, и всё пропущенное она в ней увидит.
-            # Отсев в счётчике отмечаем по-прежнему — цифры участия честные.
-            if not user.is_bot and not (message.text or "").startswith("/"):
-                _pending[chat_id] = (message.message_id,
-                                     message.text or message.caption or "",
-                                     user.id, *_media_args(message, chat_id))
+            # ⚠️ ДОГОНЯЮЩЕЙ ПРОВЕРКИ БОЛЬШЕ НЕТ (заведена и убрана 2026-08-11 по
+            # решению Максима: «работает как-то неправильно»). Была попытка не
+            # терять сообщения, пришедшие во время проверки, — бот делал по
+            # последнему из них ещё один проход. Сообщения при этом и так не
+            # пропадают из виду: счётчик растёт ВЫШЕ этой проверки, и следующая
+            # проверка увидит их в стенограмме. Не заводить заново без просьбы.
             _skip("в полёте")
             return
         if user.is_bot:
@@ -363,30 +348,7 @@ def _media_args(message, chat_id: int) -> tuple:
             has_video, video_file_id, video_mime)
 
 
-async def _run_proactive(bot, chat_id: int, *args):
-    """
-    Обёртка: основная проверка, следом — ОДНА догоняющая, если во время
-    основной в чате успели написать (2026-08-11, решение Максима).
-
-    ⚠️ Защёлка `_in_flight` снимается ЗДЕСЬ и только здесь — она держится и на
-    время догоняющей, иначе третья проверка влезла бы посередине.
-    ⚠️ Догоняющая ровно одна и сама догоняющих не порождает: `_pending` для
-    этого чата снимается перед её запуском и очищается в конце в любом случае.
-    """
-    try:
-        await _run_proactive_once(bot, chat_id, *args)
-        pending = _pending.pop(chat_id, None)
-        if pending:
-            logger.info("🤖 Чат %s: во время проверки писали — догоняющая проверка", chat_id)
-            await _run_proactive_once(bot, chat_id, *pending)
-    except Exception as e:
-        logger.warning("⚠️ Проактивная проверка сорвалась (чат %s): %s", chat_id, e)
-    finally:
-        _in_flight.discard(chat_id)
-        _pending.pop(chat_id, None)
-
-
-async def _run_proactive_once(bot, chat_id: int, trigger_message_id: int, trigger_text: str,
+async def _run_proactive(bot, chat_id: int, trigger_message_id: int, trigger_text: str,
                          trigger_user_id: int | None = None,
                          has_photo: bool = False, photo_file_id: str | None = None,
                          has_voice: bool = False, voice_file_id: str | None = None,
@@ -576,10 +538,6 @@ async def _run_proactive_once(bot, chat_id: int, trigger_message_id: int, trigge
             )
         if not answer:
             logger.info("🤖 Чат %s: решение — промолчать", chat_id)
-            # Запоминаем исход: в стенограмме следующей проверки появится
-            # «Ты: уже видел, решил промолчать» — чтобы модель не вернулась к
-            # этому поводу через минуту как к новости (случай Максима 11.08).
-            note_proactive_outcome(chat_id, True)
             _note("silent")
             return
 
@@ -631,11 +589,10 @@ async def _run_proactive_once(bot, chat_id: int, trigger_message_id: int, trigge
             logger.debug("🤖 Не удалось сохранить свою реплику в архив групп: %s", e)
 
         _last_reply_ts[chat_id] = time.monotonic()
-        note_proactive_outcome(chat_id, False)
         logger.info("🤖 Чат %s: бот сам вступил в разговор (%d символов)", chat_id, len(visible))
         _note("reply_mute" if mute_sec else "reply", len(visible))
     except Exception as e:
         logger.warning("⚠️ Не удалось выполнить проактивную проверку (чат %s): %s", chat_id, e)
         _note("error")
-    # ⚠️ Защёлку снимает ОБЁРТКА `_run_proactive` — здесь её трогать нельзя:
-    # между основной и догоняющей проверкой чат обязан оставаться занятым.
+    finally:
+        _in_flight.discard(chat_id)
