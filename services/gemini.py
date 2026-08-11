@@ -251,11 +251,27 @@ def _native_text_only(data: dict) -> str:
 #  (`ask_group_proactive_media`) при этом не трогаем — там оно по делу.
 _MEDIA_THINKING_LEVEL = "minimal"
 
+# ⚠️ У ВИДЕО СВОЙ УРОВЕНЬ — «medium» (2026-08-11, решение Максима). Ролик это
+# не картинка: там важна последовательность событий — кто кого подбил, чем
+# кончился бой, — а на «minimal» разбор выходит поверхностным («игрок едет по
+# карте»), и в стенограмму попадает пустышка. «medium» — это уровень Google
+# ПО УМОЛЧАНИЮ, то есть середина, а не крайность; выбран сознательно, чтобы
+# двигаться ступенями и смотреть на живых роликах.
+#
+# ⚠️ ЗАМЕР 11.08 на боевом ключе (gemini-3.1-flash-lite, один вопрос):
+# minimal — 0 токенов мыслей, low — 114, medium — 437, high — 807. Все четыре
+# уровня API принимает; шкала ровная, так что при желании поднять до «high»
+# правится ровно эта константа.
+#
+# ⚠️ ЦЕНА: разбор видео и так самый долгий (таймаут 180 с), а пока идёт
+# проверка, сообщения чата отсеиваются защёлкой `_in_flight`. Станет заметно
+# мешать — сначала думать про уровень, а не про потолок размера.
+_VIDEO_THINKING_LEVEL = "medium"
 
-def _media_thinking_native() -> dict:
+
+def _media_thinking_native(level: str = _MEDIA_THINKING_LEVEL) -> dict:
     """Настройка мышления для разбора медиа (аудио, видео) — нативный формат."""
-    return {"thinkingConfig": {"includeThoughts": False,
-                               "thinkingLevel": _MEDIA_THINKING_LEVEL}}
+    return {"thinkingConfig": {"includeThoughts": False, "thinkingLevel": level}}
 
 
 def _media_answer_thinking() -> dict:
@@ -473,7 +489,7 @@ def _proactive_describe_video(video_base64: str, mime_type: str = "video/mp4") -
         try:
             payload = {
                 "contents": [{"role": "user", "parts": parts}],
-                "generationConfig": _media_thinking_native(),
+                "generationConfig": _media_thinking_native(_VIDEO_THINKING_LEVEL),
             }
             logger.info("🤖 Запрос к модели %s (описание видео для proactive)", model_name)
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
