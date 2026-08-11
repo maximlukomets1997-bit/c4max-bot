@@ -600,7 +600,10 @@ def _get_cached_embedding(normalized_text: str) -> list:
     cached = _QUERY_EMBED_CACHE.get(normalized_text)
     if cached is not None:
         return cached
-    logger.info("%s RAG: запрос эмбеддинга — «%s»", RAG_ICON, normalized_text)
+    # ⚠️ ТЕКСТА ЗАПРОСА В ЛОГЕ НЕТ — решение Максима 2026-08-11. Строка
+    # остаётся ради ЦЕНЫ: сюда доходят только запросы МИМО кэша, то есть
+    # каждая такая строка — платный поход к Google. Не возвращать текст.
+    logger.info("%s RAG: запрос эмбеддинга (%d символов)", RAG_ICON, len(normalized_text))
     vector = get_embedding(normalized_text, is_query=True)
     if vector:
         if len(_QUERY_EMBED_CACHE) >= _QUERY_EMBED_CACHE_MAX:

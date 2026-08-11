@@ -415,13 +415,15 @@ async def _run_proactive(bot, chat_id: int, trigger_message_id: int, trigger_tex
                     None, _proactive_describe_image, image_base64,
                 )
                 if description:
-                    # ⚠️ ВРЕМЕННО БЕЗ ОБРЕЗКИ (2026-08-10, просьба Максима на
-                    # время теста): было description[:120] — отметка «сработало»,
-                    # а не содержимое. Вернуть [:120] вместе с отладочным блоком
-                    # «🧪 ЧТО УХОДИТ МОДЕЛИ» в gemini.py: разбор бывает на
-                    # полстраницы, и в обычной работе он засоряет лог.
-                    logger.info("🤖 Чат %s: фото проанализировано — «%s»",
-                                chat_id, description)
+                    # ⚠️ ТЕКСТА РАЗБОРА В ЛОГЕ НЕТ — решение Максима 2026-08-11
+                    # («убери из логов полный текст ответа моделей»). Остаётся
+                    # только след «сработало» и длина: молчаливый сбой разбора
+                    # выглядит как «бот проигнорировал сообщение», это уже
+                    # ловили 10.08. Сам разбор не пропадает — он оседает в
+                    # стенограмме группы (save_group_message ниже), там его и
+                    # смотреть. Не возвращать текст в лог без просьбы Максима.
+                    logger.info("🤖 Чат %s: фото проанализировано (%d символов)",
+                                chat_id, len(description))
                     # ⚠️ ОПИСАНИЕ ОБЁРНУТО В КВАДРАТНЫЕ СКОБКИ — 2026-08-10,
                     # разбор жалобы Максима «бот шутит про ИИ, людей это бесит».
                     # ⚠️ Внутри скобок ТОЛЬКО текст модели, без приписки «на
@@ -466,8 +468,8 @@ async def _run_proactive(bot, chat_id: int, trigger_message_id: int, trigger_tex
                     None, _proactive_transcribe_audio, audio_base64,
                 )
                 if transcription:
-                    logger.info("🤖 Чат %s: голосовое расшифровано — «%s»",
-                                chat_id, transcription)   # ⚠️ ВРЕМЕННО без [:120], см. фото выше
+                    logger.info("🤖 Чат %s: голосовое расшифровано (%d символов)",
+                                chat_id, len(transcription))   # текста в логе нет, см. фото выше
                     enriched_text = transcription
             except Exception as e:
                 logger.debug("🤖 Чат %s: не удалось скачать/расшифровать голосовое: %s", chat_id, e)
@@ -484,8 +486,8 @@ async def _run_proactive(bot, chat_id: int, trigger_message_id: int, trigger_tex
                     None, _proactive_describe_video, video_base64, video_mime,
                 )
                 if description:
-                    logger.info("🤖 Чат %s: видео проанализировано — «%s»",
-                                chat_id, description)   # ⚠️ ВРЕМЕННО без [:120], см. фото выше
+                    logger.info("🤖 Чат %s: видео проанализировано (%d символов)",
+                                chat_id, len(description))   # текста в логе нет, см. фото выше
                     # Описание ПОВЕРХ подписи — как у фото, и так же в скобках
                     # (2026-08-10): причина та же, описание ролика — не слова
                     # участника. Подробности у фото выше.
