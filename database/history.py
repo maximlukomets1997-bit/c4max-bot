@@ -1555,23 +1555,6 @@ def get_proactive_instruction() -> str:
     return get_setting("proactive_instruction", "").strip() or PROACTIVE_INSTRUCTION
 
 
-def get_proactive_media_prompt() -> str:
-    """
-    Возвращает промпт разбора МЕДИА для проактивного режима (2026-08-05):
-    он уходит вспомогательной модели вместе с фото, голосовым или видео,
-    когда триггером проверки стало вложение (services/gemini.py —
-    _proactive_describe_image / _proactive_transcribe_audio /
-    _proactive_describe_video). Промпт ОДИН на все три вида медиа.
-
-    Живой текст хранится в settings под ключом 'proactive_media_prompt'.
-    ⚠️ Ведёт себя как промпт новостей, а НЕ как RAG-инструкция: пустое
-    значение означает именно «без инструкции» — модели уходит только файл
-    (заводское поведение, решение Максима). Поэтому подстановки заводского
-    текста тут нет: PROACTIVE_MEDIA_PROMPT в config.py тоже пустой.
-    """
-    return get_setting("proactive_media_prompt", "").strip()
-
-
 # ───────────────────────────────────────────────
 #  Сбор сообщений группы (Stage 3 — контекстный бот)
 # ─────────────────────────────────────────────

@@ -17,7 +17,7 @@ from config import AVAILABLE_MODELS, AVAILABLE_IMAGE_MODELS, ADMIN_IDS, GEMINI_M
 from config import PROACTIVE_ENABLED_DEFAULT, PROACTIVE_MIN_MSGS, PROACTIVE_CONTEXT_MSGS
 from config import PROACTIVE_HANDS_DEFAULT, PROACTIVE_MUTE_MAX_SEC
 from config import PROACTIVE_OFF_ANNOUNCE, PROACTIVE_OFF_MSGS_KEY
-from database.history import set_setting, get_setting, append_prompt_addition, get_active_system_prompt, get_bot_stats, get_news_system_prompt, get_rag_instruction, get_proactive_instruction, get_proactive_media_prompt, get_known_chats
+from database.history import set_setting, get_setting, append_prompt_addition, get_active_system_prompt, get_bot_stats, get_news_system_prompt, get_rag_instruction, get_proactive_instruction, get_known_chats
 from utils import register_and_clean_bot_message, delete_user_message_safe
 from utils import mention, schedule_delete
 
@@ -442,8 +442,8 @@ async def _handle_proactive_wipe(query, user_id: int, confirmed: bool, from_adm:
 #  Страховка от лимита Telegram (2026-08-05)
 # ─────────────────────────────────────────────
 #
-#  У панели промптов ШЕСТЬ превью (система, дополнения, новости, RAG, участие,
-#  разбор медиа) по 600 символов каждое — в сумме 3600 при постоянной части
+#  У панели промптов ПЯТЬ превью (система, дополнения, новости, RAG, участие)
+#  по 600 символов каждое — в сумме 3000 при постоянной части
 #  ~1400. Задай Максим все промпты длинными, и панель перевалит за 4096:
 #  Telegram отобьёт отправку целиком, и панель просто перестанет открываться.
 #
@@ -626,43 +626,6 @@ def _build_prompt_panel_text_and_keyboard(user_id, bot_username=None):
     )
     full_text += proactive_section
 
-    # ── Промпт разбора медиа (2026-08-05) ────────────────────────────────
-    # ⚠️ ОПИСАНИЕ ЗДЕСЬ ДВАЖДЫ УСТАРЕВАЛО — сверяй при каждой правке разбора
-    # медиа (2026-08-10, Максим поймал ложь в панели). Как есть на сегодня:
-    #   • В ГРУППЕ («Сам в разговор») промпт уходит НЕ активной модели, а
-    #     цепочке разбора PROACTIVE_MEDIA_CHAIN — с 2026-08-10 это четыре
-    #     модели, а не одна зашитая flash-lite. Это ОТДЕЛЬНЫЙ запрос, и в
-    #     постоянную часть проактивного он не входит — отсюда своя секция.
-    #   • В ЛИЧКЕ НЕ УЧАСТВУЕТ. 2026-08-10 его туда завели по просьбе Максима
-    #     и в тот же день откатили по его же решению: промпт написан для
-    #     стенограммы, и в личке бот вместо разговора зачитывал описание
-    #     картинки. Пометки стоят в ask_gemini / ask_gemini_audio /
-    #     ask_gemini_video — «сюда не добавлять».
-    # ⚠️ Промпт ОДИН на все три вида медиа и по умолчанию ПУСТ — пустой
-    # означает «модели уходит только файл» (решение Максима 2026-07-24),
-    # поэтому здесь, как у промпта новостей, есть ветка «(не задан)».
-    # Превью — общей длины PROMPT_PREVIEW_MAX (600), как у остальных блоков
-    # (просьба Максима 2026-08-05; в первой сборке было ужато до 200 ради
-    # запаса по лимиту Telegram). ⚠️ Запас теперь держит `_fit_panel_text`
-    # в конце сборки: шесть превью по 600 в сумме выбивают 4096, и без обрезки
-    # панель просто не открылась бы.
-    media_prompt = get_proactive_media_prompt()
-    media_section = (
-        "\n───────────────────────────\n"
-        f"🖼<b>PROMPT РАЗБОРА МЕДИА:</b> {_num(len(media_prompt))} <i>символов</i>\n"
-        f"{_expandable_preview(media_prompt)}\n"
-        "🤖 <i>Уходит вместе с фото, голосовым или видео ИЗ ГРУППЫ (режим «Сам "
-        "в разговор»); файл разбирает цепочка Gemini: 3.5 Flash → 3.6 Flash → "
-        "3.1 Flash-Lite → 3 Flash Preview, а разбор попадает в стенограмму. "
-        "В личных разговорах НЕ участвует.</i>\n"
-        "⚠️ <i>Не задан — модель получает голый файл и отвечает как хочет.</i>\n"
-        + ("✏️ /media_prompt_set &lt;текст&gt; — Изменить промпт разбора\n"
-           "🗑️ /media_prompt_reset — Удалить промпт разбора"
-           if media_prompt else
-           "✏️ /media_prompt_set &lt;текст&gt; — Задать промпт разбора")
-    )
-    full_text += media_section
-
     # ── Сводка: из чего складывается проактивный запрос ───────────────────
     # Отвечает на вопрос «что вообще уходит модели» одним взглядом (просьба
     # Максима 2026-07-26). Порядок строк = ПОРЯДОК СБОРКИ в
@@ -767,7 +730,6 @@ def _collect_prompt_files():
     news_prompt = get_news_system_prompt()
     rag_instruction = get_rag_instruction()
     proactive_instruction = get_proactive_instruction()
-    media_prompt = get_proactive_media_prompt()
 
     # В файл SYSTEM PROMPT идёт ЦЕЛИКОМ — вместе с дополнениями /prompt_add
     # (в панели они показаны отдельным блоком). В файле должно быть ровно то,
@@ -784,10 +746,6 @@ def _collect_prompt_files():
         ("4_PROACTIVE_PROMPT.txt", "🗣 PROMPT УЧАСТИЯ В РАЗГОВОРЕ (включает блок рук)",
          "своя" if get_setting("proactive_instruction", "").strip() else "заводская",
          "/proactive_prompt_set", proactive_instruction),
-        # Заводского текста у промпта разбора медиа нет: он либо свой, либо
-        # его нет вовсе — и тогда файл сюда не попадёт (пустые пропускаются).
-        ("5_MEDIA_PROMPT.txt", "🖼 PROMPT РАЗБОРА МЕДИА (фото/голос/видео)",
-         "своя", "/media_prompt_set", media_prompt),
     ]
     return [it for it in items if it[4] and it[4].strip()]
 
@@ -1048,48 +1006,6 @@ _PROMPTS = {
                   "Своя удалена — режим «Сам в разговор» снова работает по стандартным правилам.",
         "cancel": "🔄 <b>Возврат заводской инструкции участия отменён.</b>\n\nТвоя инструкция осталась без изменений.",
     },
-    # Промпт разбора медиа (2026-08-05). Ведёт себя как промпт НОВОСТЕЙ,
-    # а не как две инструкции выше: заводского текста нет вовсе, поэтому
-    # сброс тут именно УДАЛЯЕТ промпт — модель снова получает голый файл.
-    "media_prompt": {
-        "set_key": "proactive_media_prompt",
-        "file_what": "промпта разбора медиа",
-        "set_log":  "задал промпт разбора медиа",
-        "set_done": "✅ <b>Промпт разбора медиа установлен!</b>",
-        "set_note": "\n\nℹ️ Действует сразу и на фото, и на голосовые, и на видео "
-                    "в режиме «Сам в разговор». В личных ответах бота не участвует.",
-        "set_usage": "🖼 <b>Промпт разбора медиа</b>\n\n"
-                     "Уходит вспомогательной модели (<code>gemini-3.1-flash-lite</code>) "
-                     "ВМЕСТЕ с фото, голосовым или видео из группы, когда бот решает, "
-                     "вступать ли в разговор. Её разбор попадает в стенограмму беседы "
-                     "вместо вложения — по нему активная модель и понимает, что прислали.\n\n"
-                     "Промпт ОДИН на все три вида медиа. Не задан — модель получает "
-                     "голый файл без единого слова и отвечает как хочет "
-                     "(может ответить на другом языке, списком или советами).\n\n"
-                     "<b>Способ 1:</b> Напиши текст после команды:\n"
-                     "<code>/media_prompt_set Опиши одним предложением по-русски, что на "
-                     "картинке. Без советов и списков.</code>\n\n"
-                     "<b>Способ 2:</b> Отправь <code>.txt</code> файл с текстом, "
-                     "затем ответь (Reply) на него командой <code>/media_prompt_set</code>\n\n"
-                     "🗑️ Удалить промпт — /media_prompt_reset",
-        "reset_reader": lambda: [(None, get_proactive_media_prompt())],
-        "reset_btn": "✅ Да, удалить",
-        "reset_empty": "ℹ️ <b>Промпт разбора медиа не задан.</b>\n\n"
-                       "Нечего удалять — вспомогательная модель уже получает только файл.",
-        "reset_body": "🗑️ <b>Удаление промпта разбора медиа</b>\n\n"
-                      "Текущий промпт ({length} символов) будет удалён.\n"
-                      "Фото, голосовые и видео снова уйдут модели голым файлом, "
-                      "без единого слова от бота.\n\n"
-                      "⚠️ <b>Подтвердить?</b>",
-        "keys":   ("proactive_media_prompt",),
-        "what":   "промпта разбора медиа",
-        "log":    "удалил промпт разбора медиа",
-        "popup":  "✅ Промпт разбора медиа удалён!",
-        "done":   "✅ <b>Промпт разбора медиа удалён!</b>\n\n"
-                  "Фото, голосовые и видео снова уходят вспомогательной модели "
-                  "голым файлом.",
-        "cancel": "🔄 <b>Удаление промпта разбора медиа отменено.</b>\n\nПромпт остался без изменений.",
-    },
 }
 
 # Все восемь callback'ов таблицы одной строкой — для проверок и подсказки
@@ -1148,9 +1064,12 @@ async def handle_prompt_reset(query, user_id: int, data: str):
 #  отдельными именами: их регистрирует handlers/__init__.py, и PTB зовёт
 #  каждую по своему CommandHandler.
 #
-#  ⚠️ Пятый промпт заводится ОДНОЙ записью в _PROMPTS плюс парой тонких
-#  обёрток ниже — и не забыть зарегистрировать команды в handlers/__init__.py
-#  и добавить их в re-export handlers/admin/__init__.py.
+#  ⚠️ Новый промпт заводится ОДНОЙ записью в _PROMPTS плюс парой тонких
+#  обёрток ниже — и не забыть зарегистрировать команды в handlers/__init__.py,
+#  добавить их в re-export handlers/admin/__init__.py и дописать пару его
+#  callback'ов в список литералов роутера (вычисляемый там не годится).
+#  Ровно так 2026-08-05 заводился пятый промпт (разбор медиа) и ровно так же
+#  2026-08-11 разбирался обратно по решению Максима.
 
 
 async def _prompt_send(context, chat_id: int, text: str, reply_markup=None):
@@ -1303,16 +1222,3 @@ async def cmd_proactive_prompt_set(update: Update, context: ContextTypes.DEFAULT
 async def cmd_proactive_prompt_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Возвращает заводскую инструкцию участия (с подтверждением)."""
     await _prompt_reset_command(update, context, "proactive_prompt")
-
-
-async def cmd_media_prompt_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Задаёт промпт разбора медиа (фото/голос/видео) для режима «Сам в разговор».
-    Хранится в settings под ключом 'proactive_media_prompt'; уходит
-    вспомогательной модели вместе с самим файлом."""
-    await _prompt_set_command(update, context, "media_prompt")
-
-
-async def cmd_media_prompt_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Удаляет промпт разбора медиа (с подтверждением) — модель снова получает
-    голый файл, как было до 2026-08-05."""
-    await _prompt_reset_command(update, context, "media_prompt")

@@ -1,6 +1,6 @@
 from telegram.ext import CommandHandler, MessageHandler, CallbackQueryHandler, ChatMemberHandler, InlineQueryHandler, PollAnswerHandler, filters
 from .commands import cmd_start, cmd_help, cmd_clear, cmd_subscribe, cmd_unsubscribe, handle_unknown_command, log_incoming_command
-from .admin import cmd_prompt_set, cmd_prompt_add, cmd_prompt_reset, cmd_stats, cmd_mod, cmd_adm, cmd_rag, cmd_unmute, cmd_users, handle_callback_query, cmd_news_prompt_set, cmd_news_prompt_reset, cmd_rag_prompt_set, cmd_rag_prompt_reset, cmd_proactive_prompt_set, cmd_proactive_prompt_reset, cmd_media_prompt_set, cmd_media_prompt_reset, cmd_quiz_admin, handle_kb_document
+from .admin import cmd_prompt_set, cmd_prompt_add, cmd_prompt_reset, cmd_stats, cmd_mod, cmd_adm, cmd_rag, cmd_unmute, cmd_users, handle_callback_query, cmd_news_prompt_set, cmd_news_prompt_reset, cmd_rag_prompt_set, cmd_rag_prompt_reset, cmd_proactive_prompt_set, cmd_proactive_prompt_reset, cmd_quiz_admin, handle_kb_document
 from .media import cmd_imagine
 from .messages import handle_message, handle_photo, handle_voice, handle_video, collect_group_message
 from .quiz import cmd_rank, handle_poll_answer
@@ -39,10 +39,6 @@ def setup_handlers(application):
     application.add_handler(CommandHandler('rag_prompt_reset', cmd_rag_prompt_reset))
     application.add_handler(CommandHandler('proactive_prompt_set', cmd_proactive_prompt_set))
     application.add_handler(CommandHandler('proactive_prompt_reset', cmd_proactive_prompt_reset))
-    # 🖼 Промпт разбора медиа (2026-08-05): что вспомогательная модель делает
-    # с фото/голосовым/видео перед проактивной проверкой. Один на все три вида.
-    application.add_handler(CommandHandler('media_prompt_set', cmd_media_prompt_set))
-    application.add_handler(CommandHandler('media_prompt_reset', cmd_media_prompt_reset))
     application.add_handler(CommandHandler('adm', cmd_adm))
     application.add_handler(CommandHandler('stats', cmd_stats))
     application.add_handler(CommandHandler('mod', cmd_mod))

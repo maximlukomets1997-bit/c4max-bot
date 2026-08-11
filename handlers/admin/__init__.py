@@ -26,8 +26,7 @@ from .panel_rag import (
 from .panel_prompts import (
     send_prompts_panel, cmd_prompt_set, cmd_prompt_add, cmd_prompt_reset,
     cmd_news_prompt_set, cmd_news_prompt_reset, cmd_rag_prompt_set, cmd_rag_prompt_reset,
-    cmd_proactive_prompt_set, cmd_proactive_prompt_reset,
-    cmd_media_prompt_set, cmd_media_prompt_reset, send_prompt_files,
+    cmd_proactive_prompt_set, cmd_proactive_prompt_reset, send_prompt_files,
 )
 from .panel_main import (send_adm_panel, cmd_adm, send_stats_panel, cmd_stats, send_api_panel,
                          send_daily_report_panel, send_weekly_report_panel)
