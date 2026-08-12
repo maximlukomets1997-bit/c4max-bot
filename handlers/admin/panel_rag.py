@@ -179,21 +179,45 @@ def _build_kb_main(context, articles):
     pending_count = sum(1 for a in articles if a["folder"] == "pending")
     approved = [a for a in articles if a["folder"] == "approved"]
 
-    rows = []
-    if pending_count:
-        rows.append([InlineKeyboardButton(f"🕐 Ждут одобрения ({pending_count})",
-                                          callback_data=f"kb_open:{_KB_PENDING}")])
-
     counts = {}
     for art in approved:
         counts[art.get("kind")] = counts.get(art.get("kind"), 0) + 1
-    kind_buttons = [
-        InlineKeyboardButton(f"{meta['icon']} {meta['name'].capitalize()} ({counts[kind]})",
-                             callback_data=f"kb_open:{kind}")
-        for kind, meta in sorted(ARTICLE_KINDS.items(), key=lambda kv: kv[1]["order"])
-        if counts.get(kind)
-    ]
-    rows += [kind_buttons[i:i + 2] for i in range(0, len(kind_buttons), 2)]
+
+    def kind_btn(kind: str):
+        """Кнопка раздела — или None, если статей этого типа нет."""
+        n = counts.get(kind)
+        if not n:
+            return None
+        meta = ARTICLE_KINDS.get(kind, ARTICLE_KINDS["other"])
+        return InlineKeyboardButton(f"{meta['icon']} {meta['name'].capitalize()} ({n})",
+                                    callback_data=f"kb_open:{kind}")
+
+    pending_btn = (InlineKeyboardButton(f"🕐 Ждут одобрения ({pending_count})",
+                                        callback_data=f"kb_open:{_KB_PENDING}")
+                   if pending_count else None)
+
+    # Раскладка расписана Максимом поимённо (2026-08-12) и порядку ARTICLE_KINDS
+    # намеренно НЕ следует: слева очередь и мелкие разделы, справа крупные.
+    # Сам порядок в ARTICLE_KINDS этим не отменяется — по нему по-прежнему
+    # сортируются статьи внутри списков и строится каталог /ttx (он остался
+    # прежним, решение Максима).
+    grid = (
+        (pending_btn,        kind_btn("ground")),
+        (kind_btn("sub"),    kind_btn("ship")),
+        (kind_btn("guide"),  kind_btn("air")),
+    )
+    # ⚠️ Пустая ячейка выпадает, а РЯД ОСТАЁТСЯ (выбор Максима из двух
+    # предложенных): соседняя кнопка просто растягивается на всю ширину. В этом
+    # и смысл жёсткой раскладки — подлодки всегда под очередью, корабли под
+    # наземной, и рука привыкает. Плотное схлопывание переставляло бы разделы
+    # каждый раз, как разберёшь очередь.
+    rows = [[b for b in pair if b] for pair in grid if any(pair)]
+    # «Без типа» в раскладку не входит: он почти всегда пуст, а появляется
+    # только когда в первой строке статьи забыли указать тип техники — то есть
+    # работает сигналом. Отдельным рядом снизу: и заметен, и сетку не двигает.
+    other_btn = kind_btn("other")
+    if other_btn:
+        rows.append([other_btn])
 
     # Работа со статьями — одним рядом (2026-08-12, просьба Максима: тумблер
     # базы и проверка поиска переехали внутрь экрана настроек, а на главном
@@ -212,7 +236,9 @@ def _build_kb_main(context, articles):
     rows.append([InlineKeyboardButton("🧹 Очистить журнал", callback_data="kb_clearlog")] + _adm_back_row())
 
     rag_status = "🟢 включён" if RAG_ENABLED else "🔴 выключен (RAG_ENABLED в .env)"
-    kb_status = "🟢 ВКЛЮЧЕНА" if kb_on else "🔴 ВЫКЛЮЧЕНА (тумблер ниже)"
+    # ⚠️ Приписка ведёт К ТУМБЛЕРУ, а он с этого экрана уехал в «⚙️ Настройки»
+    # (2026-08-12). Было «(тумблер ниже)» — на прежнем экране это была правда.
+    kb_status = "🟢 ВКЛЮЧЕНА" if kb_on else "🔴 ВЫКЛЮЧЕНА (включить — в ⚙️ Настройках)"
     text = (
         "📚 <b>База знаний (RAG)</b>\n"
         "───────────────────────────\n"
@@ -269,9 +295,14 @@ def _build_kb_list(context, articles, screen: str):
     first = page * _KB_PAGE_SIZE
     chunk = picked[first:first + _KB_PAGE_SIZE]
 
-    buttons = [InlineKeyboardButton(short_title(art["title"]), callback_data=f"kb_view:{i}")
+    # Очередь — В ОДИН СТОЛБЕЦ (2026-08-12, просьба Максима), разделы техники —
+    # в два. Причина в длине названий: у сырых новостей это целые заголовки с
+    # сайта («[Скоро в игре] La Fayette: Первый стелс-фрегат»), и в узкой
+    # кнопке от них оставался огрызок. У техники названия короткие.
+    per_row, cut = (1, 40) if screen == _KB_PENDING else (2, 22)
+    buttons = [InlineKeyboardButton(short_title(art["title"], cut), callback_data=f"kb_view:{i}")
                for i, art in chunk]
-    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    rows = [buttons[i:i + per_row] for i in range(0, len(buttons), per_row)]
 
     # Листание. Ряд появляется только когда страниц больше одной — иначе
     # он был бы полосой с надписью «1 из 1», которая никуда не ведёт.
