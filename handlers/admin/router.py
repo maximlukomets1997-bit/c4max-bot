@@ -310,6 +310,23 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             ),
             parse_mode=ParseMode.HTML,
         )
+        # Статьи базы знаний — вторым файлом (2026-08-12), как и ночью.
+        # Под своим try: копия базы уже у владельца, и сорвавшийся архив
+        # статей не должен превратить удачное нажатие в сообщение об ошибке.
+        try:
+            kb_path, kb_size, kb_ok, kb_wait = await loop.run_in_executor(None, backup.make_kb_backup)
+            with open(kb_path, "rb") as f:
+                kb_blob = f.read()
+            kb_name = os.path.basename(kb_path)
+            await context.bot.send_document(
+                chat_id=chat_id,
+                document=kb_blob,
+                filename=kb_name,
+                caption=backup.kb_caption(kb_name, kb_size, kb_ok, kb_wait),
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception as e:
+            logger.error("⚠️ Архив статей базы знаний по кнопке не сделан: %s", e)
         return
 
     # ── Панель базы знаний: карточка статьи и действия ──────────────────

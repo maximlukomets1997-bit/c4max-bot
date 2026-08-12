@@ -20,6 +20,7 @@
 import os
 import gzip
 import shutil
+import tarfile
 import logging
 from datetime import datetime
 
@@ -34,6 +35,13 @@ logger = logging.getLogger(__name__)
 # врёт при переносе файлов).
 _PREFIX = "history-"
 _SUFFIX = ".db.gz"
+
+# Имена архивов статей базы знаний: knowledge-2026-08-12_00-00.tar.gz. Лежат
+# в той же папке и ротируются так же, но собираются ОТДЕЛЬНЫМ файлом, а не
+# вместе с базой: base — это sqlite, статьи — папка текстов, один gzip их
+# не вместит. Префикс другой — значит ротация базы их не видит и не тронет.
+_KB_PREFIX = "knowledge-"
+_KB_SUFFIX = ".tar.gz"
 
 # Промежуточный несжатый снимок. Живёт секунды: снимок → сжатие → удаление.
 _TMP_NAME = "history-snapshot.tmp"
@@ -67,17 +75,22 @@ def human_size(size: int) -> str:
     return f"{size / (1024 * 1024):.1f} МБ"
 
 
-def _rotate() -> int:
+def _rotate(prefix: str = _PREFIX, suffix: str = _SUFFIX) -> int:
     """
     Оставляет последние BACKUP_KEEP копий, остальные удаляет. Возвращает
     число удалённых. Сортировка по ИМЕНИ (дата в начале имени) — время файла
     не спрашиваем: при переносе папки оно меняется, а имя нет.
+
+    Префикс и суффикс — параметры, потому что в папке живут ДВА ряда копий:
+    база (history-….db.gz) и статьи базы знаний (knowledge-….tar.gz). Каждый
+    ряд считается отдельно, иначе семь файлов на двоих означали бы, что новый
+    архив статей вытесняет позавчерашнюю копию базы.
     """
     folder = backup_dir()
     try:
         names = sorted(
             n for n in os.listdir(folder)
-            if n.startswith(_PREFIX) and n.endswith(_SUFFIX)
+            if n.startswith(prefix) and n.endswith(suffix)
         )
     except OSError:
         return 0
@@ -90,9 +103,9 @@ def _rotate() -> int:
         except OSError as e:
             # Не смогли удалить старую копию — это не повод считать неудачной
             # свежую: она уже на диске и это главное.
-            logger.warning("⚠️ Не удалось удалить старую копию базы %s: %s", name, e)
+            logger.warning("⚠️ Не удалось удалить старую копию %s: %s", name, e)
     if removed:
-        logger.info("💾 Ротация копий базы: удалено %d, оставлено %d", removed, BACKUP_KEEP)
+        logger.info("💾 Ротация копий (%s): удалено %d, оставлено %d", prefix, removed, BACKUP_KEEP)
     return removed
 
 
@@ -151,6 +164,75 @@ def list_backups() -> list[tuple[str, int]]:
         except OSError:
             continue
     return out
+
+
+# ───────────────────────────────────────────────
+#  Статьи базы знаний (2026-08-12)
+#
+#  Зачем отдельно от базы. Тексты статей — единственное ценное, чего нет ни
+#  в базе, ни на GitHub после того, как папка knowledge перестала уезжать
+#  туда вместе с кодом. Весят они копейки (все 87 статей — около 90 КБ в
+#  сжатом виде), а восстановить их неоткуда: пишет их бот на сервере.
+#
+#  ⚠️ УКАЗАТЕЛЬ (knowledge_base_vectors.json) В АРХИВ НЕ КЛАДЁМ. Он в десятки
+#  раз тяжелее всех статей вместе взятых и при этом пересчитывается ботом из
+#  них же — ровно по той причине, по которой он не ездит и на GitHub.
+# ─────────────────────────────────────────────
+
+def make_kb_backup(moment: datetime | None = None) -> tuple[str, int, int, int]:
+    """
+    Собирает архив статей базы знаний и возвращает
+    (путь к архиву, его размер, статей в базе, статей на одобрении).
+
+    Работа с диском — звать ТОЛЬКО из отдельного потока (run_in_executor),
+    как и make_backup.
+    """
+    # Пути берём у knowledge_store, а не собираем заново: он единственный
+    # хозяин этих папок, и второй сборкой пути мы бы однажды заархивировали
+    # не то, что бот на самом деле читает (то же правило, что в tech_card).
+    from services.knowledge_store import _dir_for
+
+    folder = backup_dir()
+    os.makedirs(folder, exist_ok=True)
+
+    moment = moment or datetime.now()
+    final_path = os.path.join(folder, f"{_KB_PREFIX}{moment:%Y-%m-%d_%H-%M}{_KB_SUFFIX}")
+
+    counts = {"approved": 0, "pending": 0}
+    with tarfile.open(final_path, "w:gz", compresslevel=6) as tar:
+        for kind in ("approved", "pending"):
+            src = _dir_for(kind)
+            if not os.path.isdir(src):
+                continue
+            for fname in sorted(os.listdir(src)):
+                # Только сами статьи: указатель базы знаний (.json) и любой
+                # случайный файл рядом в архив не попадают.
+                if not fname.lower().endswith(".md"):
+                    continue
+                tar.add(os.path.join(src, fname), arcname=f"{kind}/{fname}")
+                counts[kind] += 1
+
+    size = os.path.getsize(final_path)
+    logger.info("📚 Архив статей базы знаний готов: %s (%s, в базе %d, на одобрении %d)",
+                os.path.basename(final_path), human_size(size),
+                counts["approved"], counts["pending"])
+    _rotate(_KB_PREFIX, _KB_SUFFIX)
+    return final_path, size, counts["approved"], counts["pending"]
+
+
+def kb_caption(fname: str, size: int, approved: int, pending: int) -> str:
+    """
+    Подпись к архиву статей — ОДНА на оба места отправки (ночной цикл и
+    кнопка «💾 Копия базы»). Две разные подписи об одном и том же файле
+    неизбежно разъехались бы.
+    """
+    return (
+        f"📚 <b>Статьи базы знаний</b>\n"
+        f"<code>{fname}</code> · {human_size(size)}\n"
+        f"В базе: {approved} · Ждут одобрения: {pending}\n"
+        f"<i>Тексты статей, из которых бот строит справки по технике. "
+        f"Живут только на сервере — сохрани вместе с копией базы.</i>"
+    )
 
 
 # ───────────────────────────────────────────────

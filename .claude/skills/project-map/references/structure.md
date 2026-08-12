@@ -83,7 +83,7 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 | `services/knowledge_store.py` | 300 | 5 | `save_pending_news`, `read_title`, `detect_kind`, `list_articles`, `read_article`, `approve_article`, `delete_article`, `add_article`, `replace_article` |
 | `services/group_digest.py` | 299 | 3 | `is_enabled`, `week_key`, `due_now`, `note_sent`, `collect`, `render`, `build` |
 | `services/update_log.py` | 263 | 1 | `available`, `version_of`, `recent`, `stats`, `fmt_time`, `fmt_day`, `fmt_ago` |
-| `services/backup.py` | 198 | 2 | `backup_dir`, `human_size`, `make_backup`, `list_backups`, `due_today`, `note_done`, `last_done` |
+| `services/backup.py` | 280 | 2 | `backup_dir`, `human_size`, `make_backup`, `list_backups`, `make_kb_backup`, `kb_caption`, `due_today`, `note_done`, `last_done` |
 | `services/deploy.py` | 164 | 3 | `note_activity`, `quiet_for`, `can_update`, `update`, `describe` |
 | `services/user_settings.py` | 148 | 9 | `load`, `refresh`, `get`, `set_field`, `clear`, `thresholds_for`, `is_immune`, `links_allowed`, `ai_ignored`, `image_limit_for`, `honorary_rank` |
 | `services/http.py` | 58 | 5 | `session` |
@@ -94,7 +94,7 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 | файл | строк | публичные имена |
 |---|---:|---|
 | `jobs/__init__.py` | 36 | re-export; новая задача, не вписанная сюда, роняет старт `main.py` |
-| `jobs/reports.py` | 264 | `daily_report_loop`, `weekly_group_digest`, `nightly_backup` |
+| `jobs/reports.py` | 294 | `daily_report_loop`, `weekly_group_digest`, `nightly_backup` |
 | `jobs/cleanup.py` | 234 | `cleanup_loop` |
 | `jobs/update.py` | 221 | `forget_update_notice`, `auto_update_loop` |
 | `jobs/news.py` | 201 | `send_news_to_chat`, `news_polling_loop` |

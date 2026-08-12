@@ -260,4 +260,34 @@ async def nightly_backup(application) -> bool:
                     name, backup.human_size(size))
     else:
         logger.error("⚠️ Копия базы сделана (%s), но НЕ доставлена ни одному владельцу", name)
+
+    # ── Статьи базы знаний вторым файлом (2026-08-12) ────────────────────
+    # ⚠️ ЦЕЛИКОМ ПОД try, и метку дня не трогает. Копия базы — главное ради
+    # чего этот цикл существует; она к этому моменту уже ушла, и упавший
+    # архив статей не должен ни отменить её, ни заставить цикл слать базу
+    # заново через час. Не собрался — строка в логе, и ждём следующей ночи.
+    try:
+        kb_path, kb_size, kb_ok, kb_wait = await loop.run_in_executor(None, backup.make_kb_backup)
+        with open(kb_path, "rb") as f:
+            kb_blob = f.read()
+        kb_name = os.path.basename(kb_path)
+        kb_delivered = 0
+        for admin_id in ADMIN_IDS:
+            try:
+                await application.bot.send_document(
+                    chat_id=admin_id, document=kb_blob, filename=kb_name,
+                    caption=backup.kb_caption(kb_name, kb_size, kb_ok, kb_wait),
+                    parse_mode=ParseMode.HTML,
+                )
+                kb_delivered += 1
+            except Exception as e:
+                logger.warning("⚠️ Не удалось отправить архив статей владельцу %s: %s", admin_id, e)
+        if kb_delivered:
+            logger.info("📚 Архив статей базы знаний отправлен владельцу: %s (%s)",
+                        kb_name, backup.human_size(kb_size))
+        else:
+            logger.error("⚠️ Архив статей собран (%s), но НЕ доставлен ни одному владельцу", kb_name)
+    except Exception as e:
+        logger.error("⚠️ Архив статей базы знаний не собран: %s", e)
+
     return True
