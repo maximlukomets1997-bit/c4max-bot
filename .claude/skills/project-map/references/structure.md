@@ -107,8 +107,8 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 |---|---|
 | `quiz/add.py` | отдельный скрипт (53 строки, `main`), тянет `services.quiz_bank`; из бота не вызывается |
 | `quiz/questions.json` | 143 КБ данных |
-| `knowledge/approved/` | статьи базы знаний (`.md`) — источник RAG и справочника `/ttx` |
-| `knowledge/pending/` | статьи, ждущие одобрения |
+| `knowledge/approved/` | статьи базы знаний (`.md`) — источник RAG и справочника `/ttx`; **в git не едет** (папка принадлежит серверу, 12.08.2026) |
+| `knowledge/pending/` | статьи, ждущие одобрения; тоже мимо git |
 | `knowledge/knowledge_base_vectors.json` | указатель RAG; строится ботом, в git не едет |
 | `history.db`, `seed.db` | боевая база и заготовка |
 | `deploy.sh`, `deploy-restart.sh` | выкатка на сервер |
