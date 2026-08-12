@@ -5,7 +5,6 @@
 import html
 import logging
 import os
-import re
 
 import logging_setup
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
@@ -33,21 +32,42 @@ from .common import _adm_back_row, _fmt_mod_time, _is_group_chat, _onoff, _rejec
 #  открытии панели. После перезапуска бота токены из старых сообщений
 #  протухают — обработчик тогда просто заново открывает панель.
 #
-#  Статей больше, чем влезает кнопок в одно сообщение, поэтому список
-#  ЛИСТАЕТСЯ страницами по _KB_PAGE_SIZE (2026-07-31). Карта токенов при этом
-#  собирается по ВСЕМУ списку, а не по видимой странице: иначе кнопка из
+#  ТРИ ЭКРАНА (2026-08-12, просьба Максима). Раньше панель была одна: статусы,
+#  следом ВСЕ статьи-кнопки (84 штуки), а под ними настройки поиска — около
+#  сотни кнопок при потолке Telegram в ~100 и длинная прокрутка ради двух
+#  регуляторов. Теперь:
+#    • разделы   — статусы, журнал и кнопки разделов со счётчиками (13 кнопок);
+#    • список    — статьи одного раздела и возврат «⬅️ К разделам»;
+#    • настройки — три регулятора поиска с пояснениями и возврат.
+#  Какой экран открыт, помнит user_data["kb_screen"]: "" — разделы,
+#  "settings" — настройки, иначе ключ раздела ("pending" или тип из
+#  ARTICLE_KINDS). У каждого владельца своя память, как и у номера страницы.
+#
+#  Раскладка повторяет справочник техники /ttx (handlers/tech.py): те же два
+#  столбца, тот же вид заголовка и листания, та же обрезка названий
+#  (tech_card.short_title). Двух разных манер для одних и тех же статей быть
+#  не должно — Максим смотрит оба экрана.
+#
+#  Длинный раздел ЛИСТАЕТСЯ страницами по _KB_PAGE_SIZE. Карта токенов при этом
+#  собирается по ВСЕМУ списку статей, а не по видимому экрану: иначе кнопка из
 #  предыдущего, ещё не затёртого сообщения показала бы чужую статью или
 #  сказала бы «список устарел». Номер текущей страницы живёт в
 #  user_data["kb_page"] — у каждого владельца свой.
 # ─────────────────────────────────────────────
 
-_KB_PAGE_SIZE = 80  # статей-кнопок НА ОДНОЙ СТРАНИЦЕ (2026-07-31: список стал листаться)
-#   Арифметика потолка Telegram (~100 кнопок на сообщение): 80 статей
-#   + 15 служебных + 3 кнопки листания = 98. Добавляешь новый ряд кнопок в
-#   панель — уменьшай размер страницы на столько же, иначе панель с полной
-#   страницей просто не отправится.
-#   (Раньше был жёсткий потолок _KB_LIST_LIMIT = 81 и статьи сверх него
-#   не показывались вовсе — только надписью «скрыто ещё N».)
+_KB_PAGE_SIZE = 30  # статей-кнопок НА ОДНОЙ СТРАНИЦЕ раздела
+#   Ограничение теперь по ЭКРАНУ ТЕЛЕФОНА, а не по потолку Telegram: 30 статей
+#   в два столбца — 15 рядов, дальше начинается бесконечная прокрутка. В лимит
+#   же экран списка укладывается с огромным запасом (30 + 4 служебных против
+#   ~100), и это правильно: в потолок упиралась именно старая единая панель.
+#   Самый большой раздел сегодня — наземная техника, ровно 30 статей.
+
+# Ключи экранов панели (user_data["kb_screen"] и callback kb_open:<ключ>).
+# Пересечься с типами техники из ARTICLE_KINDS не могут — там ground/air/
+# ship/sub/guide/other.
+_KB_MAIN = "main"          # экран разделов (в user_data хранится пустой строкой)
+_KB_SETTINGS = "settings"  # экран настроек поиска
+_KB_PENDING = "pending"    # раздел «ждут одобрения» (он же имя папки)
 
 
 _KB_ACTION_ICONS = (
@@ -94,102 +114,91 @@ async def _end_kb_test(bot, chat_id: int, context) -> None:
             pass
 
 
+def _kb_test_row(context):
+    """
+    Ряд с кнопкой «⏹️ Завершить проверку» — ТОЛЬКО пока режим проверки поиска
+    включён, и на КАЖДОМ экране панели.
+
+    Иначе выходило бы так: включил проверку на экране разделов, ушёл крутить
+    порог в настройки — и выйти из режима неоткуда, кнопка осталась на другом
+    экране. А уходить в настройки во время проверки как раз и нужно: «спросил
+    → подкрутил порог → спросил снова» — это основной способ его настроить.
+    """
+    if not context.user_data.get("kb_test_mode"):
+        return []
+    return [[InlineKeyboardButton("⏹️ Завершить проверку", callback_data="kb_test")]]
+
+
 def _build_rag_panel(context, admin_id: int):
     """
-    Собирает текст и клавиатуру панели базы знаний: статус модуля RAG и общий
-    тумблер базы, журнал, список статей-кнопок, кнопку проверки поиска и
-    настройки ➖/➕ (порог сходства и число фрагментов — живут в settings).
-    Используется и при отправке панели, и при перерисовке после кнопок.
+    Собирает ТЕКУЩИЙ экран панели базы знаний: (текст, клавиатура). Какой
+    именно — помнит user_data["kb_screen"] (см. шапку модуля). Используется и
+    при отправке панели, и при любой перерисовке после кнопок, поэтому карта
+    токенов обновляется здесь — одна на все экраны.
 
     admin_id остаётся в подписи для совместимости с вызовами: персональных
     настроек в панели больше нет — тумблер базы знаний стал общим (2026-07-27).
     """
-    from config import RAG_ENABLED
-    from services.knowledge_store import list_articles, ARTICLE_KINDS
-    from services.rag import _live_top_k, _live_min_similarity, _live_peak_margin
+    from services.knowledge_store import list_articles
 
     articles = list_articles()
-    pending_count = sum(1 for a in articles if a["folder"] == "pending")
-    approved_count = len(articles) - pending_count
-
-    # Карта токенов — по ВСЕМУ списку статей, а не по видимой странице:
+    # Карта токенов — по ВСЕМУ списку статей, а не по видимому экрану:
     # кнопка из старого сообщения обязана вести к своей статье, а не к соседке.
-    file_map = {str(i): (art["folder"], art["fname"]) for i, art in enumerate(articles)}
+    context.application.bot_data["kb_file_map"] = {
+        str(i): (art["folder"], art["fname"]) for i, art in enumerate(articles)
+    }
 
-    # Страница списка. Номер живёт в user_data, но проверяется здесь: статьи
-    # могли удалить, и запомненная третья страница стала бы пустым экраном.
-    total_pages = max(1, (len(articles) + _KB_PAGE_SIZE - 1) // _KB_PAGE_SIZE)
-    try:
-        page = int(context.user_data.get("kb_page", 0))
-    except (TypeError, ValueError):
-        page = 0
-    page = max(0, min(total_pages - 1, page))
-    context.user_data["kb_page"] = page
-    first = page * _KB_PAGE_SIZE
-    page_articles = articles[first:first + _KB_PAGE_SIZE]
+    screen = str(context.user_data.get("kb_screen") or "")
+    if screen == _KB_SETTINGS:
+        return _build_kb_settings(context)
+    if screen:
+        built = _build_kb_list(context, articles, screen)
+        if built is not None:
+            return built
+        # Раздел опустел, пока экран висел в чате (одобрили последнюю новость,
+        # удалили последнюю статью) — вместо пустого списка возвращаем к
+        # разделам, а не показываем экран, на котором нечего нажать.
+        context.user_data["kb_screen"] = ""
+    return _build_kb_main(context, articles)
 
-    article_buttons = []
-    for i, art in enumerate(page_articles, start=first):
-        token = str(i)
-        # Ожидающие одобрения — часики (тип у сырых новостей не определить).
-        # Одобренные — галочка + смысловой значок типа техники (🚜 наземная,
-        # ✈️ авиация, 🛥️ корабли, ⚓ подлодки, 📘 механики, 📄 тип не опознан);
-        # значки и порядок групп заданы в knowledge_store.ARTICLE_KINDS.
-        if art["folder"] == "pending":
-            icon = "🕐"
-        else:
-            kind = ARTICLE_KINDS.get(art.get("kind"), ARTICLE_KINDS["other"])
-            icon = f"✅{kind['icon']}"
-        # У статей об игровых механиках срезаем приставку «Игровая механика:» —
-        # значок 📘 и так о ней говорит, а на узкой кнопке приставка съедала
-        # всю подпись: разные статьи выглядели одинаково («Игровая механика…»).
-        raw_title = art["title"]
-        if art.get("kind") == "guide":
-            raw_title = re.sub(r"^\s*игровая\s+механика\s*[:：-]\s*", "", raw_title, flags=re.I)
-        # Заголовок урезаем чуть сильнее обычного: второй значок съедает
-        # ширину кнопки, а статьи стоят в три столбца.
-        title = raw_title[:16] + "…" if len(raw_title) > 17 else raw_title
-        article_buttons.append(InlineKeyboardButton(f"{icon} {title}", callback_data=f"kb_view:{token}"))
-    # Статьи — в три столбца (решение владельца 2026-07-18: главное — вместить все)
-    rows = [article_buttons[i:i + 3] for i in range(0, len(article_buttons), 3)]
-    # Листание. Ряд появляется только когда страниц больше одной — иначе
-    # он был бы полосой с надписью «1 / 1», которая никуда не ведёт.
-    # Крайние кнопки на границах списка становятся «пустышками» (kb_noop):
-    # так ряд не «прыгает» по ширине при переходе со страницы на страницу.
-    if total_pages > 1:
-        prev_data = f"kb_page:{page - 1}" if page > 0 else "kb_noop"
-        next_data = f"kb_page:{page + 1}" if page < total_pages - 1 else "kb_noop"
-        rows.append([
-            InlineKeyboardButton("⬅️" if page > 0 else "▫️", callback_data=prev_data),
-            InlineKeyboardButton(f"📄 Страница {page + 1} из {total_pages}", callback_data="kb_noop"),
-            InlineKeyboardButton("➡️" if page < total_pages - 1 else "▫️", callback_data=next_data),
-        ])
+
+def _build_kb_main(context, articles):
+    """
+    Экран разделов: статусы, журнал последних действий и кнопки разделов со
+    счётчиками. Пустой раздел кнопки не получает — за ней ничего не стояло бы
+    (то же правило, что в каталоге /ttx). Поэтому раздел «📄 Без типа» обычно
+    не виден вовсе, а появившись, сам работает сигналом: в первой строке
+    какой-то статьи забыли указать тип техники.
+    """
+    from config import RAG_ENABLED
+    from services.knowledge_store import ARTICLE_KINDS
+
+    pending_count = sum(1 for a in articles if a["folder"] == "pending")
+    approved = [a for a in articles if a["folder"] == "approved"]
+
+    rows = []
+    if pending_count:
+        rows.append([InlineKeyboardButton(f"🕐 Ждут одобрения ({pending_count})",
+                                          callback_data=f"kb_open:{_KB_PENDING}")])
+
+    counts = {}
+    for art in approved:
+        counts[art.get("kind")] = counts.get(art.get("kind"), 0) + 1
+    kind_buttons = [
+        InlineKeyboardButton(f"{meta['icon']} {meta['name'].capitalize()} ({counts[kind]})",
+                             callback_data=f"kb_open:{kind}")
+        for kind, meta in sorted(ARTICLE_KINDS.items(), key=lambda kv: kv[1]["order"])
+        if counts.get(kind)
+    ]
+    rows += [kind_buttons[i:i + 2] for i in range(0, len(kind_buttons), 2)]
+
     # Кнопка-переключатель: пока проверка идёт, показывает «Завершить» —
     # чтобы админ всегда видел, что находится в режиме теста, и как выйти.
     test_on = bool(context.user_data.get("kb_test_mode"))
     test_label = "⏹️ Завершить проверку" if test_on else "🔍 Проверить поиск"
-    rows.append([InlineKeyboardButton(test_label, callback_data="kb_test")])
-    # Настройки поиска: порог сходства и число фрагментов (кнопки ➖/➕,
-    # как в панели модерации; значение на средней кнопке, она «пустышка»)
-    thr_pct = int(round(_live_min_similarity() * 100))
     rows.append([
-        InlineKeyboardButton("➖", callback_data="kb_thr_dec"),
-        InlineKeyboardButton(f"🎯 Порог: {thr_pct}%", callback_data="kb_noop"),
-        InlineKeyboardButton("➕", callback_data="kb_thr_inc"),
-    ])
-    rows.append([
-        InlineKeyboardButton("➖", callback_data="kb_topk_dec"),
-        InlineKeyboardButton(f"📦 Статей в ответ: {_live_top_k()}", callback_data="kb_noop"),
-        InlineKeyboardButton("➕", callback_data="kb_topk_inc"),
-    ])
-    # Запас «пик над полкой»: насколько статья должна оторваться от общего фона,
-    # чтобы попасть в ответ. Больше запас — меньше случайных совпадений на
-    # болтовне («ахахахах»), но и настоящие попадания найти труднее.
-    margin_pct = int(round(_live_peak_margin() * 100))
-    rows.append([
-        InlineKeyboardButton("➖", callback_data="kb_margin_dec"),
-        InlineKeyboardButton(f"📈 Запас над фоном: {margin_pct}%", callback_data="kb_noop"),
-        InlineKeyboardButton("➕", callback_data="kb_margin_inc"),
+        InlineKeyboardButton(test_label, callback_data="kb_test"),
+        InlineKeyboardButton("⚙️ Настройки поиска", callback_data=f"kb_open:{_KB_SETTINGS}"),
     ])
     # ОБЩИЙ тумблер базы знаний (2026-07-27, просьба Максима — был персональным,
     # только для лички админа). Выключен — база не подмешивается никому и нигде:
@@ -197,34 +206,147 @@ def _build_rag_panel(context, admin_id: int):
     # единственной точке — services/rag.py::retrieve_relevant_context.
     # Ключ хранится ПРЯМО ("1" = включена), переворачивать не надо.
     kb_on = get_setting("rag_enabled", "1") == "1"
-    kb_btn = f"📖 База знаний: {_onoff(kb_on)}"
-    rows.append([InlineKeyboardButton(kb_btn, callback_data="kb_myrag")])
+    rows.append([InlineKeyboardButton(f"📖 База знаний: {_onoff(kb_on)}", callback_data="kb_myrag")])
     rows.append([
         InlineKeyboardButton("➕ Добавить RAG", callback_data="kb_add"),
         InlineKeyboardButton("🔄 Пересобрать RAG", callback_data="kb_rebuild"),
     ])
     rows.append([InlineKeyboardButton("🧹 Очистить журнал", callback_data="kb_clearlog")] + _adm_back_row())
-    context.application.bot_data["kb_file_map"] = file_map
 
     rag_status = "🟢 включён" if RAG_ENABLED else "🔴 выключен (RAG_ENABLED в .env)"
     kb_status = "🟢 ВКЛЮЧЕНА" if kb_on else "🔴 ВЫКЛЮЧЕНА (тумблер ниже)"
-    # Подпись страницы показывается только при листании — при одной странице
-    # она была бы шумом («статьи 1–80 из 80»).
-    page_note = ""
-    if total_pages > 1:
-        page_note = (f"\n\n<i>Страница {page + 1} из {total_pages}: "
-                     f"статьи {first + 1}–{first + len(page_articles)} из {len(articles)}. "
-                     f"Остальные — кнопками ⬅️ ➡️.</i>")
     text = (
         "📚 <b>База знаний (RAG)</b>\n"
         "───────────────────────────\n"
         f"🌐 Модуль RAG: <b>{rag_status}</b>\n"
         f"📖 База знаний для всех: <b>{kb_status}</b>\n"
         f"🕐 Ждут одобрения: <b>{pending_count}</b>\n"
-        f"✅ В базе знаний: <b>{approved_count}</b>"
+        f"✅ В базе знаний: <b>{len(approved)}</b>"
         + _kb_recent_actions_block()
-        + "\n\nНажми на статью, чтобы открыть её карточку."
-        + page_note
+        + "\n\nВыбери раздел — статьи внутри."
+    )
+    return text, InlineKeyboardMarkup(rows)
+
+
+def _build_kb_list(context, articles, screen: str):
+    """
+    Экран одного раздела: (текст, клавиатура) — или None, если раздела нет
+    либо он пуст (сборщик выше на этом вернёт к разделам).
+
+    Номера-токены берутся из ОБЩЕГО списка статей, а не из порядкового номера
+    внутри раздела: карта токенов одна на всю панель, и кнопка обязана вести к
+    своей статье с любого экрана.
+
+    Значок типа на кнопках не ставится — он уже в заголовке экрана, а место
+    отдано названию: на общем списке оно резалось до 16 знаков и разные статьи
+    выглядели одинаково.
+    """
+    from services.knowledge_store import ARTICLE_KINDS
+    from services.tech_card import short_title
+
+    if screen == _KB_PENDING:
+        picked = [(i, a) for i, a in enumerate(articles) if a["folder"] == "pending"]
+        icon, name = "🕐", "ждут одобрения"
+        hint = "Нажми на новость — открою её карточку с кнопкой «Одобрить»."
+    else:
+        meta = ARTICLE_KINDS.get(screen)
+        if meta is None:
+            return None
+        picked = [(i, a) for i, a in enumerate(articles)
+                  if a["folder"] == "approved" and a.get("kind") == screen]
+        icon, name = meta["icon"], meta["name"]
+        hint = "Нажми на статью — открою её карточку."
+    if not picked:
+        return None
+
+    # Номер страницы живёт в user_data, но проверяется здесь: статьи могли
+    # удалить, и запомненная вторая страница стала бы пустым экраном.
+    total_pages = max(1, (len(picked) + _KB_PAGE_SIZE - 1) // _KB_PAGE_SIZE)
+    try:
+        page = int(context.user_data.get("kb_page", 0))
+    except (TypeError, ValueError):
+        page = 0
+    page = max(0, min(total_pages - 1, page))
+    context.user_data["kb_page"] = page
+    first = page * _KB_PAGE_SIZE
+    chunk = picked[first:first + _KB_PAGE_SIZE]
+
+    buttons = [InlineKeyboardButton(short_title(art["title"]), callback_data=f"kb_view:{i}")
+               for i, art in chunk]
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+
+    # Листание. Ряд появляется только когда страниц больше одной — иначе
+    # он был бы полосой с надписью «1 из 1», которая никуда не ведёт.
+    # Крайние кнопки на границах списка становятся «пустышками» (kb_noop):
+    # так ряд не «прыгает» по ширине при переходе со страницы на страницу.
+    if total_pages > 1:
+        prev_data = f"kb_page:{page - 1}" if page > 0 else "kb_noop"
+        next_data = f"kb_page:{page + 1}" if page < total_pages - 1 else "kb_noop"
+        rows.append([
+            InlineKeyboardButton("⬅️" if page > 0 else "▫️", callback_data=prev_data),
+            InlineKeyboardButton(f"📄 {page + 1} из {total_pages}", callback_data="kb_noop"),
+            InlineKeyboardButton("➡️" if page < total_pages - 1 else "▫️", callback_data=next_data),
+        ])
+    rows += _kb_test_row(context)
+    rows.append([InlineKeyboardButton("⬅️ К разделам", callback_data=f"kb_open:{_KB_MAIN}")])
+
+    text = (
+        f"{icon} <b>{name.upper()}</b>\n"
+        "───────────────────────────\n"
+        f"Статьи {first + 1}–{first + len(chunk)} из {len(picked)}"
+        + (f" · страница {page + 1} из {total_pages}" if total_pages > 1 else "")
+        + "\n───────────────────────────\n"
+        f"<i>{hint}</i>"
+    )
+    return text, InlineKeyboardMarkup(rows)
+
+
+def _build_kb_settings(context):
+    """
+    Экран настроек поиска: три регулятора ➖/➕ (значение на средней кнопке,
+    она «пустышка» — как в панели модерации).
+
+    Пояснения к регуляторам написаны прямо на экране: значения тут неочевидны
+    даже по названию, а крутит их владелец редко и вспоминать смысл каждый раз
+    заново — верный способ выкрутить не то.
+    """
+    from services.rag import _live_top_k, _live_min_similarity, _live_peak_margin
+
+    thr_pct = int(round(_live_min_similarity() * 100))
+    margin_pct = int(round(_live_peak_margin() * 100))
+    rows = [
+        [
+            InlineKeyboardButton("➖", callback_data="kb_thr_dec"),
+            InlineKeyboardButton(f"🎯 Порог: {thr_pct}%", callback_data="kb_noop"),
+            InlineKeyboardButton("➕", callback_data="kb_thr_inc"),
+        ],
+        [
+            InlineKeyboardButton("➖", callback_data="kb_topk_dec"),
+            InlineKeyboardButton(f"📦 Статей в ответ: {_live_top_k()}", callback_data="kb_noop"),
+            InlineKeyboardButton("➕", callback_data="kb_topk_inc"),
+        ],
+        [
+            InlineKeyboardButton("➖", callback_data="kb_margin_dec"),
+            InlineKeyboardButton(f"📈 Запас над фоном: {margin_pct}%", callback_data="kb_noop"),
+            InlineKeyboardButton("➕", callback_data="kb_margin_inc"),
+        ],
+    ]
+    rows += _kb_test_row(context)
+    rows.append([InlineKeyboardButton("⬅️ К разделам", callback_data=f"kb_open:{_KB_MAIN}")])
+
+    text = (
+        "⚙️ <b>НАСТРОЙКИ ПОИСКА</b>\n"
+        "───────────────────────────\n"
+        "🎯 <b>Порог</b> — насколько статья должна быть похожа на вопрос, "
+        "чтобы её вообще рассматривать. Вспомогательный ограничитель.\n\n"
+        "📦 <b>Статей в ответ</b> — сколько найденных статей уходит модели "
+        "вместе с вопросом.\n\n"
+        "📈 <b>Запас над фоном</b> — насколько статья должна выделяться среди "
+        "всех остальных. Это главный судья: у настоящего вопроса одна статья "
+        "заметно ближе прочих, у болтовни все похожи одинаково.\n"
+        "───────────────────────────\n"
+        "<i>Проверить, что получилось, можно кнопкой «🔍 Проверить поиск» "
+        "на экране разделов — она покажет баллы, не тратя модель.</i>"
     )
     return text, InlineKeyboardMarkup(rows)
 
@@ -316,9 +438,14 @@ async def _handle_kb_callback(query, context, data: str, chat_id: int, user_id: 
     # Листание списка (kb_page) режим теста тоже переживает: со страницы на
     # страницу — то же «смотрю панель», а не выход из неё; удалять на этом
     # накопленные тестовые сообщения было бы неожиданно.
+    # Переходы между экранами (kb_open) — по той же причине, и ещё по одной:
+    # регуляторы поиска теперь живут на ОТДЕЛЬНОМ экране, а «спросил →
+    # подкрутил порог → спросил снова» и есть основной способ их настроить.
+    # Чтобы выход из режима не потерялся на другом экране, кнопка «Завершить
+    # проверку» показывается на всех экранах панели (_kb_test_row).
     if action not in ("kb_test", "kb_noop", "kb_thr_dec", "kb_thr_inc",
                       "kb_topk_dec", "kb_topk_inc", "kb_myrag",
-                      "kb_margin_dec", "kb_margin_inc", "kb_page"):
+                      "kb_margin_dec", "kb_margin_inc", "kb_page", "kb_open"):
         await _end_kb_test(context.bot, chat_id, context)
 
     # ── Кнопки без токена (не привязаны к конкретному файлу) ────────────
@@ -341,6 +468,33 @@ async def _handle_kb_callback(query, context, data: str, chat_id: int, user_id: 
             await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
         except Exception as e:
             logger.debug("📚 Не удалось перелистнуть список статей: %s", e)
+        return
+
+    if action == "kb_open":
+        # Переход между экранами панели: разделы ↔ список раздела ↔ настройки.
+        # Экран разделов хранится ПУСТОЙ строкой, а не словом "main": пустое
+        # значение — то же, что «ключа ещё нет», и панель у нового владельца
+        # открывается с разделов без всякой отдельной подготовки.
+        context.user_data["kb_screen"] = "" if token == _KB_MAIN else token
+        # Страницу всегда начинаем с первой: номер один на все разделы, и
+        # вторая страница танков в разделе из трёх подлодок была бы пустой.
+        context.user_data["kb_page"] = 0
+        await query.answer()
+        text, markup = _build_rag_panel(context, user_id)
+        try:
+            await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+        except Exception as e:
+            logger.debug("📚 Не удалось открыть экран панели RAG: %s", e)
+        return
+
+    if action == "kb_panel":
+        # Возврат к панели из карточки статьи и отмена в подтверждении очистки
+        # журнала. Экран открывается ТОТ ЖЕ, с которого ушли (kb_screen не
+        # трогаем): открыл статью из раздела «Корабли» — вернулся в «Корабли».
+        # ⚠️ Ветка нужна явная: без неё kb_panel доходил до разбора токена,
+        # не находил пустой токен в карте и всплывал ложным «Список устарел».
+        await query.answer()
+        await send_rag_panel(context.bot, chat_id, context)
         return
 
     if action == "kb_test":
@@ -637,10 +791,12 @@ async def cmd_rag(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await _end_kb_test(context.bot, update.effective_chat.id, context)  # выход из проверки поиска — с уборкой
-    # Команда — осознанное открытие раздела заново, поэтому список начинается
-    # с первой страницы. Возврат из карточки статьи («⬅️ К списку») и
-    # перерисовка после одобрения/удаления страницу, наоборот, сохраняют.
+    # Команда — осознанное открытие панели заново, поэтому она открывается
+    # с экрана разделов и с первой страницы. Возврат из карточки статьи
+    # («⬅️ К списку») и перерисовка после одобрения/удаления, наоборот,
+    # оставляют владельца там, где он был.
     context.user_data["kb_page"] = 0
+    context.user_data["kb_screen"] = ""
     await send_rag_panel(context.bot, update.effective_chat.id, context)
 
 

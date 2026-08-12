@@ -25,7 +25,7 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 | `utils.py` | 181 | 19 | `should_respond_in_group`, `clean_mention`, `keep_chat_action`, `delete_user_message_safe`, `mention`, `schedule_delete`, `register_and_clean_bot_message` |
 | `utils_format.py` | 304 | 7 | `strip_thoughts`, `thoughts_enabled`, `build_text_and_entities`, `send_formatted`, `convert_md`, `fits_caption`, `reply_md` |
 | `logging_setup.py` | 248 | 7 | `archive_old_logs`, `setup_logging` |
-| `preflight.py` | 577 | 0 | `check_imports`, `check_models`, `check_providers`, `check_tables`, `check_ranks`, `check_callbacks`, `check_panels`, `check_handlers`, `main` |
+| `preflight.py` | 591 | 0 | `check_imports`, `check_models`, `check_providers`, `check_tables`, `check_ranks`, `check_callbacks`, `check_panels`, `check_handlers`, `main` |
 | `reset_db.py` | 81 | 0 | `main` |
 | `watchdog_local.py` | 297 | 0 | `main` |
 
@@ -59,7 +59,7 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 | `handlers/admin/panel_main.py` | 439 | 4 | `send_stats_panel`, `send_api_panel`, `send_daily_report_panel`, `send_weekly_report_panel`, `cmd_stats`, `build_adm_keyboard`, `send_adm_panel`, `cmd_adm` |
 | `handlers/admin/panel_prompts.py` | 1225 | 3 | `send_prompt_files`, `send_prompts_panel`, `handle_prompt_reset`, `cmd_prompt_set/add/reset`, `cmd_news_prompt_set/reset`, `cmd_rag_prompt_set/reset`, `cmd_proactive_prompt_set/reset` |
 | `handlers/admin/panel_users.py` | 1337 | 3 | `send_users_panel`, `send_user_card`, `cmd_users` |
-| `handlers/admin/panel_rag.py` | 798 | 6 | `send_rag_panel`, `cmd_rag`, `handle_kb_document`, `handle_kb_test_query` |
+| `handlers/admin/panel_rag.py` | 954 | 6 | `send_rag_panel`, `cmd_rag`, `handle_kb_document`, `handle_kb_test_query` (панель из трёх экранов: разделы → список раздела → настройки поиска) |
 | `handlers/admin/panel_mod.py` | 591 | 3 | `send_mod_panel`, `cmd_mod`, `cmd_unmute` |
 | `handlers/admin/panel_quiz.py` | 549 | 3 | `send_quiz_panel`, `cmd_quiz_admin` |
 | `handlers/admin/panel_balance.py` | 441 | 3 | `send_balance_panel`, `handle_balance_input` |

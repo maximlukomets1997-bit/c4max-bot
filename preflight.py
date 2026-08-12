@@ -445,6 +445,19 @@ def check_panels():
     owner = config.ADMIN_IDS[0] if config.ADMIN_IDS else 1
     ctx = _FakeContext()
 
+    def kb_ctx(screen: str):
+        """
+        Контекст с ОТКРЫТЫМ экраном панели базы знаний (2026-08-12): у неё их
+        три — разделы, список раздела, настройки поиска, — и собираться обязан
+        каждый. С пустым user_data проверялся бы только первый.
+        ⚠️ На пустой базе (свежий клон, CI) список раздела показать нечего, и
+        сборщик честно возвращает экран разделов. Проверка от этого не врёт:
+        она сторожит сборку и лимиты, а не наличие статей.
+        """
+        c = _FakeContext()
+        c.user_data["kb_screen"] = screen
+        return c
+
     active = config.GEMINI_MODEL
     active_image = next(iter(config.AVAILABLE_IMAGE_MODELS), "")
 
@@ -464,6 +477,8 @@ def check_panels():
         # обязана и на пустой истории.
         "обновления": lambda: _build_updates_panel(0),
         "база знаний": lambda: _build_rag_panel(ctx, owner),
+        "база знаний: раздел": lambda: _build_rag_panel(kb_ctx("ground"), owner),
+        "база знаний: настройки": lambda: _build_rag_panel(kb_ctx("settings"), owner),
         "викторина": lambda: _build_quiz_panel(ctx),
     }
 
