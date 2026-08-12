@@ -75,7 +75,7 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 | `services/daily_report.py` | 793 | 7 | `kyiv_now`, `kyiv_label`, `collect_counters`, `period_totals`, `render`, `build_report`, `midnight_report`, `today_so_far`, `weekly_report`, `week_so_far`, `last_report_text`, `last_weekly_text` и др. |
 | `services/rag.py` | 777 | 5 | `cosine_similarity`, `RagQuotaError`, `get_embedding`, `parse_article_file`, `get_kb_stats`, `load_knowledge_base`, `sync_knowledge_base`, `index_lag`, `rebuild_knowledge_base`, `normalize_query`, `retrieve_relevant_context`, `test_search` |
 | `services/proactive.py` | 599 | 2 | `skip_counts`, `is_enabled`, `hands_enabled`, `note_bot_group_reply`, `forget_conversations`, `consider_message` |
-| `services/tech_card.py` | 506 | 1 | `index`, `find_local`, `suggest`, `by_kind`, `by_title`, `token`, `by_token`, `load`, `render_card`, `render_section`, `render_candidates`, `kinds_summary`, `section_label`, `is_specs`, `short_title`, `kind_icon` |
+| `services/tech_card.py` | 513 | 1 | `index`, `find_local`, `suggest`, `by_kind`, `by_title`, `token`, `by_token`, `load`, `render_card`, `render_section`, `render_candidates`, `kinds_summary`, `section_label`, `is_specs`, `short_title`, `kind_icon` |
 | `services/quiz_bank.py` | 478 | 2 | `articles_without_questions`, `generate_for_article`, `generate_batch`, `retry_failed`, `stats`, `seed_stats`, `load_seed` |
 | `services/greeter.py` | 419 | 3 | `is_enabled`, `captcha_enabled`, `kick_enabled`, `timeout_sec`, `on_chat_member`, `handle_join_callback` |
 | `services/scraper.py` | 346 | 1 | `fetch_latest_news`, `fetch_article` (сайт `https://wtmobile.com/ru/news`) |
