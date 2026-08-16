@@ -34,6 +34,60 @@ async def _archive_bot_group_reply(bot, chat_id: int, answer: str):
         logger.debug("🤖 Не удалось сохранить ответ бота в архив групп: %s", e)
 
 
+# Потолок на цитату из сообщения, на которое отвечают. Reply прилетает и на
+# простыни (длинная новость, чужой пересказ), а целиком они в запросе не нужны.
+_REPLY_CONTEXT_MAX = 4000
+
+
+def _reply_context_block(message, bot) -> str:
+    """
+    Блок «на какое сообщение отвечают» (2026-08-16, решение Максима).
+
+    Зачем: Reply Telegram присылает ОТДЕЛЬНЫМ полем, в тексте сообщения его
+    нет вовсе. Из-за этого бот получал голое «а это точно?» и не знал, о чём
+    речь, — заметнее всего на рассылке новостей: их он отправляет фоновой
+    задачей, и в его личной переписке с человеком новости нет ни строчкой.
+
+    Работает и в группе, и в личке, и на ответ боту, и на ответ другому
+    человеку (тогда цитата подписывается его именем).
+
+    ⚠️ У длинной новости картинки уходят ОТДЕЛЬНЫМ сообщением без подписи
+    (jobs/news.py: подпись к альбому не длиннее 1024 символов). Reply на такую
+    картинку текста не даёт вовсе, и блок получится пустым — этот случай
+    закрывает не он, а память о последней новости (gemini._last_news_block).
+
+    Возвращает готовый блок или "" (не Reply / пустая цитата / любая ошибка —
+    справка не должна ронять ответ).
+    """
+    try:
+        src = getattr(message, "reply_to_message", None)
+        if src is None:
+            return ""
+        text = (src.text or src.caption or "").strip()
+        if not text:
+            return ""
+        if len(text) > _REPLY_CONTEXT_MAX:
+            text = text[:_REPLY_CONTEXT_MAX] + "…"
+
+        author = getattr(src, "from_user", None)
+        if author and bot and author.id == bot.id:
+            whose = "на твоё собственное сообщение"
+        elif author:
+            name = author.first_name or (f"@{author.username}" if author.username
+                                         else f"участника {author.id}")
+            whose = f"на сообщение участника {name}"
+        else:
+            whose = "на сообщение в чате"
+
+        return (
+            "[На какое сообщение отвечают]\n"
+            f"Человек отвечает {whose}:\n«{text}»"
+        )
+    except Exception as e:
+        logger.debug("🤖 Не удалось собрать справку об ответе (Reply): %s", e)
+        return ""
+
+
 def _ai_replies_muted_for_admin(user_id: int, is_group: bool) -> bool:
     """
     True, если ответы ИИ выключены тумблером «💬 ОТВЕТЫ ИИ» в панели промптов
@@ -97,7 +151,12 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             image_base64 = base64.b64encode(file_bytes).decode('utf-8')
 
             loop = asyncio.get_running_loop()
-            answer = await loop.run_in_executor(None, ask_gemini, chat_id, user_id, user_text, image_base64)
+            # Пятым аргументом — на какое сообщение отвечают (пусто, если это
+            # не Reply): фото тоже присылают ответом на чужое сообщение.
+            answer = await loop.run_in_executor(
+                None, ask_gemini, chat_id, user_id, user_text, image_base64,
+                _reply_context_block(message, context.bot)
+            )
 
         # Единая отправка: форматирование + безопасная нарезка длинных ответов.
         # Текст ответа в лог не пишем: модель, время и токены уже логирует
@@ -330,8 +389,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with keep_chat_action(context.bot, chat_id, "typing"):
         # Запрос к модели в отдельном потоке, чтобы не блокировать event loop
         loop   = asyncio.get_running_loop()
+        # Четвёртым аргументом картинки нет (None), пятым — на какое сообщение
+        # отвечают: без него бот получал голое «а это точно?» без предмета.
         answer = await loop.run_in_executor(
-            None, ask_gemini, chat_id, user.id, user_text
+            None, ask_gemini, chat_id, user.id, user_text, None,
+            _reply_context_block(message, context.bot)
         )
 
     # Единая отправка: форматирование (telegramify) + сворачиваемые мысли +
