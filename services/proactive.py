@@ -76,6 +76,16 @@ _last_judge_ts: dict[int, float] = {}     # chat_id → monotonic последн
 _last_reply_ts: dict[int, float] = {}     # chat_id → monotonic последней реплики бота
 _in_flight: set[int] = set()              # чаты с проверкой «в полёте» (защёлка от гонки)
 
+# Исходы проверки человеческими словами — для строки «ИТОГ» в логе разговора.
+# Коды те же, что уходят в журнал proactive_log.
+_OUTCOME_RU = {
+    "reply": "реплика ушла в чат",
+    "reply_mute": "реплика ушла в чат, автору выдан мут",
+    "silent": "бот решил промолчать",
+    "empty": "реплики нет — ответ состоял из одной пометки мута",
+    "error": "проверка сорвалась ошибкой",
+}
+
 # ─── счётчик отсева дешёвыми фильтрами (2026-07-31) ──────────────────
 #
 #  Сколько сообщений групп до модели НЕ дошло и почему. Отвечает на вопрос
@@ -385,6 +395,12 @@ async def _run_proactive(bot, chat_id: int, trigger_message_id: int, trigger_tex
     model_at_check = get_setting("active_model", "")
     started = time.monotonic()
 
+    # Дословный лог разговора (2026-08-16, просьба Максима): шапка проверки, под
+    # неё лягут разбор вложения, запрос к модели, её ответ и исход.
+    # Файл — logs/chat, подробности в services/chat_log.py.
+    from services import chat_log
+    chat_log.note_check(chat_id, trigger_kind, trigger_user_id, trigger_text)
+
     def _note(outcome: str, reply_len: int = 0) -> None:
         """Записать исход проверки. «Тихая»: журнал не должен ломать режим."""
         try:
@@ -392,6 +408,9 @@ async def _run_proactive(bot, chat_id: int, trigger_message_id: int, trigger_tex
                                 time.monotonic() - started, reply_len, trigger_kind)
         except Exception as e:
             logger.debug("🤖 Не удалось записать проверку в журнал: %s", e)
+        # Строка «ИТОГ» в логе разговора стоит ЗДЕСЬ, а не в каждой ветке:
+        # это единственное место, через которое проходят все исходы сразу.
+        chat_log.note_outcome(_OUTCOME_RU.get(outcome, outcome))
 
     try:
         loop = asyncio.get_running_loop()
@@ -427,6 +446,9 @@ async def _run_proactive(bot, chat_id: int, trigger_message_id: int, trigger_tex
                     # смотреть. Не возвращать текст в лог без просьбы Максима.
                     logger.info("🤖 Чат %s: фото проанализировано (%d символов)",
                                 chat_id, len(description))
+                    # Сам текст разбора — в лог разговора (в общий по-прежнему
+                    # не пишем, см. предупреждение выше).
+                    chat_log.note_media("фото", len(file_bytes), description)
                     # ⚠️ ОПИСАНИЕ ОБЁРНУТО В КВАДРАТНЫЕ СКОБКИ — 2026-08-10,
                     # разбор жалобы Максима «бот шутит про ИИ, людей это бесит».
                     # ⚠️ Внутри скобок ТОЛЬКО текст модели, без приписки «на
@@ -474,6 +496,7 @@ async def _run_proactive(bot, chat_id: int, trigger_message_id: int, trigger_tex
                 if transcription:
                     logger.info("🤖 Чат %s: голосовое расшифровано (%d символов)",
                                 chat_id, len(transcription))   # текста в логе нет, см. фото выше
+                    chat_log.note_media("голосовое", len(file_bytes), transcription)
                     enriched_text = transcription
             except Exception as e:
                 logger.debug("🤖 Чат %s: не удалось скачать/расшифровать голосовое: %s", chat_id, e)
@@ -492,6 +515,7 @@ async def _run_proactive(bot, chat_id: int, trigger_message_id: int, trigger_tex
                 if description:
                     logger.info("🤖 Чат %s: видео проанализировано (%d символов)",
                                 chat_id, len(description))   # текста в логе нет, см. фото выше
+                    chat_log.note_media("видео", len(file_bytes), description)
                     # Описание ПОВЕРХ подписи — как у фото, и так же в скобках
                     # (2026-08-10): причина та же, описание ролика — не слова
                     # участника. Подробности у фото выше.
@@ -518,6 +542,9 @@ async def _run_proactive(bot, chat_id: int, trigger_message_id: int, trigger_tex
 
         if not enriched_text.strip():
             logger.info("🤖 Чат %s: триггер пуст после анализа медиа — пропускаем", chat_id)
+            # Единственный выход, который не проходит через _note (в журнал
+            # проверок он тоже не пишется — модели тут не было вовсе).
+            chat_log.note_outcome("до модели не дошло — триггер пуст после разбора вложения")
             return
 
         # ⚡ НА МЕДИА ОТВЕЧАЕТ ТА ЖЕ МОДЕЛЬ, ЧТО ЕГО СМОТРИТ (2026-08-11,

@@ -14,7 +14,7 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 наружу. Имена с подчёркиванием тоже иногда зовут снаружи — проверяй
 скриптом `impact.py`, а не этим списком.
 
-Всего файлов с кодом: **55**. Тестовых файлов: **0**.
+Всего файлов с кодом: **56**. Тестовых файлов: **0**.
 
 ## Корень
 
@@ -55,10 +55,10 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 | файл | строк | тянут | публичные имена |
 |---|---:|---:|---|
 | `handlers/admin/__init__.py` | 39 | 4 | только re-export; новое имя, не вписанное сюда, роняет старт бота |
-| `handlers/admin/common.py` | 377 | 13 | публичных нет — всё через имена с подчёркиванием (`_onoff`, `_require`, `_send_panel_message`, `_adm_back_row` и др.), но тянут его 13 модулей |
-| `handlers/admin/router.py` | 601 | 1 | `handle_callback_query` — единственный роутер всех кнопок |
+| `handlers/admin/common.py` | 486 | 13 | публичных нет — всё через имена с подчёркиванием (`_onoff`, `_require`, `_send_panel_message`, `_adm_back_row` и др.), но тянут его 13 модулей |
+| `handlers/admin/router.py` | 706 | 1 | `handle_callback_query` — единственный роутер всех кнопок |
 | `handlers/admin/panel_main.py` | 436 | 4 | `send_stats_panel`, `send_api_panel`, `send_daily_report_panel`, `send_weekly_report_panel`, `cmd_stats`, `build_adm_keyboard`, `send_adm_panel`, `cmd_adm` |
-| `handlers/admin/panel_prompts.py` | 1235 | 3 | `send_prompt_files`, `send_prompts_panel`, `handle_prompt_reset`, `cmd_prompt_set/add/reset`, `cmd_news_prompt_set/reset`, `cmd_rag_prompt_set/reset`, `cmd_proactive_prompt_set/reset` |
+| `handlers/admin/panel_prompts.py` | 1241 | 3 | `send_prompt_files`, `send_prompts_panel`, `handle_prompt_reset`, `cmd_prompt_set/add/reset`, `cmd_news_prompt_set/reset`, `cmd_rag_prompt_set/reset`, `cmd_proactive_prompt_set/reset` |
 | `handlers/admin/panel_users.py` | 1337 | 3 | `send_users_panel`, `send_user_card`, `cmd_users` |
 | `handlers/admin/panel_rag.py` | 1000 | 6 | `send_rag_panel`, `cmd_rag`, `handle_kb_document`, `handle_kb_test_query` (панель из трёх экранов: разделы → список раздела → настройки поиска) |
 | `handlers/admin/panel_mod.py` | 589 | 3 | `send_mod_panel`, `cmd_mod`, `cmd_unmute` |
@@ -71,11 +71,11 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 
 | файл | строк | тянут | публичные имена |
 |---|---:|---:|---|
-| `services/gemini.py` | 2408 | 7 | `compress_newlines`, `ask_gemini`, `ask_gemini_audio`, `ask_gemini_video`, `format_news_as_colonel`, `author_brief`, `last_news_brief`, `ask_group_proactive`, `ask_group_proactive_media`, `generate_image` |
+| `services/gemini.py` | 2442 | 7 | `compress_newlines`, `ask_gemini`, `ask_gemini_audio`, `ask_gemini_video`, `format_news_as_colonel`, `author_brief`, `last_news_brief`, `ask_group_proactive`, `ask_group_proactive_media`, `generate_image` |
 | `services/antispam.py` | 861 | 7 | `is_enabled`, `get_thresholds`, `get_thresholds_for`, `trust_info`, `check_and_mute`, `unmute`, `mute_user`, `kick_user`, `ban_user`, `unban_user`, `notify_owners_ai_mute`, `is_linkfilter_enabled`, `check_and_delete_links`, `get_mute_stats`, `get_recent_actions`, `get_evidence` |
 | `services/daily_report.py` | 781 | 7 | `kyiv_now`, `kyiv_label`, `collect_counters`, `period_totals`, `render`, `midnight_report`, `today_so_far`, `weekly_report`, `week_so_far`, `last_report_text`, `last_weekly_text` и др. |
 | `services/rag.py` | 795 | 5 | `cosine_similarity`, `RagQuotaError`, `get_embedding`, `parse_article_file`, `is_active`, `sync_knowledge_base`, `index_lag`, `rebuild_knowledge_base`, `normalize_query`, `retrieve_relevant_context`, `test_search` |
-| `services/proactive.py` | 605 | 2 | `skip_counts`, `is_enabled`, `hands_enabled`, `note_bot_group_reply`, `forget_conversations`, `consider_message` |
+| `services/proactive.py` | 632 | 2 | `skip_counts`, `is_enabled`, `hands_enabled`, `note_bot_group_reply`, `forget_conversations`, `consider_message` |
 | `services/tech_card.py` | 514 | 2 | `index`, `find_local`, `suggest`, `by_kind`, `by_title`, `token`, `by_token`, `load`, `render_card`, `render_section`, `render_candidates`, `kinds_summary`, `section_label`, `is_specs`, `short_title`, `kind_icon` |
 | `services/quiz_bank.py` | 478 | 2 | `articles_without_questions`, `generate_for_article`, `generate_batch`, `retry_failed`, `stats`, `seed_stats`, `load_seed` |
 | `services/greeter.py` | 417 | 3 | `is_enabled`, `captcha_enabled`, `kick_enabled`, `timeout_sec`, `on_chat_member`, `handle_join_callback` |
@@ -87,6 +87,7 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 | `services/backup.py` | 272 | 2 | `backup_dir`, `human_size`, `make_backup`, `list_backups`, `make_kb_backup`, `kb_caption`, `due_today`, `note_done` |
 | `services/deploy.py` | 164 | 3 | `note_activity`, `quiet_for`, `can_update`, `update`, `describe` |
 | `services/user_settings.py` | 148 | 9 | `load`, `refresh`, `get`, `set_field`, `clear`, `thresholds_for`, `is_immune`, `links_allowed`, `ai_ignored`, `image_limit_for`, `honorary_rank` |
+| `services/chat_log.py` | 270 | 5 | `archive_path`, `current_path`, `started_label`, `note_check`, `note_media`, `note_request`, `note_answer`, `note_outcome`, `close_session`, `stats` (дословный лог проактивного режима в `logs/chat`) |
 | `services/http.py` | 58 | 5 | `session` |
 | `services/__init__.py` | 2 | 0 | — |
 

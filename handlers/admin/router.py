@@ -17,9 +17,12 @@ from utils import schedule_delete
 
 
 logger = logging.getLogger(__name__)
-from .common import (_LOG_FILE_TTL, _adm_back_row, _audit, _build_log_text,
-                     _count_archive_sessions, _log_files_row, _read_archive_log,
-                     _read_current_log)
+from .common import (_LOG_FILE_TTL, _TG_FILE_MAX, _adm_back_row, _audit,
+                     _build_chat_log_header,
+                     _build_log_text, _build_logs_menu_text, _chat_log_files_row,
+                     _count_archive_sessions, _log_files_row, _logs_back_row,
+                     _logs_menu_rows, _read_archive_log, _read_current_log,
+                     _read_file_bytes)
 from .panel_balance import _handle_balance_callback
 from .panel_digest import _handle_digest_callback
 from .panel_main import (_build_api_keyboard, build_adm_keyboard,
@@ -173,12 +176,30 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 schedule_delete(context.bot, chat_id, warn.message_id, 15)
         return
 
-    # ── Кнопка «📜 Логи бота»: текст с максимумом последних строк лога ────
+    # ── Кнопка «📜 Логи бота»: развилка из двух веток ─────────────────────
+    # ⚠️ РАНЬШЕ ЭТА КНОПКА СРАЗУ ПРИСЫЛАЛА ТЕКСТ ЛОГА (до 2026-08-16). Логов
+    # стало два вида — работа бота и дословный разговор в группе, — и один
+    # экран их не вмещает: у разговора свои цифры, свои файлы и свой счёт
+    # записей. Прежний экран целиком переехал в ветку «adm_logs_bot» ниже.
+    # Сюда же возвращает кнопка «⬅️ К логам» с обоих экранов.
     if data == "adm_logs":
         # Переход из панели отменяет ожидание файлов и режим проверки поиска
         context.user_data.pop("kb_add_mode", None)
         context.user_data.pop("kb_replace_target", None)
         await _end_kb_test(context.bot, chat_id, context)
+        await query.answer()
+        sent_msg = await context.bot.send_message(
+            chat_id=chat_id,
+            text=_build_logs_menu_text(),
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(_logs_menu_rows() + [_adm_back_row()]),
+        )
+        if sent_msg:
+            await register_and_clean_bot_message(context.bot, chat_id, sent_msg.message_id)
+        return
+
+    # ── «⚙️ Работа бота»: текст с максимумом последних строк общего лога ──
+    if data == "adm_logs_bot":
         log_path, raw = _read_current_log()
         if not raw:
             await query.answer("⚠️ Файл лога текущей сессии пуст или не найден", show_alert=True)
@@ -188,7 +209,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         fname = os.path.basename(log_path)
         keyboard = InlineKeyboardMarkup([
             _log_files_row(),
-            _adm_back_row(),
+            _logs_back_row(),
         ])
         sent_msg = await context.bot.send_message(
             chat_id=chat_id,
@@ -198,6 +219,90 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         )
         if sent_msg:
             await register_and_clean_bot_message(context.bot, chat_id, sent_msg.message_id)
+        return
+
+    # ── «💬 Разговор в группе»: дословный лог проактивного режима ─────────
+    # Экран показывается ВСЕГДА, даже когда текущей записи нет: в архиве при
+    # этом обычно лежат прошлые, и отбивать нажатие табличкой было бы враньём
+    # («логов нет» вместо «сегодняшних логов нет»).
+    if data == "adm_logs_chat":
+        from services import chat_log
+        stats = chat_log.stats()
+        await query.answer()
+        logger.info("🔧 Админ %s запросил лог разговора", user_id)
+        keyboard = InlineKeyboardMarkup([
+            _chat_log_files_row(),
+            _logs_back_row(),
+        ])
+        _, raw = _read_file_bytes(stats["path"])
+        if raw:
+            text = _build_log_text(stats["name"], raw,
+                                   header=_build_chat_log_header(stats))
+        else:
+            text = (
+                "💬 <b>РАЗГОВОР В ГРУППЕ</b>\n"
+                "───────────────────────────\n"
+                "Записей пока нет: после очистки разговоров в группе ещё "
+                "никто не писал — либо выключен режим «Сам в разговор».\n\n"
+                "<i>Прошлые записи, если они были, лежат в архиве.</i>"
+            )
+        sent_msg = await context.bot.send_message(
+            chat_id=chat_id, text=text, parse_mode=ParseMode.HTML,
+            reply_markup=keyboard,
+        )
+        if sent_msg:
+            await register_and_clean_bot_message(context.bot, chat_id, sent_msg.message_id)
+        return
+
+    # ── «💬 Текущая запись» и «🗄 Архив разговоров»: файлы ────────────────
+    # Отправка — как у логов бота: мимо гигиены панелей, без клавиатуры и с
+    # минутным самоудалением. Экран разговора остаётся на месте.
+    if data in ("adm_logs_chat_file", "adm_logs_chat_archive"):
+        from services import chat_log
+        is_archive = data == "adm_logs_chat_archive"
+        path = chat_log.archive_path() if is_archive else chat_log.current_path()
+        _, raw = _read_file_bytes(path)
+        if not raw:
+            await query.answer(
+                "🗄 Архив разговоров пуст: он наполняется по кнопке "
+                "«🧹 Очистить РАЗГОВОРЫ»." if is_archive else
+                "💬 Записей пока нет: после очистки разговоров в группе ещё не писали.",
+                show_alert=True,
+            )
+            return
+        # ⚠️ ПОТОЛОК ТЕЛЕГРАМА. Запись растёт до следующей очистки разговоров,
+        # и ограничить её нечем, кроме этой кнопки. Файл больше потолка Telegram
+        # просто не уйдёт — лучше сказать словами, чем свалиться непонятной
+        # ошибкой отправки.
+        if len(raw) > _TG_FILE_MAX:
+            await query.answer(
+                f"⚠️ Файл слишком велик для Telegram ({len(raw) // (1024 * 1024)} МБ).\n"
+                f"Нажми «🧹 Очистить РАЗГОВОРЫ» — запись уедет в архив, "
+                f"и начнётся новая.",
+                show_alert=True,
+            )
+            return
+        await query.answer()
+        fname = os.path.basename(path)
+        logger.info("🔧 Админ %s скачал %s разговора", user_id,
+                    "архив" if is_archive else "текущую запись")
+        if is_archive:
+            sessions = chat_log.stats()["archive_sessions"]
+            caption = (f"🗄 <b>Архив разговоров</b>\n"
+                       f"<code>{html.escape(fname)}</code> · "
+                       f"{max(1, round(len(raw) / 1024))} КБ · записей: {sessions}\n")
+        else:
+            caption = (f"💬 <b>Текущая запись разговора</b>\n"
+                       f"<code>{html.escape(fname)}</code> · "
+                       f"{max(1, round(len(raw) / 1024))} КБ\n")
+        sent_msg = await context.bot.send_document(
+            chat_id=chat_id, document=raw, filename=fname,
+            caption=caption + "<i>Сообщение исчезнет через минуту — успейте "
+                              "открыть или сохранить.</i>",
+            parse_mode=ParseMode.HTML,
+        )
+        if sent_msg:
+            schedule_delete(context.bot, chat_id, sent_msg.message_id, _LOG_FILE_TTL)
         return
 
     # ── Кнопка «💾 Текущий лог»: полный файл лога документом ──────────────

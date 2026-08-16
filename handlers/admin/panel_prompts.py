@@ -412,9 +412,15 @@ async def _handle_proactive_wipe(query, user_id: int, confirmed: bool, from_adm:
 
     from database.history import set_proactive_reset_mark
     from services.proactive import forget_conversations
+    from services import chat_log
 
     mark = set_proactive_reset_mark()
     forget_conversations()   # счётчики в памяти — иначе проверка по пустой стенограмме
+    # Этой же чертой подводится итог ЗАПИСИ РАЗГОВОРА (2026-08-16, решение
+    # Максима): текущий файл logs/chat уезжает в архив, дальше пишется новый.
+    # Так запись всегда совпадает с той памятью, которая была у бота. Тихая:
+    # не переложилось — очистка всё равно состоялась.
+    chat_log.close_session()
     logger.info("🔧 Владелец %s: стенограмма «Сам в разговор» забыта (черта %s UTC)", user_id, mark)
     _audit(user_id, "proactive_wipe", 0, "бот забыл разговоры во всех группах")
     await query.answer("🧹 Готово: бот забыл разговоры во всех группах.", show_alert=True)

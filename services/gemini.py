@@ -2193,6 +2193,13 @@ def ask_group_proactive_media(chat_id: int, bot_id: int, trigger_text: str,
     # Видео разбирается дольше всего — ему свой таймаут, как в ask_gemini_video.
     timeout = VIDEO_TIMEOUT if kind == "видео" else 90
 
+    # Дословный лог разговора (2026-08-16) — см. services/chat_log.py.
+    # Запрос пишем ОДИН раз до перебора цепочки: он у всех моделей один и тот
+    # же, а на три неудачные попытки легли бы три одинаковые простыни.
+    from services import chat_log
+    chat_log.note_request(f"{kind} + цепочка {', '.join(PROACTIVE_MEDIA_CHAIN)}",
+                          "\n\n".join(system_parts), task)
+
     for model_name in PROACTIVE_MEDIA_CHAIN:
         if _quota_blocked_now(model_name):
             continue          # недавно вернула 429 — не тратим время
@@ -2222,6 +2229,7 @@ def ask_group_proactive_media(chat_id: int, bot_id: int, trigger_text: str,
             hist.register_api_call(model_name)
             logger.info("🤖 Ответ от %s за %.1f с (проактивный ответ на %s)",
                         model_name, elapsed, kind)
+            chat_log.note_answer(model_name, elapsed, answer)
             answer = compress_newlines(answer)
             # ⚠️ РЕШЕНИЕ «ПРОМОЛЧАТЬ» ОТЛИЧАЕТСЯ ОТ ОТКАЗА, и разница здесь
             # принципиальная. Маркер ищем в ВИДИМОЙ части (без <thought>) —
@@ -2242,6 +2250,9 @@ def ask_group_proactive_media(chat_id: int, bot_id: int, trigger_text: str,
                                model_name, kind, e)
     logger.error("⚠️ 🤖 Проактивный ответ на %s не дала НИ ОДНА модель цепочки — "
                  "уходим на активную модель по стенограмме", kind)
+    chat_log.note_answer("—", 0,
+                         "(ни одна модель цепочки не ответила — спрашиваем "
+                         "активную модель по стенограмме)")
     return None
 
 
@@ -2263,8 +2274,20 @@ def ask_group_proactive(chat_id: int, bot_id: int, trigger_text: str,
     проактивные реплики живут только в архиве групп (туда — без мыслей).
     Синхронная (requests) — вызывать через run_in_executor, как ask_gemini.
     """
+    # ⚠️ ДОСЛОВНО ЗАПРОС И ОТВЕТ ПИШУТСЯ В ОТДЕЛЬНЫЙ ФАЙЛ (2026-08-16, просьба
+    # Максима) — logs/chat, см. services/chat_log.py. В ОБЩИЙ лог их не
+    # возвращать: ровно за это отладочную строку и убрали 11.08 (см. ниже).
+    from services import chat_log
+
     system_parts = _build_proactive_parts(chat_id, bot_id, trigger_text, trigger_user_id)
     if system_parts is None:
+        # Единственный путь, на котором модели не было вовсе. В логе разговора
+        # это надо сказать словами: иначе запись выглядит как «бот подумал и
+        # промолчал», а он не думал. У медиа-запроса такой же строки НЕТ
+        # намеренно — после его отказа управление приходит сюда, и строка
+        # написалась бы дважды.
+        chat_log.note_answer("—", 0, "(модель не спрашивали: стенограмма пуста — "
+                                     "например, сразу после очистки разговоров)")
         return None
 
     task = (
@@ -2284,18 +2307,29 @@ def ask_group_proactive(chat_id: int, bot_id: int, trigger_text: str,
     # строки с разбором фото. Не возвращать без прямой просьбы: это десятки
     # строк на сообщение, чужая переписка в логе и распухший архив.
     # Что уходит модели, показывает панель промптов (блок «📦 ЧТО УХОДИТ
-    # МОДЕЛИ В РЕЖИМЕ „САМ В РАЗГОВОР“») — там же и живые размеры.
+    # МОДЕЛИ В РЕЖИМЕ „САМ В РАЗГОВОР“») — там же и живые размеры, а дословный
+    # текст — в отдельном файле logs/chat (см. импорт chat_log выше).
+    started_at = time.perf_counter()
     data, used_model = _gemini_chat_request(messages, kind="группа (сам)")
+    elapsed = time.perf_counter() - started_at
+    # Пишем ПОСЛЕ запроса, а не до: имя ответившей модели известно только
+    # теперь — цепочка подстраховки могла увести запрос на запасную.
+    chat_log.note_request(used_model or "—", messages[0]["content"], task)
     if data is None:
         # Все модели цепочки недоступны — молчим (тишина = штатный исход,
         # никакого SOFT_FAIL_MESSAGE в чат).
+        chat_log.note_answer(used_model or "—", elapsed,
+                             "(ни одна модель цепочки не ответила)")
         return None
 
     try:
         raw_answer = data["choices"][0]["message"]["content"].strip()
     except (KeyError, IndexError):
         logger.error("⚠️ Неожиданный формат ответа при проактивной проверке: %s", str(data)[:300])
+        chat_log.note_answer(used_model or "—", elapsed, "(неожиданный формат ответа)")
         return None
+
+    chat_log.note_answer(used_model or "—", elapsed, raw_answer)
 
     answer = compress_newlines(raw_answer)
 

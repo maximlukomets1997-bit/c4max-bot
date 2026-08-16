@@ -273,6 +273,40 @@ _LOG_TEXT_LIMIT = 4096        # лимит Telegram на обычное текс
 # бота в эту минуту оставит файл в чате навсегда. Мелочь, но знать стоит.
 _LOG_FILE_TTL = 60
 
+# Потолок размера файла, который Telegram примет от бота, — 50 МБ. Берём с
+# запасом: у записи разговора нет никакого ограничителя, кроме кнопки «Очистить
+# РАЗГОВОРЫ», и однажды она может дорасти до отказа отправки.
+_TG_FILE_MAX = 45 * 1024 * 1024
+
+
+def _logs_menu_rows():
+    """Две ветки экрана «📜 Логи бота» (2026-08-16, просьба Максима).
+
+    Раньше кнопка «Логи бота» сразу присылала текст общего лога. Логов стало
+    два вида — работа бота и дословный разговор в группе, — и один экран их
+    не вмещает: у разговора свои цифры, свои файлы и свой счёт записей.
+    Отсюда развилка, а сами экраны — ниже по роутеру.
+    """
+    return [
+        [InlineKeyboardButton("⚙️ Работа бота", callback_data="adm_logs_bot")],
+        [InlineKeyboardButton("💬 Разговор в группе", callback_data="adm_logs_chat")],
+    ]
+
+
+def _logs_back_row():
+    """Возврат с любого экрана логов на развилку. ОДИН на оба экрана: у каждой
+    кнопки своя строка в проверке «кнопки ↔ роутер», и второй такой же ряд
+    просто раздувал бы счётчик, ничего не добавляя."""
+    return [InlineKeyboardButton("⬅️ К логам", callback_data="adm_logs")]
+
+
+def _chat_log_files_row():
+    """Ряд скачивания записей разговора: текущая и архив прошлых."""
+    return [
+        InlineKeyboardButton("💬 Текущая запись", callback_data="adm_logs_chat_file"),
+        InlineKeyboardButton("🗄 Архив разговоров", callback_data="adm_logs_chat_archive"),
+    ]
+
 
 def _log_files_row():
     """Ряд из ДВУХ кнопок скачивания логов: текущий запуск и архив прошлых.
@@ -338,15 +372,90 @@ def _count_archive_sessions(raw: bytes) -> int:
         return 0
 
 
-def _build_log_text(fname: str, raw: bytes) -> str:
+def _read_file_bytes(path: str | None):
+    """Читает файл целиком. Возвращает (путь, байты); нет файла — пустые байты."""
+    raw = b""
+    if path and os.path.exists(path):
+        try:
+            with open(path, "rb") as f:
+                raw = f.read()
+        except Exception as e:
+            logger.warning("⚠️ Не удалось прочитать файл %s: %s", path, e)
+    return path, raw
+
+
+def _build_logs_menu_text() -> str:
+    """
+    Развилка «📜 Логи бота»: обе ветки с живыми цифрами (2026-08-16).
+
+    Цифры стоят ДО нажатия намеренно: видно, есть ли вообще что качать, и не
+    приходится ходить в обе ветки, чтобы это выяснить.
+    """
+    from services.backup import human_size
+    from services import chat_log
+
+    _, current = _read_current_log()
+    _, archive = _read_archive_log()
+    sessions = _count_archive_sessions(archive)
+    st = chat_log.stats()
+
+    if st["path"]:
+        chat_now = (f"Текущая запись: с {st['started']} · "
+                    f"проверок {st['checks']} · {human_size(st['size'])}")
+    else:
+        chat_now = "Текущая запись: пусто — после очистки в группе ещё не писали"
+    chat_arc = (f"Архив: {st['archive_sessions']} из {chat_log.SESSIONS_TO_KEEP} "
+                f"очисток · {human_size(st['archive_size'])}"
+                if st["archive_sessions"] else "Архив: пуст")
+
+    return (
+        "📜 <b>ЛОГИ БОТА</b>\n"
+        "───────────────────────────\n"
+        "⚙️ <b>РАБОТА БОТА</b>\n"
+        "<i>Запуски, ошибки, обращения к моделям.</i>\n"
+        f"Текущая сессия: {human_size(len(current))}\n"
+        f"Архив: {sessions} запусков · {human_size(len(archive))}\n"
+        "\n"
+        "💬 <b>РАЗГОВОР В ГРУППЕ</b>\n"
+        "<i>Что уходит модели в режиме «Сам в разговор» и что она отвечает — "
+        "дословно.</i>\n"
+        f"{chat_now}\n"
+        f"{chat_arc}\n"
+        "───────────────────────────\n"
+        "<i>Записи разговора считаются по очисткам разговоров, а не по дням "
+        "и не по запускам бота.</i>"
+    )
+
+
+def _build_chat_log_header(stats: dict) -> str:
+    """Шапка экрана записи разговора — она же уходит в _build_log_text."""
+    from services.backup import human_size
+    from services import chat_log
+
+    arc = (f" · 🗄 архив: {stats['archive_sessions']} из {chat_log.SESSIONS_TO_KEEP} очисток"
+           if stats["archive_sessions"] else "")
+    return (
+        "💬 <b>РАЗГОВОР В ГРУППЕ</b>\n"
+        f"<code>{html.escape(stats['name'])}</code> · {human_size(stats['size'])}\n"
+        f"🕐 с {stats['started']} · 🔍 проверок: {stats['checks']}{arc}\n\n"
+        "Последние строки:\n"
+    )
+
+
+def _build_log_text(fname: str, raw: bytes, header: str = "") -> str:
     """Текст сообщения с логами: имя, размер и максимум последних строк в <pre>.
 
     Строки набираются с конца файла, пока сообщение целиком влезает в лимит
     Telegram (4096 символов). Если даже одна последняя строка длиннее лимита,
     от неё оставляется только конец.
+
+    `header` — своя шапка вместо стандартной. Ею пользуется экран лога
+    разговора (2026-08-16): текст там устроен так же — последние строки в
+    рамке, — а отличается только заголовком, и второй такой набор строк с
+    конца заводить незачем.
     """
     size_kb = max(1, round(len(raw) / 1024))
-    header = (
+    header = header or (
         f"📜 <b>Логи текущей сессии</b>\n"
         f"<code>{html.escape(fname)}</code> · {size_kb} КБ\n\n"
         f"Последние строки:\n"

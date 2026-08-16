@@ -110,9 +110,9 @@ pull request не черновиком и сразу включать авто-�
 | файл | строк | функций |
 |---|---:|---:|
 | `database/history.py` | 2767 | 121 |
-| `services/gemini.py` | 2408 | 47 |
+| `services/gemini.py` | 2442 | 47 |
 | `handlers/admin/panel_users.py` | 1337 | 28 |
-| `handlers/admin/panel_prompts.py` | 1235 | 30 |
+| `handlers/admin/panel_prompts.py` | 1241 | 30 |
 | `handlers/admin/panel_rag.py` | 1000 | 17 |
 | `config.py` | 997 | 104 константы |
 | `services/antispam.py` | 861 | 29 |
@@ -121,7 +121,7 @@ pull request не черновиком и сразу включать авто-�
 
 ## 6. Половина связей не видна в шапках файлов
 
-В проекте **309 импортов спрятаны внутри функций**, в 37 файлах из 55.
+В проекте **318 импортов спрятаны внутри функций**, в 37 файлах из 56.
 Так разорваны кольцевые зависимости — например, `handlers/commands.py`
 тянет пакет `handlers.admin`, тот через re-export тянет
 `handlers/admin/panel_users.py`, а он снова тянет `handlers/commands.py`.
