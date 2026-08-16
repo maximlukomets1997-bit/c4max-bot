@@ -11,6 +11,7 @@ from database.history import get_subscribed_chats
 from database.history import is_news_already_sent
 from database.history import mark_news_as_sent
 from database.history import save_group_message
+from database.history import set_last_news
 from services.gemini import format_news_as_colonel
 from services.knowledge_store import save_pending_news
 from services.scraper import fetch_article
@@ -93,9 +94,19 @@ async def send_news_to_chat(bot, chat_id: int, text: str, image_url: str, url: s
     # реплику бота: собственные сообщения апдейтами не приходят, а стенограмма
     # режима «Сам в разговор» должна видеть новость, которую обсуждают участники.
     # В личные чаты архив не ведётся. Ошибка записи рассылку не ломает.
+    #
+    # ⚠️ ПОМЕТКА И ССЫЛКА (2026-08-16, решение Максима). Раньше в архив уходила
+    # голая сводка, и в стенограмме она выглядела обычной репликой бота: он не
+    # понимал, что это его собственная АВТОМАТИЧЕСКАЯ рассылка с сайта, и не мог
+    # дать ссылку, когда о новости спрашивали. Пометка в квадратных скобках —
+    # тот же приём, которым помечается машинный разбор медиа (services/proactive.py).
+    # На то, что видят люди, это не влияет: в чат ушёл текст выше, это только
+    # запись для памяти бота.
     if chat_id < 0:
+        archive_text = f"[новость с сайта, ты разослал её в чат] {text}\n\nСсылка: {url}"
         try:
-            save_group_message(chat_id, bot.id, bot.username or "", bot.first_name or "", text, False)
+            save_group_message(chat_id, bot.id, bot.username or "", bot.first_name or "",
+                               archive_text, False)
         except Exception as e:
             logger.debug("📰 Не удалось записать новость в архив групп %s: %s", chat_id, e)
 
@@ -171,6 +182,14 @@ async def news_polling_loop(application):
                 # Отметка ставится ДАЖЕ если не доставили никому: иначе бот
                 # будет вечно перезапускать разбор одной и той же новости.
                 mark_news_as_sent(url)
+
+                # ПАМЯТЬ О СВОЕЙ ПУБЛИКАЦИИ (2026-08-16, решение Максима).
+                # Хранится ОДНА, последняя, целиком — и уходит модели в каждый
+                # разговор, в группе и в личке (gemini._last_news_block).
+                # Ставится рядом с отметкой «разослано» и по той же причине не
+                # зависит от числа доставленных: сводку бот сделал и отправил,
+                # значит помнить о ней он обязан. Своих исключений не бросает.
+                set_last_news(item["title"], url, formatted_news)
                 if chat_ids and delivered == 0:
                     logger.error("📰 Новость не дошла НИ ОДНОМУ подписчику (%d чатов) — "
                                  "проверь права бота: %s", len(chat_ids), url)

@@ -1233,6 +1233,13 @@ def ask_gemini_audio(chat_id: int, user_id: int, audio_base64: str) -> str:
                 f"{current_system_prompt}\n\n{block}" if current_system_prompt else block
             )
 
+    # Своя последняя публикация — сразу за базой знаний, как в ask_gemini.
+    news_block = _last_news_block()
+    if news_block:
+        current_system_prompt = (
+            f"{current_system_prompt}\n\n{news_block}" if current_system_prompt else news_block
+        )
+
     native_history = []
     for msg in history:
         content = (msg.get("content") or "").strip()
@@ -1402,6 +1409,13 @@ def ask_gemini_video(chat_id: int, user_id: int, video_base64: str,
                 f"{current_system_prompt}\n\n{block}" if current_system_prompt else block
             )
 
+    # Своя последняя публикация — сразу за базой знаний, как в ask_gemini.
+    news_block = _last_news_block()
+    if news_block:
+        current_system_prompt = (
+            f"{current_system_prompt}\n\n{news_block}" if current_system_prompt else news_block
+        )
+
     native_history = []
     for msg in history:
         content = (msg.get("content") or "").strip()
@@ -1534,7 +1548,8 @@ def ask_gemini_video(chat_id: int, user_id: int, video_base64: str,
 #  Основной запрос к модели (текст / Vision)
 # ───────────────────────────────────────────────
 
-def ask_gemini(chat_id: int, user_id: int, user_text: str, image_base64: str = None) -> str:
+def ask_gemini(chat_id: int, user_id: int, user_text: str, image_base64: str = None,
+               reply_context: str = "") -> str:
     """
     Отправляет сообщение пользователя в Gemini API вместе с объединённым
     контекстным окном (личка + группы одного пользователя).
@@ -1545,6 +1560,10 @@ def ask_gemini(chat_id: int, user_id: int, user_text: str, image_base64: str = N
     Использует реальный подсчёт токенов из usage в ответе и сохраняет сообщения
     в БД только после успешного ответа. Поддерживает изображения (Vision).
     Технические ошибки наружу не отдаются (2 попытки + фолбэк на FALLBACK_MODEL).
+
+    :param reply_context: готовый блок «на какое сообщение отвечают» — его
+        собирает handlers/messages.py::_reply_context_block, когда человек
+        отвечает Reply. Пустая строка — обычное сообщение, блок не добавляется.
     """
     # ── Формируем системный промпт (+ RAG при необходимости) ──
     history = hist.get_history(user_id)
@@ -1582,6 +1601,21 @@ def ask_gemini(chat_id: int, user_id: int, user_text: str, image_base64: str = N
             # известны названия статей. Вторая строка «контекст добавлен»
             # только путала: непонятно, добавили в базу или в промпт.
 
+    # ── Своя последняя публикация (2026-08-16) ──
+    # Идёт СРАЗУ ЗА базой знаний и до справки об авторе — тот же порядок, что
+    # в _build_proactive_parts, чтобы два пути не разъезжались. Добавляется и
+    # в личке тоже (решение Максима «везде»): рассылка не оседает ни в личной
+    # переписке, ни в архиве групп дольше окна стенограммы, и без этого блока
+    # бот не знал бы о собственной новости нигде, кроме свежего разговора.
+    try:
+        news_block = _last_news_block()
+        if news_block:
+            current_system_prompt = (
+                f"{current_system_prompt}\n\n{news_block}" if current_system_prompt else news_block
+            )
+    except Exception as news_err:
+        logger.debug("📰 Не удалось добавить последнюю новость в запрос: %s", news_err)
+
     # ── Справка об авторе при ПРЯМОМ обращении в группе (2026-07-26) ──
     # Решение Максима: когда бота зовут через @ или отвечают на его сообщение,
     # он должен знать собеседника так же, как в режиме «Сам в разговор» —
@@ -1598,6 +1632,16 @@ def ask_gemini(chat_id: int, user_id: int, user_text: str, image_base64: str = N
                 )
         except Exception as who_err:
             logger.debug("🤖 Не удалось добавить справку об авторе в запрос: %s", who_err)
+
+    # ── На какое сообщение человек отвечает (2026-08-16) ──
+    # Reply Telegram присылает отдельным полем, в тексте сообщения его нет
+    # вовсе: без этого блока бот получал голое «а это точно?» и не знал, о чём
+    # речь. Работает и в группе, и в личке. Стоит ПОСЛЕДНИМ — это самая
+    # свежая и самая узкая справка, ближе всего к самому вопросу.
+    if reply_context:
+        current_system_prompt = (
+            f"{current_system_prompt}\n\n{reply_context}" if current_system_prompt else reply_context
+        )
 
     if image_base64:
         user_message_content = [
@@ -1720,6 +1764,15 @@ def format_news_as_colonel(title: str, description: str, tag: str, article_text:
 # Максимальная длина одной строки стенограммы (защита от «простыней» в промпте)
 _PROACTIVE_LINE_MAX = 300
 
+# Свои реплики бот режет по отдельному, БОЛЬШЕМУ потолку (2026-08-16, решение
+# Максима). Под общие 300 знаков попадала прежде всего РАССЫЛКА НОВОСТИ: она
+# пишется в архив групп как реплика бота (jobs/news.py) и обрывалась на первом
+# же абзаце — люди обсуждали новость, а бот видел её начало и многоточие.
+# Полностью снимать предел нельзя: сюда же попадают его собственные длинные
+# ответы (handlers/messages.py::_archive_bot_group_reply), и без потолка
+# стенограмма распухла бы на каждой проверке.
+_PROACTIVE_BOT_LINE_MAX = 2000
+
 # ⚠️ ПАМЯТИ ОБ ИСХОДЕ ПРОШЛОЙ ПРОВЕРКИ ЗДЕСЬ БОЛЬШЕ НЕТ (заведена и убрана
 # 2026-08-11 по решению Максима). Она нужна была ровно для строки «Ты: уже
 # видел, решил промолчать» в стенограмме — та строка выглядела репликой бота
@@ -1821,14 +1874,73 @@ def author_brief(user_id: int | None) -> str:
     return _who_is_talking(user_id)
 
 
+def _last_news_block() -> str:
+    """
+    Справка о ПОСЛЕДНЕЙ новости, которую бот разослал сам (2026-08-16,
+    решение Максима «бот должен знать о своей рассылке везде»). Подставляется
+    во ВСЕ пути ответа: текст и фото (ask_gemini), голосовые
+    (ask_gemini_audio), видео (ask_gemini_video) и режим «Сам в разговор»
+    (_build_proactive_parts, а через него оба его пути — текстовый и медийный).
+    Везде идёт сразу за базой знаний: и то и другое — факты, а не характер.
+
+    Зачем: рассылку бот отправляет фоновой задачей (jobs/news.py), апдейтом
+    она не приходит и в личную переписку (таблица messages) не попадает
+    вовсе — на вопрос «что ты только что прислал?» бот честно не знал ответа.
+    В группах новость видна ещё и в стенограмме, но лишь пока не уедет из
+    окна последних сообщений; эта справка живёт до следующей новости.
+
+    ⚠️ ТЕКСТ ИДЁТ ЦЕЛИКОМ И В КАЖДЫЙ ЗАПРОС (решение Максима: «полный текст
+    сводки», «только последнюю»). Сводка бывает в пару тысяч символов —
+    столько и уходит, пока не придёт новая новость. Станет дорого — резать
+    надо здесь и осознанно, а не подкручивать где-то ещё.
+
+    Возвращает готовый блок или "" (бот ещё ничего не рассылал / любая
+    ошибка — справка не должна ронять ответ).
+    """
+    try:
+        news = hist.get_last_news()
+    except Exception as e:
+        logger.debug("📰 Не удалось прочитать последнюю новость: %s", e)
+        return ""
+    if not news:
+        return ""
+
+    lines = [
+        "[Последняя новость, которую ты разослал]",
+        "Это твоя собственная публикация: ты сам разослал её в чат с сайта wtmobile.com. "
+        "Спросят о ней — отвечай как о своей новости, ссылку дать можно. "
+        "Сам разговор с неё не начинай, если о ней не спрашивают.",
+    ]
+    if news.get("title"):
+        lines.append(f"Заголовок: {news['title']}")
+    if news.get("url"):
+        lines.append(f"Ссылка: {news['url']}")
+    lines.append(f"Текст, который увидели люди:\n{news.get('text', '')}")
+    return "\n".join(lines)
+
+
+def last_news_brief() -> str:
+    """ПУБЛИЧНОЕ имя справки о последней разосланной новости — тот же текст,
+    что уходит модели (2026-08-16, для показа в панели промптов).
+
+    Заведена по образцу `author_brief`: панель не должна звать приватную
+    `_last_news_block` напрямую, иначе показанное владельцу и отправленное
+    модели однажды разъедутся. Источник один — меняешь состав блока, панель
+    подхватывает сама.
+    """
+    return _last_news_block()
+
+
 def _build_proactive_parts(chat_id: int, bot_id: int, trigger_text: str,
                            trigger_user_id: int | None) -> list[str] | None:
     """
-    Подготовка контекста для проактивного режима: характер, RAG, справка об
-    авторе, инструкция участия (с блоком рук внутри), стенограмма чата.
+    Подготовка контекста для проактивного режима: характер, RAG, последняя
+    разосланная новость, справка об авторе, инструкция участия (с блоком рук
+    внутри), стенограмма чата.
 
     Порядок частей важен: характер и должностная инструкция → факты из базы →
-    справка об авторе → правила участия (включая блок рук) → стенограмма.
+    своя последняя публикация → справка об авторе → правила участия (включая
+    блок рук) → стенограмма.
     Инструкция участия идёт ПОСЛЕ системного промпта, поэтому её правила
     (например «в реплике никакой разметки») перекрывают общие правила
     оформления — так и задумано.
@@ -1906,9 +2018,14 @@ def _build_proactive_parts(chat_id: int, bot_id: int, trigger_text: str,
         # дорого — резать надо промптом разбора («опиши одной фразой»), а не
         # обрезкой: обрезка рвёт текст на полуслове, промпт делает его коротким
         # осмысленно.
+        #
+        # ⚠️ У СВОИХ РЕПЛИК ПОТОЛОК СВОЙ, БОЛЬШЕ (2026-08-16): под общие 300
+        # знаков попадала рассылка новости — она пишется в архив групп как
+        # реплика бота и обрывалась на первом абзаце.
         is_media = r["has_photo"] or r["has_voice"] or r.get("has_video")
-        if not is_media and len(text) > _PROACTIVE_LINE_MAX:
-            text = text[:_PROACTIVE_LINE_MAX] + "…"
+        line_max = _PROACTIVE_BOT_LINE_MAX if r["user_id"] == bot_id else _PROACTIVE_LINE_MAX
+        if not is_media and len(text) > line_max:
+            text = text[:line_max] + "…"
 
         # ⚠️ КТО ГОВОРИТ, А КТО ПРИСЛАЛ КАРТИНКУ (2026-08-11, решение Максима
         # после живого случая). Разбор фото хранится под ником автора, и на
@@ -1980,6 +2097,12 @@ def _build_proactive_parts(chat_id: int, bot_id: int, trigger_text: str,
                 logger.info("%s Контекст RAG добавлен в проактивную проверку", RAG_ICON)
         except Exception as rag_err:
             logger.error("⚠️ Не удалось добавить контекст RAG в проактивную проверку: %s", rag_err)
+
+    # Своя последняя публикация — такой же «факт», как статья базы знаний,
+    # поэтому стоит рядом с RAG и ДО справки об авторе (2026-08-16).
+    news_block = _last_news_block()
+    if news_block:
+        system_parts.append(news_block)
 
     who = _who_is_talking(trigger_user_id)
     if who:
