@@ -338,26 +338,46 @@ def _note_quota_error(model_name: str, err: Exception) -> bool:
     return True
 
 
-def _proactive_describe_image(image_base64: str) -> str:
+def _media_chain(chain_limit: int = 0) -> list:
     """
-    Описывает фото для проактивного триггера: нестриминговый запрос к Gemini
-    ПО ЦЕПОЧКЕ `PROACTIVE_MEDIA_CHAIN` — первая ответившая модель и выигрывает.
+    Живые звенья цепочки разбора медиа `PROACTIVE_MEDIA_CHAIN`: без тех, что
+    недавно вернули 429 и сидят на скамейке (_quota_blocked_now).
+
+    chain_limit > 0 — взять только первые N живых. Так ходит РАЗБОР РАДИ
+    ПОИСКА по базе знаний (16.08.2026): там человек ждёт ответа на своё
+    сообщение, и перебор всей цепочки по таймауту стоил бы ему минут — у
+    видео таймаут 90 секунд на модель, четыре звена дают до шести минут.
+    Проактивному режиму ограничение не нужно: он работает фоном, и там
+    ценность полного перебора выше цены ожидания — поэтому 0 по умолчанию.
+    """
+    live = [m for m in PROACTIVE_MEDIA_CHAIN if not _quota_blocked_now(m)]
+    return live[:chain_limit] if chain_limit else live
+
+
+def _describe_image(image_base64: str, chain_limit: int = 0) -> str:
+    """
+    Описывает фото: нестриминговый запрос к Gemini ПО ЦЕПОЧКЕ
+    `PROACTIVE_MEDIA_CHAIN` — первая ответившая модель и выигрывает.
     Без истории, системного промпта и RAG — только описание картинки.
     Мышление на максимуме, мысли в ответ не запрашиваются (см. шапку блока).
 
     Модели уходит ГОЛЫЙ файл, без единого слова — что с ним делать, она решает
     сама (см. шапку блока: слов к медиа бот от себя не добавляет).
 
+    Зовут её ДВОЕ (с 16.08.2026): режим «Сам в разговор» (описание идёт в
+    стенограмму как речь участника) и поиск по базе знаний в ask_gemini
+    (описание идёт только в поисковый запрос, модели НЕ показывается).
+    Поэтому в имени и в логах больше нет слова «proactive» — оно врало бы
+    половину времени. chain_limit — см. _media_chain.
+
     Возвращает описание или пустую строку, если НИ ОДНА модель цепочки не
-    ответила. Провал разбора НЕ должен ломать проактивную проверку — тогда
-    триггером останется оригинальная подпись (возможно, пустая).
+    ответила. Провал разбора не ломает ни того, ни другого вызывающего:
+    у проактивного триггером останется подпись, у поиска — тоже.
     """
     content = [{"type": "image_url",
                 "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}}]
 
-    for model_name in PROACTIVE_MEDIA_CHAIN:
-        if _quota_blocked_now(model_name):
-            continue          # недавно вернула 429 — не тратим время
+    for model_name in _media_chain(chain_limit):
         try:
             payload = {
                 "model": model_name,
@@ -365,7 +385,7 @@ def _proactive_describe_image(image_base64: str) -> str:
                 "stream": False,
                 "extra_body": _media_thinking_openai(),
             }
-            logger.info("🤖 Запрос к модели %s (описание фото для proactive)", model_name)
+            logger.info("🤖 Запрос к модели %s (описание фото)", model_name)
             start = time.perf_counter()
             response = _http().post(
                 GEMINI_API_URL,
@@ -382,41 +402,44 @@ def _proactive_describe_image(image_base64: str) -> str:
                 # стенограмму уйдут пустые скобки вместо разбора.
                 logger.warning("🤖 %s вернула пустое описание фото — пробую следующую", model_name)
                 continue
-            logger.info("🤖 Ответ от %s за %.1f с (описание фото для proactive)", model_name, elapsed)
+            logger.info("🤖 Ответ от %s за %.1f с (описание фото)", model_name, elapsed)
             return text
         except Exception as e:
             # ⚠️ warning, а не debug (2026-08-10): молчаливый сбой разбора
             # выглядит как «бот проигнорировал сообщение» и не находится в логе.
             if not _note_quota_error(model_name, e):
-                logger.warning("🤖 %s не описала фото для проактивной проверки: %s", model_name, e)
-    logger.error("⚠️ 🤖 Фото для проактивной проверки не описала НИ ОДНА модель цепочки")
+                logger.warning("🤖 %s не описала фото: %s", model_name, e)
+    logger.error("⚠️ 🤖 Фото не описала НИ ОДНА модель цепочки")
     return ""
 
 
-def _proactive_transcribe_audio(audio_base64: str) -> str:
+def _transcribe_audio(audio_base64: str, chain_limit: int = 0) -> str:
     """
-    Расшифровывает голосовое для проактивного триггера: лёгкий запрос к native
-    Gemini generateContent (gemini-3.1-flash-lite). Без истории и системного
-    промпта — модели уходит только сам файл, без единого слова от бота.
+    Расшифровывает голосовое: лёгкий запрос к native Gemini generateContent.
+    Без истории и системного промпта — модели уходит только сам файл, без
+    единого слова от бота.
 
     Идёт ПО ЦЕПОЧКЕ `PROACTIVE_MEDIA_CHAIN`, мышление на максимуме, мысли в
     ответ не запрашиваются и на всякий случай отбрасываются (`_native_text_only`).
 
+    Зовут её двое (с 16.08.2026): режим «Сам в разговор» и поиск по базе
+    знаний в ask_gemini_audio — там расшифровка идёт ТОЛЬКО в поисковый
+    запрос, а само голосовое основная модель слушает сама. chain_limit —
+    см. _media_chain.
+
     Возвращает текст расшифровки или пустую строку, если не ответила ни одна
-    модель цепочки. Провал НЕ ломает проактивную проверку — тогда бот просто
-    не отреагирует на голосовое (как и раньше).
+    модель цепочки. Провал ничего не ломает: проактивный просто не отреагирует
+    на голосовое, а поиск по базе будет пропущен.
     """
     parts = [{"inlineData": {"mimeType": "audio/ogg", "data": audio_base64}}]
 
-    for model_name in PROACTIVE_MEDIA_CHAIN:
-        if _quota_blocked_now(model_name):
-            continue          # недавно вернула 429 — не тратим время
+    for model_name in _media_chain(chain_limit):
         try:
             payload = {
                 "contents": [{"role": "user", "parts": parts}],
                 "generationConfig": _media_thinking_native(),
             }
-            logger.info("🤖 Запрос к модели %s (расшифровка аудио для proactive)", model_name)
+            logger.info("🤖 Запрос к модели %s (расшифровка аудио)", model_name)
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
             start = time.perf_counter()
             response = _http().post(
@@ -432,20 +455,20 @@ def _proactive_transcribe_audio(audio_base64: str) -> str:
             if not text:
                 logger.warning("🤖 %s вернула пустую расшифровку — пробую следующую", model_name)
                 continue
-            logger.info("🤖 Ответ от %s за %.1f с (расшифровка аудио для proactive)", model_name, elapsed)
+            logger.info("🤖 Ответ от %s за %.1f с (расшифровка аудио)", model_name, elapsed)
             return text
         except Exception as e:
             if not _note_quota_error(model_name, e):
-                logger.warning("🤖 %s не расшифровала голосовое для проактивной проверки: %s", model_name, e)
-    logger.error("⚠️ 🤖 Голосовое для проактивной проверки не расшифровала НИ ОДНА модель цепочки")
+                logger.warning("🤖 %s не расшифровала голосовое: %s", model_name, e)
+    logger.error("⚠️ 🤖 Голосовое не расшифровала НИ ОДНА модель цепочки")
     return ""
 
 
-def _proactive_describe_video(video_base64: str, mime_type: str = "video/mp4") -> str:
+def _describe_video(video_base64: str, mime_type: str = "video/mp4",
+                    chain_limit: int = 0) -> str:
     """
-    Описывает ВИДЕО для проактивного триггера (2026-07-24) — устроено как
-    _proactive_describe_image/_proactive_transcribe_audio: лёгкий запрос
-    к gemini-3.1-flash-lite без истории и системного промпта.
+    Описывает ВИДЕО (2026-07-24) — устроено как _describe_image/_transcribe_audio:
+    лёгкий запрос к gemini-3.1-flash-lite без истории и системного промпта.
 
     Модели уходит голый файл, без единого слова от бота: насколько кратко
     описывать, она решает сама. Таймаут больше, чем у фото и аудио: разбор
@@ -454,26 +477,30 @@ def _proactive_describe_video(video_base64: str, mime_type: str = "video/mp4") -
     Идёт ПО ЦЕПОЧКЕ `PROACTIVE_MEDIA_CHAIN`, мышление на максимуме, мысли не
     показываются и отбрасываются (`_native_text_only`).
 
+    Зовут её двое (с 16.08.2026): режим «Сам в разговор» и поиск по базе
+    знаний в ask_gemini_video — там описание идёт ТОЛЬКО в поисковый запрос,
+    а сам ролик основная модель смотрит сама.
+
     Возвращает описание или пустую строку, если не ответила ни одна модель —
-    сбой НЕ ломает проактивную проверку, бот просто не отреагирует на видео.
+    сбой не ломает ни проактивную проверку, ни поиск по базе.
 
     ⚠️ ХУДШИЙ СЛУЧАЙ ПО ВРЕМЕНИ ЗДЕСЬ САМЫЙ ДОЛГИЙ: таймаут 90 секунд на
     модель, в цепочке их четыре — при полном отказе Google перебор займёт до
-    шести минут. Проверка идёт фоновой задачей и никого не блокирует, но
-    реплика к тому времени уже никому не нужна. Станет мешать — резать надо
-    цепочку для видео, а не общий таймаут: 90 секунд ролику нужны честно.
+    шести минут. Проактивной проверке это не страшно (фоновая задача), а вот
+    ПРЯМОМУ ответу страшно: там ждёт живой человек. Поэтому ask_gemini_video
+    зовёт этот разбор с chain_limit=1 — одна живая модель, не больше полутора
+    минут сверху. Резать сам таймаут по-прежнему нельзя: 90 секунд ролику
+    нужны честно.
     """
     parts = [{"inlineData": {"mimeType": mime_type, "data": video_base64}}]
 
-    for model_name in PROACTIVE_MEDIA_CHAIN:
-        if _quota_blocked_now(model_name):
-            continue          # недавно вернула 429 — не тратим время
+    for model_name in _media_chain(chain_limit):
         try:
             payload = {
                 "contents": [{"role": "user", "parts": parts}],
                 "generationConfig": _media_thinking_native(_VIDEO_THINKING_LEVEL),
             }
-            logger.info("🤖 Запрос к модели %s (описание видео для proactive)", model_name)
+            logger.info("🤖 Запрос к модели %s (описание видео)", model_name)
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
             start = time.perf_counter()
             response = _http().post(
@@ -489,12 +516,12 @@ def _proactive_describe_video(video_base64: str, mime_type: str = "video/mp4") -
             if not text:
                 logger.warning("🤖 %s вернула пустое описание видео — пробую следующую", model_name)
                 continue
-            logger.info("🤖 Ответ от %s за %.1f с (описание видео для proactive)", model_name, elapsed)
+            logger.info("🤖 Ответ от %s за %.1f с (описание видео)", model_name, elapsed)
             return text
         except Exception as e:
             if not _note_quota_error(model_name, e):
-                logger.warning("🤖 %s не описала видео для проактивной проверки: %s", model_name, e)
-    logger.error("⚠️ 🤖 Видео для проактивной проверки не описала НИ ОДНА модель цепочки")
+                logger.warning("🤖 %s не описала видео: %s", model_name, e)
+    logger.error("⚠️ 🤖 Видео не описала НИ ОДНА модель цепочки")
     return ""
 
 
@@ -1061,6 +1088,118 @@ def _gemini_chat_request(messages: list, kind: str = "текст", has_image: bo
 
 
 # ───────────────────────────────────────────────
+#  База знаний, когда прислали не текст (16.08.2026, просьба Максима)
+#
+#  Поиск по базе — ТЕКСТОВЫЙ: он сравнивает слова и смысл запроса со статьями.
+#  Картинку, голосовое и ролик он не видит, поэтому раньше на медиа искал по
+#  одной подписи, а без подписи не искал вовсе — база молчала ровно там, где
+#  человек показывал технику и спрашивал про неё.
+#
+#  Теперь вложение сначала разбирается лёгкой моделью (те же помощники, что у
+#  режима «Сам в разговор»), и найденные слова уходят В ПОИСКОВЫЙ ЗАПРОС.
+#
+#  ⚠️ РАЗБОР МОДЕЛИ НЕ ПОКАЗЫВАЕТСЯ — ни человеку, ни основной модели. Она
+#  смотрит на сам файл своими глазами; подсунуть ей чужой пересказ вместо
+#  файла означало бы ухудшить разбор ради поиска. В промпт уходят только
+#  НАЙДЕННЫЕ СТАТЬИ, ровно как при текстовом вопросе.
+# ───────────────────────────────────────────────
+
+# Сколько первых фраз разбора уходит в поиск (решение Максима 16.08.2026).
+# Модель почти всегда начинает с главного — «На изображении Leopard 2A7…», —
+# а дальше идут ангар, тени и погода. Для поиска это шум: чем длиннее запрос,
+# тем меньше весит бонус за буквальное совпадение слов (в services/rag.py он
+# делится на число значимых слов), и прозвище «умка» в простыне текста тонет.
+_MEDIA_SEARCH_SENTENCES = 2
+# Страховка на случай разбора без единой точки: обрезаем по длине.
+_MEDIA_SEARCH_LIMIT = 400
+
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?…])\s+")
+
+
+def _first_sentences(text: str, count: int = _MEDIA_SEARCH_SENTENCES) -> str:
+    """Первые `count` фраз текста, но не длиннее _MEDIA_SEARCH_LIMIT символов."""
+    text = " ".join((text or "").split())          # переводы строк — в пробелы
+    if not text:
+        return ""
+    head = " ".join(_SENTENCE_SPLIT_RE.split(text)[:count]).strip()
+    return head[:_MEDIA_SEARCH_LIMIT]
+
+
+def _media_search_text(caption: str = "", *, image_base64: str = "",
+                       audio_base64: str = "", video_base64: str = "",
+                       video_mime: str = "video/mp4") -> str:
+    """
+    Текст, которым ищем статьи базы знаний, когда пришло вложение:
+    подпись пользователя ПЛЮС первые фразы разбора файла.
+
+    Подпись остаётся в запросе (решение Максима 16.08.2026): в ней часто вся
+    суть вопроса — «а броня у него какая?», — и выкидывать её значит терять то,
+    ради чего человек прислал файл.
+
+    Разбор стоит отдельного похода к модели, поэтому сначала спрашиваем
+    rag.is_active(): база погашена — платить не за что, возвращаем одну
+    подпись. Разбор не удался (модели молчат) — тоже возвращаем подпись, то
+    есть поведение ровно как до этой правки.
+
+    Цепочка моделей ограничена ОДНИМ живым звеном (chain_limit=1): здесь, в
+    отличие от проактивного режима, человек ждёт ответа — см. _media_chain.
+    """
+    caption = (caption or "").strip()
+    try:
+        import services.rag as rag_module
+        if not rag_module.is_active():
+            return caption
+    except Exception as e:
+        logger.error("⚠️ Не удалось проверить состояние базы знаний: %s", e)
+        return caption
+
+    if image_base64:
+        kind, described = "фото", _describe_image(image_base64, chain_limit=1)
+    elif audio_base64:
+        kind, described = "голосовое", _transcribe_audio(audio_base64, chain_limit=1)
+    elif video_base64:
+        kind, described = "видео", _describe_video(video_base64, video_mime, chain_limit=1)
+    else:
+        return caption
+
+    if not described:
+        return caption
+
+    head = _first_sentences(described)
+    if not head:
+        return caption
+    # ⚠️ ТЕКСТА РАЗБОРА В ЛОГЕ НЕТ — общее правило Максима (11.08.2026) про
+    # полные тексты ответов моделей. Остаётся факт и длина: по ним видно, что
+    # шаг сработал, и во что обошёлся.
+    logger.info("%s Вложение разобрано для поиска по базе (%s, %d символов)",
+                RAG_ICON, kind, len(head))
+    return f"{caption} {head}".strip() if caption else head
+
+
+def _rag_block(query_text: str, *, remember_query: bool = True) -> str:
+    """
+    Готовый кусок системного промпта: «шапка»-инструкция (панель /prompt,
+    /rag_prompt_set) плюс найденные статьи. Пусто — если база ничего не нашла.
+
+    Ошибки наружу не выпускает: сбой базы знаний не должен ломать ответ.
+    ЕДИНАЯ сборка для всех путей — текста, фото, голосового и видео: иначе
+    четыре места разъедутся, как только у блока поменяется вид.
+    """
+    if not RAG_ENABLED or not (query_text or "").strip():
+        return ""
+    try:
+        import services.rag as rag_module
+        rag_context = rag_module.retrieve_relevant_context(
+            query_text, remember_query=remember_query)
+        if not rag_context:
+            return ""
+        return f"{hist.get_rag_instruction()}\n\n{rag_context}"
+    except Exception as rag_err:
+        logger.error("⚠️ Не удалось добавить контекст RAG: %s", rag_err)
+        return ""
+
+
+# ───────────────────────────────────────────────
 #  Голосовые сообщения (native generateContent)
 # ───────────────────────────────────────────────
 
@@ -1069,6 +1208,10 @@ def ask_gemini_audio(chat_id: int, user_id: int, audio_base64: str) -> str:
     Отправляет голосовое сообщение пользователя в Gemini API (native generateContent).
     Стратегия устойчивости: 2 попытки на активной модели, затем фолбэк на FALLBACK_MODEL.
     Технические ошибки наружу не отдаются — при полном провале возвращается мягкое сообщение.
+
+    С 16.08.2026 подмешивает базу знаний: голосовое сначала расшифровывается
+    лёгкой моделью, и по расшифровке ищутся статьи. Сама расшифровка модели НЕ
+    показывается — она слушает файл своими ушами (см. блок помощников выше).
     """
     history = hist.get_history(user_id)
 
@@ -1079,6 +1222,16 @@ def ask_gemini_audio(chat_id: int, user_id: int, audio_base64: str) -> str:
         current_system_prompt = ""
     else:
         current_system_prompt, _, _ = hist.get_active_system_prompt()
+
+    # База знаний по расшифровке. Как и в ask_gemini, работает независимо от
+    # админского тумблера «PROMPT ВЫКЛ»: статьи — это факты, а не характер.
+    if RAG_ENABLED:
+        block = _rag_block(_media_search_text(audio_base64=audio_base64),
+                           remember_query=False)
+        if block:
+            current_system_prompt = (
+                f"{current_system_prompt}\n\n{block}" if current_system_prompt else block
+            )
 
     native_history = []
     for msg in history:
@@ -1222,6 +1375,10 @@ def ask_gemini_video(chat_id: int, user_id: int, video_base64: str,
     Размер здесь НЕ проверяется: файл не пройдёт дальше 20 МБ ещё в обработчике
     (Telegram столько и не отдаст, см. VIDEO_MAX_BYTES).
     Технические ошибки наружу не отдаются — при полном провале SOFT_FAIL_MESSAGE.
+
+    С 16.08.2026 подмешивает базу знаний: ролик сначала описывает лёгкая
+    модель, и по подписи вместе с описанием ищутся статьи. Описание самой
+    модели НЕ показывается — ролик она смотрит сама (см. блок помощников выше).
     """
     history = hist.get_history(user_id)
 
@@ -1232,6 +1389,18 @@ def ask_gemini_video(chat_id: int, user_id: int, video_base64: str,
         current_system_prompt = ""
     else:
         current_system_prompt, _, _ = hist.get_active_system_prompt()
+
+    # База знаний по подписи + описанию ролика. Разбор идёт по ОДНОМУ живому
+    # звену цепочки (chain_limit=1 внутри _media_search_text): у видео таймаут
+    # 90 секунд на модель, и полный перебор заставил бы человека ждать минуты.
+    if RAG_ENABLED:
+        block = _rag_block(
+            _media_search_text(user_text, video_base64=video_base64, video_mime=mime_type),
+            remember_query=False)
+        if block:
+            current_system_prompt = (
+                f"{current_system_prompt}\n\n{block}" if current_system_prompt else block
+            )
 
     native_history = []
     for msg in history:
@@ -1359,6 +1528,8 @@ def ask_gemini_video(chat_id: int, user_id: int, video_base64: str,
     return answer
 
 
+
+
 # ───────────────────────────────────────────────
 #  Основной запрос к модели (текст / Vision)
 # ───────────────────────────────────────────────
@@ -1392,23 +1563,24 @@ def ask_gemini(chat_id: int, user_id: int, user_text: str, image_base64: str = N
     # ВНУТРИ retrieve_relevant_context — там единственная точка входа поиска,
     # и её слушаются все пути сразу. Здесь его дублировать не надо.
     if RAG_ENABLED:
-        try:
-            import services.rag as rag_module
-            rag_context = rag_module.retrieve_relevant_context(user_text)
-            if rag_context:
-                # «Шапка»-инструкция настраивается из Телеграма (панель /prompt,
-                # /rag_prompt_set); по умолчанию — заводской RAG_INSTRUCTION.
-                # Сами статьи всегда подставляются под ней.
-                rag_instruction = hist.get_rag_instruction()
-                rag_block = f"{rag_instruction}\n\n{rag_context}"
-                current_system_prompt = (
-                    f"{current_system_prompt}\n\n{rag_block}" if current_system_prompt else rag_block
-                )
-                # Состав подсказки печатает сам поиск (services/rag.py) — там
-                # известны названия статей. Вторая строка «контекст добавлен»
-                # только путала: непонятно, добавили в базу или в промпт.
-        except Exception as rag_err:
-            logger.error("⚠️ Не удалось добавить контекст RAG: %s", rag_err)
+        # Фото ищет статьи по подписи ВМЕСТЕ с разбором картинки (16.08.2026):
+        # до этого без подписи поиск пропускался совсем. Разбор в промпт не
+        # уходит — модель смотрит на файл сама (см. блок помощников выше).
+        # Запрос с разбором в кэш не кладём: он уникален почти всегда и только
+        # вытеснял бы оттуда настоящие вопросы людей.
+        search_text = (_media_search_text(user_text, image_base64=image_base64)
+                       if image_base64 else user_text)
+        # «Шапка»-инструкция настраивается из Телеграма (панель /prompt,
+        # /rag_prompt_set); по умолчанию — заводской RAG_INSTRUCTION.
+        # Сами статьи всегда подставляются под ней — сборка в _rag_block.
+        block = _rag_block(search_text, remember_query=not image_base64)
+        if block:
+            current_system_prompt = (
+                f"{current_system_prompt}\n\n{block}" if current_system_prompt else block
+            )
+            # Состав подсказки печатает сам поиск (services/rag.py) — там
+            # известны названия статей. Вторая строка «контекст добавлен»
+            # только путала: непонятно, добавили в базу или в промпт.
 
     # ── Справка об авторе при ПРЯМОМ обращении в группе (2026-07-26) ──
     # Решение Максима: когда бота зовут через @ или отвечают на его сообщение,
@@ -1763,7 +1935,7 @@ def _build_proactive_parts(chat_id: int, bot_id: int, trigger_text: str,
     # расшифровка голосового / описание видео), подменяем пометку
     # [фото]/[голосовое]/[видео] на реальный текст. В БД у таких сообщений text
     # пустой, а trigger_text уже содержит результат работы
-    # _proactive_describe_image / _proactive_transcribe_audio / _proactive_describe_video.
+    # _describe_image / _transcribe_audio / _describe_video.
     #
     # ⚠️ ЗДЕСЬ ТЕКСТ СТАНОВИТСЯ ПРЯМОЙ РЕЧЬЮ УЧАСТНИКА («Вася: <текст>»), и это
     # верно только для голосовых: расшифровка и есть слова человека. Описание

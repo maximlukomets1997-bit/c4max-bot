@@ -532,6 +532,22 @@ def _live_rag_enabled() -> bool:
         return True
 
 
+def is_active() -> bool:
+    """
+    Работает ли база знаний ПРЯМО СЕЙЧАС — все три условия сразу: жёсткий
+    рубильник RAG_ENABLED, загруженный в память индекс и живой тумблер панели.
+
+    Единственное место, где эти условия сведены вместе: retrieve_relevant_context
+    спрашивает её же, так что разъехаться им не на чем — правило «тумблер
+    проверяется в одной точке» этим не нарушено, а закреплено.
+
+    Наружу нужна ради медиа (services/gemini.py): разбор фото, голосового или
+    видео ради поискового запроса стоит отдельного похода к модели — секунды
+    ожидания человека и деньги. Затевать его при выключенной базе незачем.
+    """
+    return bool(RAG_ENABLED and _KNOWLEDGE_INDEX and _live_rag_enabled())
+
+
 def _live_top_k() -> int:
     """
     Живое число фрагментов в контекст: настраивается кнопками панели /rag,
@@ -590,12 +606,16 @@ _QUERY_EMBED_CACHE: dict = {}
 _QUERY_EMBED_CACHE_MAX = 128
 
 
-def _get_cached_embedding(normalized_text: str) -> list:
+def _get_cached_embedding(normalized_text: str, remember: bool = True) -> list:
     """
     Вектор запроса с кэшем. Неудача (пустой вектор из-за сбоя сети) НЕ
     запоминается — иначе временный сбой отключал бы базу знаний для этого
     вопроса до вытеснения записи из кэша. При переполнении кэша выкидывается
     самая старая запись (dict в Python хранит порядок вставки).
+
+    remember=False — вектор возвращается, но в кэш не кладётся (запросы,
+    собранные из разбора вложения: они уникальны и только вытесняли бы
+    настоящие вопросы людей). Читать из кэша это не мешает — вдруг совпало.
     """
     cached = _QUERY_EMBED_CACHE.get(normalized_text)
     if cached is not None:
@@ -605,7 +625,7 @@ def _get_cached_embedding(normalized_text: str) -> list:
     # каждая такая строка — платный поход к Google. Не возвращать текст.
     logger.info("%s RAG: запрос эмбеддинга (%d символов)", RAG_ICON, len(normalized_text))
     vector = get_embedding(normalized_text, is_query=True)
-    if vector:
+    if vector and remember:
         if len(_QUERY_EMBED_CACHE) >= _QUERY_EMBED_CACHE_MAX:
             _QUERY_EMBED_CACHE.pop(next(iter(_QUERY_EMBED_CACHE)))
         _QUERY_EMBED_CACHE[normalized_text] = vector
@@ -667,7 +687,8 @@ def _chunk_passes(score: float, baseline: float, floor: float, margin: float = N
     return False, "полка (нет пика)"
 
 
-def retrieve_relevant_context(query: str, top_k: int = None, min_similarity: float = None) -> str:
+def retrieve_relevant_context(query: str, top_k: int = None, min_similarity: float = None,
+                              remember_query: bool = True) -> str:
     """
     Гибридный поиск по базе знаний (смысл + буквальные слова + «пик против
     полки»). Возвращает строку с объединённым контекстом релевантных статей
@@ -676,16 +697,25 @@ def retrieve_relevant_context(query: str, top_k: int = None, min_similarity: flo
     Фильтра ключевых слов нет (убран 2026-07-05): в поиск идёт любой непустой
     запрос. Порог (вспомогательный) и число статей настраиваются кнопками
     панели /rag (settings), параметры функции — только для тестов.
+
+    remember_query=False — не класть вектор запроса в кэш. Так ходят запросы,
+    собранные из разбора вложения (services/gemini.py): они уникальны почти
+    всегда, и кэш из 128 записей они бы вымыли за пару дней, сделав ПОВТОРНЫЕ
+    ВОПРОСЫ ЛЮДЕЙ снова платными.
     """
-    if not RAG_ENABLED or not _KNOWLEDGE_INDEX:
-        return ""
-    # Общий тумблер из панели /rag. Проверка стоит ЗДЕСЬ, в единственной точке
-    # входа поиска, — тогда её слушаются ВСЕ, кто подмешивает базу: и обычные
-    # ответы, и режим «Сам в разговор», и всё, что появится потом. Разносить
-    # эту проверку по вызывающим нельзя: разъедется.
+    # Общий тумблер из панели /rag (плюс рубильник и пустой индекс) — всё это
+    # спрашивается у rag.is_active(). Проверка стоит ЗДЕСЬ, в единственной
+    # точке входа поиска, — тогда её слушаются ВСЕ, кто подмешивает базу: и
+    # обычные ответы, и режим «Сам в разговор», и всё, что появится потом.
+    # Разносить эту проверку по вызывающим нельзя: разъедется. Снаружи можно
+    # только СПРОСИТЬ is_active() — так делает разбор медиа, чтобы не платить
+    # за описание при погашенной базе.
     # Диагностику («🔍 Проверить поиск») тумблер НЕ глушит — она в test_search.
-    if not _live_rag_enabled():
-        logger.info("%s База знаний выключена тумблером в панели — поиск пропущен", RAG_ICON)
+    if not is_active():
+        # Раньше пустой индекс уходил отсюда МОЛЧА, и «почему в логе ничего
+        # нет» приходилось выяснять вручную (разбор с Максимом 16.08.2026).
+        logger.info("%s База знаний сейчас не работает (рубильник, пустой индекс "
+                    "или тумблер панели) — поиск пропущен", RAG_ICON)
         return ""
     if top_k is None:
         top_k = _live_top_k()
@@ -699,7 +729,7 @@ def retrieve_relevant_context(query: str, top_k: int = None, min_similarity: flo
         return ""
 
     # Получаем эмбеддинг запроса пользователя из кэша (или через API с автоматической записью в кэш)
-    query_vector = _get_cached_embedding(norm_query)
+    query_vector = _get_cached_embedding(norm_query, remember=remember_query)
     if not query_vector:
         logger.warning("⚠️ Не удалось получить эмбеддинг запроса — контекст пуст")
         return ""
