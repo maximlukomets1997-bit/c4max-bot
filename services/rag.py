@@ -343,21 +343,6 @@ def _load_into_memory(files_index: dict) -> None:
                 len(flat), len(files_index), len(_COMMON_STEMS))
 
 
-def get_kb_stats() -> tuple[int, int]:
-    """(файлов, чанков) в загруженной базе — для уведомлений панели /rag."""
-    return _KNOWLEDGE_FILES, len(_KNOWLEDGE_INDEX)
-
-
-def load_knowledge_base() -> bool:
-    """Загружает существующий векторный индекс в память (без пересборки)."""
-    files_index = _load_index_file()
-    if not files_index:
-        logger.warning("⚠️ Векторный индекс пуст или не найден: %s", RAG_INDEX_FILE)
-        return False
-    _load_into_memory(files_index)
-    return True
-
-
 def sync_knowledge_base() -> tuple[int, int] | None:
     """
     Синхронизирует базу знаний с папкой одобренных статей KNOWLEDGE_APPROVED_DIR.

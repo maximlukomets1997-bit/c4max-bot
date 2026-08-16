@@ -269,11 +269,3 @@ def due_today() -> bool:
 def note_done() -> None:
     """Помечает, что за сегодня копия сделана. Звать ПОСЛЕ удачной отправки."""
     hist.set_setting(_DONE_KEY, _today_kyiv())
-
-
-def last_done() -> str:
-    """Дата последней ночной копии («ГГГГ-ММ-ДД») или пустая строка."""
-    try:
-        return hist.get_setting(_DONE_KEY, "") or ""
-    except Exception:
-        return ""

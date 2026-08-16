@@ -26,7 +26,7 @@ from utils import delete_user_message_safe
 
 logger = logging.getLogger(__name__)
 from .common import (_adm_back_row, _audit, _filter_keyboard, _fmt_mod_time, _is_group_chat,
-                     _known_names, _notify_owners, _onoff, _reject_non_admin, _require,
+                     _known_names, _notify_owners, _onoff, _require,
                      _send_panel_message, _staff_name)
 from .panel_rag import _end_kb_test
 

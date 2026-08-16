@@ -7,7 +7,7 @@ from telegram.constants import ParseMode
 from config import MAX_CONTEXT_MESSAGES, IMAGE_DAILY_LIMIT
 from database.history import clear_history
 from utils import register_and_clean_bot_message, delete_user_message_safe
-from utils import mention, schedule_delete
+from utils import schedule_delete
 from utils_format import reply_md
 
 logger = logging.getLogger(__name__)

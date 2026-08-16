@@ -55,53 +55,73 @@ pull request не черновиком и сразу включать авто-�
 
 | файл | имена |
 |---|---|
-| `handlers/quiz.py` | `cmd_quiz` — **команда `/quiz` объявлена, но в `setup_handlers` не зарегистрирована**; викторина запускается только кнопкой |
-| `services/rag.py` | `cosine_similarity`, `RagQuotaError`, `get_embedding`, `parse_article_file`, `get_kb_stats`, `load_knowledge_base`, `normalize_query` — используются внутри самого файла |
-| `services/daily_report.py` | `collect_counters`, `period_totals`, `build_report`, `week_add_day` |
+| `services/rag.py` | `cosine_similarity`, `RagQuotaError`, `get_embedding`, `parse_article_file`, `normalize_query` — используются внутри самого файла |
+| `services/daily_report.py` | `collect_counters`, `period_totals`, `week_add_day` |
 | `services/quiz_bank.py` | `articles_without_questions`, `generate_for_article` |
-| `services/antispam.py` | `get_thresholds_for`, `is_trusted` |
-| `services/backup.py` | `backup_dir`, `last_done` |
+| `services/antispam.py` | `get_thresholds_for` |
+| `services/backup.py` | `backup_dir` |
 | `services/group_digest.py` | `week_key`, `collect` |
 | `services/roles.py` | `perm_for_callback` — зовётся внутри `may_press` |
 | `services/gemini.py` | `compress_newlines` |
 | `services/knowledge_store.py` | `detect_kind` |
 | `services/proactive.py` | `hands_enabled` |
 | `services/user_settings.py` | `refresh` |
-| `database/history.py` | `get_prev_stats_snapshot` |
+| `handlers/admin/panel_digest.py` | `send_digest_panel` — зовётся своим же обработчиком кнопок; в оглавление пакета не вписана |
 
 Пересобрать список можно поиском каждого имени через
 `scripts/impact.py <имя>` — раздел «кто это читает».
+
+**Уборка 2026-08-16.** Пять имён из прежнего списка удалены как мёртвые:
+`get_kb_stats` и `load_knowledge_base` (`services/rag.py`), `last_done`
+(`services/backup.py`), `is_trusted` (`services/antispam.py`), `build_report`
+(`services/daily_report.py`). Ни у одного не было читателей ни в коде, ни в
+строковых ключах.
+
+Осталось **два имени без читателей, которые НЕ удалены** — по каждому нужен
+ответ Максима, а не решение карты:
+
+- `handlers/quiz.py::cmd_quiz` — **команда `/quiz` написана, но в
+  `setup_handlers` не зарегистрирована**; викторина запускается только
+  кнопкой. Это потерянная возможность, а не мусор: либо подключить, либо
+  выбросить осознанно.
+- `database/history.py::get_prev_stats_snapshot` — в докстринге сказано
+  «нужен кнопке 📊 Отчёт за вчера», а кнопка её не зовёт: отчёт строится от
+  `get_last_stats_snapshot`. Прежде чем удалять, надо глазами проверить,
+  верные ли цифры в отчёте за вчера.
 
 ## 4. Файлы и папки, назначение которых кодом не подтверждается
 
 | путь | что видно | чего не хватает |
 |---|---|---|
-| `data/` | пустая, внутри только `__pycache__` | пакет удалён, папка осталась; в коде на неё ссылок нет |
 | `quiz/add.py` | отдельный скрипт, тянет `services.quiz_bank` | ни бот, ни `preflight` его не зовут — ручной инструмент или остаток |
 | `seed.db` | 172 КБ, читается в `main._seed_db_if_missing` | подтверждено кодом |
 | `bot.pid`, `bot.alive`, `watchdog.state` | служебные метки запуска | создаются на ПК, на Linux часть не создаётся вовсе |
-| `.claude/worktrees/` | две полные копии старых версий проекта (2.9 МБ и 2.2 МБ) | к работающему коду отношения не имеют; ручной поиск по папке проекта найдёт их вместе с настоящим кодом |
+| `.claude/worktrees/` | папки нет: две копии старых версий (2.9 МБ и 2.2 МБ) удалены 16.08.2026, их коммиты были давно в `main` | заводится заново сама при работе в отдельной копии; пока она есть, ручной поиск по папке проекта находит её вместе с настоящим кодом |
 
 ## 5. Файлы, которые слишком велики, чтобы держать их в голове
 
 Правка в них почти наверняка заденет что-то, чего не видно с экрана.
 Перед изменением — обязательно `scripts/impact.py` по конкретному имени.
 
+Числа — снимок на 2026-08-16, после уборки импортов и мёртвых функций
+(`scripts/map.py`), «функций» = имён верхнего уровня, включая служебные с
+подчёркиванием.
+
 | файл | строк | функций |
 |---|---:|---:|
-| `database/history.py` | 2711 | 117 |
-| `services/gemini.py` | 2124 | 41 |
+| `database/history.py` | 2767 | 121 |
+| `services/gemini.py` | 2408 | 47 |
 | `handlers/admin/panel_users.py` | 1337 | 28 |
-| `handlers/admin/panel_prompts.py` | 1225 | 30 |
-| `config.py` | 997 | ~105 констант |
-| `services/antispam.py` | 866 | 30 |
-| `handlers/admin/panel_rag.py` | 798 | 13 |
-| `services/daily_report.py` | 793 | 42 |
-| `services/rag.py` | 777 | 26 |
+| `handlers/admin/panel_prompts.py` | 1235 | 30 |
+| `handlers/admin/panel_rag.py` | 1000 | 17 |
+| `config.py` | 997 | 104 константы |
+| `services/antispam.py` | 861 | 29 |
+| `services/rag.py` | 795 | 25 |
+| `services/daily_report.py` | 781 | 41 |
 
 ## 6. Половина связей не видна в шапках файлов
 
-В проекте **304 импорта спрятаны внутри функций**, в 37 файлах из 55.
+В проекте **309 импортов спрятаны внутри функций**, в 37 файлах из 55.
 Так разорваны кольцевые зависимости — например, `handlers/commands.py`
 тянет пакет `handlers.admin`, тот через re-export тянет
 `handlers/admin/panel_users.py`, а он снова тянет `handlers/commands.py`.
@@ -116,6 +136,6 @@ pull request не черновиком и сразу включать авто-�
   Xiaomi) — код описывает запросы, а не ответы.
 - Что лежит в боевой `history.db` и как её данные отличаются от домашней.
 - Насколько описания в `references/history.md` соответствуют сегодняшнему
-  коду: это архив прошлых решений, последняя запись там от 2026-08-06,
-  а код с тех пор ушёл вперёд. Читать как «почему когда-то так решили»,
-  не как «как оно сейчас».
+  коду: это архив прошлых решений, последняя запись там от 2026-08-16,
+  и код может уйти вперёд в любой момент. Читать как «почему когда-то так
+  решили», не как «как оно сейчас».

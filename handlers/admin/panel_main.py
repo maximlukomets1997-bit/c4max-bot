@@ -4,20 +4,17 @@
 # ───────────────────────────────────────────────
 import html
 import logging
-import os
 
-import logging_setup
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
-from config import AVAILABLE_MODELS, AVAILABLE_IMAGE_MODELS, ADMIN_IDS, GEMINI_MODEL, PROVIDER_ICONS, PROVIDERS, BOT_VERSION_HTML, AUTO_UPDATE_ENABLED_DEFAULT
-from database.history import set_setting, get_setting, delete_setting, append_prompt_addition, get_active_system_prompt, get_bot_stats, get_news_system_prompt, get_rag_instruction, get_qwen_tokens
+from config import AVAILABLE_MODELS, AVAILABLE_IMAGE_MODELS, GEMINI_MODEL, PROVIDERS, BOT_VERSION_HTML, AUTO_UPDATE_ENABLED_DEFAULT
+from database.history import get_setting, get_bot_stats, get_qwen_tokens
 from utils import register_and_clean_bot_message, delete_user_message_safe
-from utils import mention, schedule_delete
 
 
 logger = logging.getLogger(__name__)
-from .common import (_adm_back_row, _audit, _filter_keyboard, _is_group_chat, _onoff, _reject_non_admin,
+from .common import (_adm_back_row, _filter_keyboard, _is_group_chat, _onoff,
                      _require, _send_panel_message)
 from .panel_rag import _end_kb_test
 

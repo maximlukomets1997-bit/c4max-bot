@@ -2,7 +2,6 @@ import html
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
-from config import IMAGE_DAILY_LIMIT, ADMIN_IDS
 from database.history import (get_user_stats, add_quiz_attempt, get_remaining_image_calls,
                               get_random_quiz_question, note_quiz_question_asked)
 import asyncio

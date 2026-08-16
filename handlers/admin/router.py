@@ -7,14 +7,13 @@ import html
 import logging
 import os
 
-import logging_setup
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
+from telegram import Update, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
-from config import AVAILABLE_MODELS, AVAILABLE_IMAGE_MODELS, ADMIN_IDS, GEMINI_MODEL
-from database.history import set_setting, get_setting, append_prompt_addition, get_active_system_prompt, get_bot_stats, get_news_system_prompt, get_rag_instruction
-from utils import register_and_clean_bot_message, delete_user_message_safe
-from utils import mention, schedule_delete
+from config import AVAILABLE_MODELS, AVAILABLE_IMAGE_MODELS, GEMINI_MODEL
+from database.history import set_setting, get_setting
+from utils import register_and_clean_bot_message
+from utils import schedule_delete
 
 
 logger = logging.getLogger(__name__)
@@ -22,7 +21,7 @@ from .common import (_LOG_FILE_TTL, _adm_back_row, _audit, _build_log_text,
                      _count_archive_sessions, _log_files_row, _read_archive_log,
                      _read_current_log)
 from .panel_balance import _handle_balance_callback
-from .panel_digest import _handle_digest_callback, send_digest_panel
+from .panel_digest import _handle_digest_callback
 from .panel_main import (_build_api_keyboard, build_adm_keyboard,
                          send_adm_panel, send_api_panel,
                          send_daily_report_panel, send_weekly_report_panel,
@@ -31,9 +30,9 @@ from .panel_mod import _handle_mod_callback, send_mod_panel
 from .panel_prompts import (_build_prompt_panel_text_and_keyboard, _handle_proactive_callback,
                             _handle_proactive_wipe, handle_prompt_reset,
                             send_prompts_panel, send_prompt_files)
-from .panel_quiz import _handle_quiz_callback, send_quiz_panel
+from .panel_quiz import _handle_quiz_callback
 from .panel_rag import _end_kb_test, _handle_kb_callback, send_rag_panel
-from .panel_updates import _handle_updates_callback, send_updates_panel
+from .panel_updates import _handle_updates_callback
 from .panel_users import _handle_users_callback, send_users_panel
 
 

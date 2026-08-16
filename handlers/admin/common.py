@@ -10,10 +10,8 @@ import logging_setup
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
-from config import AVAILABLE_MODELS, AVAILABLE_IMAGE_MODELS, ADMIN_IDS, GEMINI_MODEL
-from database.history import set_setting, get_setting, append_prompt_addition, get_active_system_prompt, get_bot_stats, get_news_system_prompt, get_rag_instruction
+from config import ADMIN_IDS
 from utils import register_and_clean_bot_message, delete_user_message_safe
-from utils import mention, schedule_delete
 
 
 logger = logging.getLogger(__name__)

@@ -14,7 +14,6 @@ from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 from config import AVAILABLE_MODELS, PROVIDER_ICONS, PROVIDERS
 from database.history import set_setting, get_setting, delete_setting, get_qwen_tokens
-from services import roles
 from utils import delete_user_message_safe, schedule_delete
 
 logger = logging.getLogger(__name__)

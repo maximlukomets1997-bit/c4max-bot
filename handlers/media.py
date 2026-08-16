@@ -3,7 +3,6 @@ import asyncio
 from telegram import Update
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
-from config import IMAGE_DAILY_LIMIT, ADMIN_IDS
 from database.history import register_image_call, unregister_image_call, get_remaining_image_calls
 from services.gemini import generate_image
 from utils import register_and_clean_bot_message, delete_user_message_safe, keep_chat_action

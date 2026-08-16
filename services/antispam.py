@@ -287,11 +287,6 @@ def trust_info(user_id: int) -> dict:
     return out
 
 
-def is_trusted(user_id: int) -> bool:
-    """True — участник «проверенный» (см. trust_info)."""
-    return trust_info(user_id)["trusted"]
-
-
 # ─── выдача мута ────────────────────────────────────────────────────
 
 async def _apply_mute(bot, chat_id: int, user_id: int, mute_sec: int) -> bool:

@@ -28,7 +28,6 @@
 import asyncio
 import html
 import logging
-import os
 import time
 
 from telegram import (Update, InlineKeyboardButton, InlineKeyboardMarkup,

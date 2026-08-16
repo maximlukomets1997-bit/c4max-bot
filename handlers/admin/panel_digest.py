@@ -8,7 +8,6 @@
 #  в чат нет — сначала он смотрит, что получается на живых данных.
 # ───────────────────────────────────────────────
 
-import html
 import logging
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup

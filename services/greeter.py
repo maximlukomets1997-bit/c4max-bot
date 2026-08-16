@@ -200,7 +200,7 @@ async def _handle(update, context) -> None:
             await _warn_owners(context.bot, chat)
             captcha = False  # прав нет — остаётся просто поздороваться
 
-    text = _welcome_text(name, captcha, seconds, context.bot)
+    text = _welcome_text(name, member.id, captcha, seconds, context.bot)
     markup = None
     if captcha:
         markup = InlineKeyboardMarkup([[InlineKeyboardButton(
@@ -397,21 +397,20 @@ async def handle_join_callback(query, context, data: str) -> None:
 
 # ─── текст приветствия ──────────────────────────────────────────────
 
-def _welcome_text(name: str, captcha: bool, seconds: int, bot) -> str:
+def _welcome_text(name: str, user_id: int, captcha: bool, seconds: int, bot) -> str:
     """
     Собирает текст приветствия из шаблонов config.GREET_TEXT (+ хвост
     GREET_CAPTCHA_TEXT при включённой проверке).
 
     ⚠️ Имя новичка — ЧУЖОЙ ТЕКСТ: экранируем, иначе «<» в имени порвёт
     HTML-разметку и приветствие не отправится вовсе.
-    ⚠️ Имя САМОГО БОТА берём у него же (`bot_display_name`), а не пишем в
-    шаблоне руками: до 2026-08-04 там стояло «Я C4_Max» — имя владельца.
+    ⚠️ Имя подаётся ССЫЛКОЙ на профиль через tg://user?id=…, а не через
+    @юзернейм: юзернейма у человека может не быть вовсе, а номер есть всегда.
     """
-    from handlers.commands import bot_display_name
+    link = f'<a href="tg://user?id={user_id}">{html.escape(name)}</a>'
     text = GREET_TEXT.format(
-        name=html.escape(name),
+        name=link,
         bot=bot.username or "",
-        bot_name=html.escape(bot_display_name(bot)),
     )
     if captcha:
         text += "\n" + GREET_CAPTCHA_TEXT.format(minutes=max(1, seconds // 60))

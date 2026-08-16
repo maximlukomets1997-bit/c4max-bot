@@ -20,7 +20,6 @@ import html
 import logging
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 from database.history import (

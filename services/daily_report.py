@@ -29,7 +29,7 @@ import json
 import logging
 from datetime import datetime, timezone, timedelta
 
-from config import AVAILABLE_MODELS, AVAILABLE_IMAGE_MODELS, PROVIDER_ICONS, PROVIDER_ICON_FALLBACK, PROVIDERS
+from config import AVAILABLE_MODELS, AVAILABLE_IMAGE_MODELS, PROVIDER_ICON_FALLBACK, PROVIDERS
 import database.history as hist
 
 logger = logging.getLogger(__name__)
@@ -461,18 +461,6 @@ def render(header: str, period_line: str, note: str,
     if extra:
         text += f"\n{extra}"
     return text
-
-
-def build_report(header: str, start_utc: str, end_utc: str,
-                 base: dict, current: dict, carry: dict) -> str:
-    """Суточный отчёт за период [start_utc, end_utc): считает цифры разницей
-    снимков и рисует их общей рисовалкой."""
-    start_dt = _parse_utc(start_utc) or datetime.now(timezone.utc)
-    end_dt = _parse_utc(end_utc) or datetime.now(timezone.utc)
-    totals = period_totals(start_utc, end_utc, base, current, carry)
-    return render(header, _period_label(start_dt, end_dt),
-                  _period_note(start_dt, end_dt), totals, current,
-                  proactive_period=(start_utc, end_utc))
 
 
 # ───────────────────────────────────────────────

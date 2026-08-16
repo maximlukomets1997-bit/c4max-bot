@@ -5,25 +5,23 @@
 import html
 import json
 import logging
-import os
 import re
 import time
 
-import logging_setup
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
-from config import AVAILABLE_MODELS, AVAILABLE_IMAGE_MODELS, ADMIN_IDS, GEMINI_MODEL
+from config import ADMIN_IDS
 from config import PROACTIVE_ENABLED_DEFAULT, PROACTIVE_MIN_MSGS, PROACTIVE_CONTEXT_MSGS
 from config import PROACTIVE_HANDS_DEFAULT, PROACTIVE_MUTE_MAX_SEC
 from config import PROACTIVE_OFF_ANNOUNCE, PROACTIVE_OFF_MSGS_KEY
-from database.history import set_setting, get_setting, append_prompt_addition, get_active_system_prompt, get_bot_stats, get_news_system_prompt, get_rag_instruction, get_proactive_instruction, get_known_chats
+from database.history import set_setting, get_setting, append_prompt_addition, get_active_system_prompt, get_news_system_prompt, get_rag_instruction, get_proactive_instruction, get_known_chats
 from utils import register_and_clean_bot_message, delete_user_message_safe
-from utils import mention, schedule_delete
+from utils import schedule_delete
 
 
 logger = logging.getLogger(__name__)
-from .common import _adm_back_row, _audit, _is_group_chat, _onoff, _reject_non_admin, _require, _send_panel_message
+from .common import _adm_back_row, _audit, _is_group_chat, _onoff, _require, _send_panel_message
 
 
 def _int_setting(key: str, default: int) -> int:
