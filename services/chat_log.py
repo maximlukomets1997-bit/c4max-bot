@@ -154,10 +154,19 @@ def note_request(model: str, prompt: str, task: str) -> None:
 
 
 def note_answer(model: str, seconds: float, answer: str) -> None:
-    """Ответ модели ДОСЛОВНО — с мыслями и со словом «ПРОПУСК»."""
+    """
+    Ответ модели: сама реплика или слово «ПРОПУСК».
+
+    ⚠️ РАЗМЫШЛЕНИЯ СРЕЗАЮТСЯ (решение Максима 2026-08-16). Блок <thought>
+    бывает длиннее самой реплики в разы, а читают запись ради того, ЧТО бот
+    сказал и почему промолчал. Срез — общим `strip_thoughts`, а не своим
+    выражением: в проекте это единственное правильное место, где знают формат
+    мыслей, и второе такое разойдётся с ним при первой же смене модели.
+    """
+    from utils_format import strip_thoughts
     took = f", {seconds:.1f} с" if seconds else ""
     _write(f"── ВЕРНУЛА МОДЕЛЬ ({model}{took}) ──\n"
-           f"{(answer or '').strip() or '(пусто)'}\n")
+           f"{strip_thoughts(answer) or '(пусто — весь ответ был размышлением)'}\n")
 
 
 def note_outcome(text: str) -> None:

@@ -1611,6 +1611,21 @@ def get_proactive_instruction() -> str:
     return get_setting("proactive_instruction", "").strip() or PROACTIVE_INSTRUCTION
 
 
+def get_author_brief_instruction() -> str:
+    """
+    Возвращает вступление справки об авторе — текст, который уходит модели
+    ПЕРЕД данными участника (services/gemini.py::_who_is_talking дописывает
+    под ним имя, ник, роль и звание).
+
+    Живой текст хранится в settings под ключом 'author_brief_instruction'.
+    Как у RAG-инструкции: пустое/сброшенное значение → заводской текст
+    AUTHOR_BRIEF_INSTRUCTION (без вступления модель получила бы голую строку
+    «Имя — Владелец» и не поняла бы, что это и зачем).
+    """
+    from config import AUTHOR_BRIEF_INSTRUCTION
+    return get_setting("author_brief_instruction", "").strip() or AUTHOR_BRIEF_INSTRUCTION
+
+
 # ───────────────────────────────────────────────
 #  Сбор сообщений группы (Stage 3 — контекстный бот)
 # ─────────────────────────────────────────────

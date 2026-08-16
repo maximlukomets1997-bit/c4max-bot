@@ -15,7 +15,7 @@ from config import ADMIN_IDS
 from config import PROACTIVE_ENABLED_DEFAULT, PROACTIVE_MIN_MSGS, PROACTIVE_CONTEXT_MSGS
 from config import PROACTIVE_HANDS_DEFAULT, PROACTIVE_MUTE_MAX_SEC
 from config import PROACTIVE_OFF_ANNOUNCE, PROACTIVE_OFF_MSGS_KEY
-from database.history import set_setting, get_setting, append_prompt_addition, get_active_system_prompt, get_news_system_prompt, get_rag_instruction, get_proactive_instruction, get_known_chats
+from database.history import set_setting, get_setting, append_prompt_addition, get_active_system_prompt, get_news_system_prompt, get_rag_instruction, get_proactive_instruction, get_author_brief_instruction, get_known_chats
 from utils import register_and_clean_bot_message, delete_user_message_safe
 from utils import schedule_delete
 
@@ -589,26 +589,39 @@ def _build_prompt_panel_text_and_keyboard(user_id, bot_username=None):
     full_text += rag_section
 
     # ── Справка об авторе («[С кем ты говоришь]») ────────────────────────
-    # Единственный кусок проактивного запроса, который бот СОБИРАЕТ САМ из
-    # карточки участника, а не берёт из настроек. Показываем дословно — иначе
-    # владелец никак не может увидеть, что именно бот рассказывает модели
-    # о людях (просьба Максима 2026-07-26).
+    # Блок из ДВУХ частей, и они показаны раздельно (решение Максима
+    # 2026-08-16): сверху вступление — обычный промпт, его владелец правит
+    # командой; под ним данные участника, которые бот собирает сам из карточки
+    # и настройками не меняются. Обе части в цитатах, одна под другой — ровно
+    # в том порядке, в каком уходят модели.
     # Пример собирается НА СМОТРЯЩЕГО (решение Максима): живые цифры нагляднее
     # шаблона с прочерками. Источник — services/gemini.py::author_brief, тот же,
     # что уходит модели: показанное и отправленное разъехаться не могут.
     # Стоит ПЕРЕД блоком участия, потому что в запросе идёт в этом же порядке
     # (характер → база знаний → справка → правила участия → стенограмма).
+    author_instruction = get_author_brief_instruction()
+    author_origin = "своя" if get_setting("author_brief_instruction", "").strip() else "заводская"
     try:
         from services.gemini import author_brief
         who_text = author_brief(user_id) or ""
     except Exception as e:
         logger.debug("🔧 Не удалось собрать справку об авторе для панели: %s", e)
         who_text = ""
-    who_body = _expandable_preview(who_text) if who_text else "<i>(нет данных о тебе)</i>"
+    # Данные участника — это ХВОСТ справки: всё, что ниже вступления. Режем по
+    # вступлению, а не собираем строку заново: так показанное не может
+    # разъехаться с отправленным даже при своём тексте вступления.
+    who_tail = ""
+    if who_text:
+        who_tail = who_text[len(author_instruction):].strip() if who_text.startswith(author_instruction) else who_text
+    who_body = _expandable_preview(who_tail) if who_tail else "<i>(нет данных о тебе)</i>"
     who_section = (
         "\n───────────────────────────\n"
-        f"🪪<b>СПРАВКА ОБ АВТОРЕ:</b> {_num(len(who_text))} <i>символов (собирает бот)</i>\n"
+        f"🪪<b>СПРАВКА ОБ АВТОРЕ:</b> {_num(len(author_instruction))} <i>символов ({author_origin})</i>\n"
+        f"{_expandable_preview(author_instruction)}\n"
+        "👤 <i>Данные участника — подставляет бот сам:</i>\n"
         f"{who_body}\n"
+        "✏️ /author_prompt_set &lt;текст&gt; — Изменить вступление справки\n"
+        "🗑️ /author_prompt_reset — Вернуть заводское\n"
         "ℹ️ <i>Пример собран на тебе — у каждого участника он свой.</i>\n"
         "📋 <i>Берётся из карточки: имя · ник · роль · почётное звание</i>\n"
         "⚠️ <i>Уходит модели в режиме «Сам в разговор» и при обращении к боту "
@@ -745,21 +758,34 @@ def _collect_prompt_files():
     system_prompt, _, _ = get_active_system_prompt()
     news_prompt = get_news_system_prompt()
     rag_instruction = get_rag_instruction()
+    author_instruction = get_author_brief_instruction()
     proactive_instruction = get_proactive_instruction()
 
     # В файл SYSTEM PROMPT идёт ЦЕЛИКОМ — вместе с дополнениями /prompt_add
     # (в панели они показаны отдельным блоком). В файле должно быть ровно то,
     # что реально уходит модели, иначе файл будет врать.
+    #
+    # ⚠️ У СПРАВКИ ОБ АВТОРЕ — только ВСТУПЛЕНИЕ, без данных участника
+    # (2026-08-16). Данные бот подставляет сам и у каждого свои; попади они
+    # в файл — при обратной загрузке через Reply в промпт вшилось бы
+    # «Максим — Владелец», и бот считал бы владельцем каждого встречного.
+    #
+    # Порядок и имена файлов повторяют блоки панели (цифр в именах нет —
+    # решение Максима 2026-08-16). Пустые промпты отсеиваются строкой ниже:
+    # сейчас это промпт новостей, пока он не задан.
     items = [
-        ("1_SYSTEM_PROMPT.txt", "📝 SYSTEM PROMPT",
+        ("SYSTEM_PROMPT.txt", "📝 SYSTEM PROMPT",
          "своя" if get_setting("custom_system_prompt", "").strip() else "заводская",
          "/prompt_set", system_prompt),
-        ("2_NEWS_PROMPT.txt", "📰 NEWS PROMPT",
+        ("NEWS_PROMPT.txt", "📰 NEWS PROMPT",
          "своя", "/news_prompt_set", news_prompt),
-        ("3_RAG_PROMPT.txt", "🧠 RAG-PROMPT",
+        ("RAG_PROMPT.txt", "🧠 RAG-PROMPT",
          "своя" if get_setting("rag_instruction", "").strip() else "заводская",
          "/rag_prompt_set", rag_instruction),
-        ("4_PROACTIVE_PROMPT.txt", "🗣 PROMPT УЧАСТИЯ В РАЗГОВОРЕ (включает блок рук)",
+        ("AUTHOR_BRIEF.txt", "🪪 СПРАВКА ОБ АВТОРЕ (вступление; данные бот добавит сам)",
+         "своя" if get_setting("author_brief_instruction", "").strip() else "заводская",
+         "/author_prompt_set", author_instruction),
+        ("PROACTIVE_PROMPT.txt", "🗣 PROMPT УЧАСТИЯ В РАЗГОВОРЕ (включает блок рук)",
          "своя" if get_setting("proactive_instruction", "").strip() else "заводская",
          "/proactive_prompt_set", proactive_instruction),
     ]
@@ -869,10 +895,10 @@ async def send_prompts_panel(bot, chat_id: int, user_id: int):
 # ─────────────────────────────────────────────
 #  ПОДТВЕРЖДЕНИЕ СБРОСА ПРОМПТОВ (2026-08-03)
 # ─────────────────────────────────────────────
-#  Четыре промпта — системный, новостной, RAG-инструкция и инструкция
-#  участия в разговоре — сбрасываются ОДИНАКОВО: стереть ключ (или два)
-#  в settings → попап → переписать сообщение с подтверждением. Различаются
-#  только имена ключей и тексты.
+#  Пять промптов — системный, новостной, RAG-инструкция, вступление справки
+#  об авторе и инструкция участия в разговоре — сбрасываются ОДИНАКОВО:
+#  стереть ключ (или два) в settings → попап → переписать сообщение
+#  с подтверждением. Различаются только имена ключей и тексты.
 #
 #  До 2026-08-03 это лежало в router.py восемью почти дословно
 #  повторяющимися ветками на ~110 строк: логика (попап, edit_message_text,
@@ -882,8 +908,8 @@ async def send_prompts_panel(bot, chat_id: int, user_id: int):
 #  ⚠️ ДИСПЕТЧЕР В РОУТЕРЕ ОСТАЛСЯ СПИСКОМ ЛИТЕРАЛОВ, и это НЕ небрежность,
 #  которую надо «причесать»: preflight.py::_router_patterns читает router.py
 #  разбором ast и ищет ровно `data == "…"`, `data in (…)` и
-#  `data.startswith("…")`. Спрячешь восемь callback'ов за вычисляемый ключ —
-#  проверка «кнопки ↔ роутер» перестанет их видеть и объявит все восемь
+#  `data.startswith("…")`. Спрячешь десять callback'ов за вычисляемый ключ —
+#  проверка «кнопки ↔ роутер» перестанет их видеть и объявит все десять
 #  необработанными.
 #
 #  Разъезд списка с таблицей ловится с двух сторон и молча не проходит:
@@ -990,6 +1016,40 @@ _PROMPTS = {
                   "Своя удалена — модель снова получает стандартную «шапку» перед статьями.",
         "cancel": "🔄 <b>Возврат заводской RAG-инструкции отменён.</b>\n\nТвоя инструкция осталась без изменений.",
     },
+    "author_prompt": {
+        "set_key": "author_brief_instruction",
+        "file_what": "вступления справки об авторе",
+        "set_log":  "изменил вступление справки об авторе",
+        "set_done": "✅ <b>Вступление справки об авторе обновлено!</b>",
+        "set_note": "\n\nℹ️ Данные участника (имя, ник, роль, звание) по-прежнему "
+                    "подставляются автоматически под этим текстом.",
+        "set_usage": "🪪 <b>Вступление справки об авторе</b>\n\n"
+                     "Это первые строки справки, которую бот даёт модели о собеседнике "
+                     "в группе. Имя, ник, роль и почётное звание бот подставляет под "
+                     "ней сам — их писать не нужно.\n\n"
+                     "⚠️ Не убирай оговорку, что справка служебная и не для пересказа "
+                     "вслух: без неё бот начнёт зачитывать людям их роли и звания.\n\n"
+                     "<b>Способ 1:</b> Напиши текст после команды:\n"
+                     "<code>/author_prompt_set [С кем ты говоришь] Справка для тебя...</code>\n\n"
+                     "<b>Способ 2:</b> Отправь <code>.txt</code> файл с текстом, "
+                     "затем ответь (Reply) на него командой <code>/author_prompt_set</code>\n\n"
+                     "🗑️ Вернуть заводское — /author_prompt_reset",
+        "reset_reader": lambda: [(None, get_setting("author_brief_instruction", "").strip())],
+        "reset_btn": "✅ Да, вернуть заводское",
+        "reset_empty": "ℹ️ <b>Сейчас уже действует заводское вступление справки.</b>\n\n"
+                       "Своё не задано — возвращать нечего.",
+        "reset_body": "🗑️ <b>Возврат заводского вступления справки об авторе</b>\n\n"
+                      "Твой текст ({length} символов) будет удалён, "
+                      "вернётся заводской.\n\n"
+                      "⚠️ <b>Подтвердить?</b>",
+        "keys":   ("author_brief_instruction",),
+        "what":   "вступления справки об авторе",
+        "log":    "вернул заводское вступление справки об авторе",
+        "popup":  "✅ Заводское вступление справки возвращено!",
+        "done":   "✅ <b>Заводское вступление справки об авторе возвращено.</b>\n\n"
+                  "Своё удалено — модель снова получает стандартную подводку к данным участника.",
+        "cancel": "🔄 <b>Возврат заводского вступления справки отменён.</b>\n\nТвой текст остался без изменений.",
+    },
     "proactive_prompt": {
         "set_key": "proactive_instruction",
         "file_what": "инструкции участия",
@@ -1024,7 +1084,7 @@ _PROMPTS = {
     },
 }
 
-# Все восемь callback'ов таблицы одной строкой — для проверок и подсказки
+# Все десять callback'ов таблицы одной строкой — для проверок и подсказки
 # читателю. В САМ РОУТЕР их подставлять нельзя (см. предупреждение выше).
 _PROMPT_RESET_CALLBACKS = tuple(
     f"{name}_reset_{action}"
@@ -1036,7 +1096,7 @@ _PROMPT_RESET_CALLBACKS = tuple(
 async def handle_prompt_reset(query, user_id: int, data: str):
     """
     Кнопки «✅ Да, сбросить» / «❌ Отмена» под вопросом о сбросе промпта.
-    Одна на все четыре промпта: что стереть и что написать — в _PROMPTS.
+    Одна на все пять промптов: что стереть и что написать — в _PROMPTS.
 
     На callback отвечает РОВНО ОДИН раз (правило карты про кнопки карточки
     действует и здесь): попап здесь, вызывающая ветка роутера молчит.
@@ -1069,7 +1129,7 @@ async def handle_prompt_reset(query, user_id: int, data: str):
 # ─────────────────────────────────────────────
 #  КОМАНДЫ УПРАВЛЕНИЯ ПРОМПТАМИ (2026-08-04)
 # ─────────────────────────────────────────────
-#  Четыре промпта правятся одинаково: /X_prompt_set задаёт текст (аргументом
+#  Пять промптов правятся одинаково: /X_prompt_set задаёт текст (аргументом
 #  команды или .txt-файлом через Reply), /X_prompt_reset спрашивает
 #  подтверждение и вешает кнопки, которые обслуживает handle_prompt_reset.
 #
@@ -1108,7 +1168,7 @@ async def _prompt_text_from_message(update, context, spec) -> tuple:
     из .txt-файла, на который сделан Reply. Возвращает (текст, ошибка_прочтения).
 
     Файл читается только с расширением .txt и только в UTF-8 — так было
-    во всех четырёх командах; чужую кодировку ловим и честно об этом пишем.
+    во всех командах промптов; чужую кодировку ловим и честно об этом пишем.
     """
     message = update.message
     if context.args:
@@ -1238,3 +1298,15 @@ async def cmd_proactive_prompt_set(update: Update, context: ContextTypes.DEFAULT
 async def cmd_proactive_prompt_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Возвращает заводскую инструкцию участия (с подтверждением)."""
     await _prompt_reset_command(update, context, "proactive_prompt")
+
+
+async def cmd_author_prompt_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Задаёт вступление справки об авторе (первые строки блока «С кем ты говоришь»).
+    Хранится в settings под ключом 'author_brief_instruction'. Данные участника
+    бот всегда подставляет под вступлением сам."""
+    await _prompt_set_command(update, context, "author_prompt")
+
+
+async def cmd_author_prompt_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Возвращает заводское вступление справки об авторе (с подтверждением)."""
+    await _prompt_reset_command(update, context, "author_prompt")

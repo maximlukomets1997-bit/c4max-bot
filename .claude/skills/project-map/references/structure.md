@@ -22,7 +22,7 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 |---|---:|---:|---|
 | `bot.py` | 11 | 0 | — (только вызывает `main.main`) |
 | `main.py` | 571 | 1 | `post_init`, `post_stop`, `post_shutdown`, `main` |
-| `config.py` | 997 | 33 | `read_build_mark` + 104 константы верхнего уровня |
+| `config.py` | 1011 | 33 | `read_build_mark` + 105 констант верхнего уровня |
 | `utils.py` | 181 | 19 | `should_respond_in_group`, `clean_mention`, `keep_chat_action`, `delete_user_message_safe`, `mention`, `schedule_delete`, `register_and_clean_bot_message` |
 | `utils_format.py` | 304 | 7 | `strip_thoughts`, `thoughts_enabled`, `build_text_and_entities`, `send_formatted`, `convert_md`, `fits_caption`, `reply_md` |
 | `logging_setup.py` | 248 | 2 | `archive_old_logs`, `setup_logging` |
@@ -35,7 +35,7 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 | файл | строк | тянут | публичные имена |
 |---|---:|---:|---|
 | `database/__init__.py` | 2 | 0 | — |
-| `database/history.py` | 2767 | 34 | **111 функций**. Ключевые группы: соединение и схема (`init_db`, `close_db`, `backup_to`), переписка (`get_history`, `add_messages`, `clear_history`), настройки (`get_setting`, `set_setting`, `delete_setting`), деньги и счётчики (`add_provider_cost`, `register_api_call`, `get_bot_stats`, `save_stats_snapshot`), модерация (`log_moderation_action`, `save_mute_evidence`, `get_dossier`), персонал и права (`get_all_staff`, `set_staff_perm`, `log_staff_action`), викторина (`add_quiz_question`, `get_random_quiz_question`, `set_quiz_question_approved`), группы (`save_group_message`, `get_recent_group_messages`), новости (`is_news_already_sent`, `mark_news_as_sent`, `set_last_news`, `get_last_news`), журналы (`add_kb_action`, `log_proactive_check`, `log_join`) |
+| `database/history.py` | 2782 | 34 | **112 функций**. Ключевые группы: соединение и схема (`init_db`, `close_db`, `backup_to`), переписка (`get_history`, `add_messages`, `clear_history`), настройки (`get_setting`, `set_setting`, `delete_setting`), деньги и счётчики (`add_provider_cost`, `register_api_call`, `get_bot_stats`, `save_stats_snapshot`), модерация (`log_moderation_action`, `save_mute_evidence`, `get_dossier`), персонал и права (`get_all_staff`, `set_staff_perm`, `log_staff_action`), викторина (`add_quiz_question`, `get_random_quiz_question`, `set_quiz_question_approved`), группы (`save_group_message`, `get_recent_group_messages`), новости (`is_news_already_sent`, `mark_news_as_sent`, `set_last_news`, `get_last_news`), журналы (`add_kb_action`, `log_proactive_check`, `log_join`) |
 
 Полный список — `python -c "import ast;print([n.name for n in ast.parse(open('database/history.py',encoding='utf-8').read()).body if hasattr(n,'name')])"`.
 
@@ -43,7 +43,7 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 
 | файл | строк | тянут | публичные имена |
 |---|---:|---:|---|
-| `handlers/__init__.py` | 110 | 2 | `setup_handlers` — единственное место регистрации обработчиков |
+| `handlers/__init__.py` | 112 | 2 | `setup_handlers` — единственное место регистрации обработчиков |
 | `handlers/commands.py` | 416 | 5 | `public_commands`, `bot_display_name`, `cmd_start`, `cmd_help`, `cmd_clear`, `cmd_subscribe`, `cmd_unsubscribe`, `handle_menu_callback`, `log_incoming_command`, `handle_unknown_command` |
 | `handlers/messages.py` | 510 | 1 | `handle_photo`, `handle_voice`, `handle_video`, `handle_message`, `collect_group_message` |
 | `handlers/media.py` | 93 | 1 | `cmd_imagine` |
@@ -54,11 +54,11 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 
 | файл | строк | тянут | публичные имена |
 |---|---:|---:|---|
-| `handlers/admin/__init__.py` | 39 | 4 | только re-export; новое имя, не вписанное сюда, роняет старт бота |
-| `handlers/admin/common.py` | 486 | 13 | публичных нет — всё через имена с подчёркиванием (`_onoff`, `_require`, `_send_panel_message`, `_adm_back_row` и др.), но тянут его 13 модулей |
-| `handlers/admin/router.py` | 706 | 1 | `handle_callback_query` — единственный роутер всех кнопок |
+| `handlers/admin/__init__.py` | 40 | 4 | только re-export; новое имя, не вписанное сюда, роняет старт бота |
+| `handlers/admin/common.py` | 490 | 13 | публичных нет — всё через имена с подчёркиванием (`_onoff`, `_require`, `_send_panel_message`, `_adm_back_row` и др.), но тянут его 13 модулей |
+| `handlers/admin/router.py` | 707 | 1 | `handle_callback_query` — единственный роутер всех кнопок |
 | `handlers/admin/panel_main.py` | 436 | 4 | `send_stats_panel`, `send_api_panel`, `send_daily_report_panel`, `send_weekly_report_panel`, `cmd_stats`, `build_adm_keyboard`, `send_adm_panel`, `cmd_adm` |
-| `handlers/admin/panel_prompts.py` | 1241 | 3 | `send_prompt_files`, `send_prompts_panel`, `handle_prompt_reset`, `cmd_prompt_set/add/reset`, `cmd_news_prompt_set/reset`, `cmd_rag_prompt_set/reset`, `cmd_proactive_prompt_set/reset` |
+| `handlers/admin/panel_prompts.py` | 1313 | 3 | `send_prompt_files`, `send_prompts_panel`, `handle_prompt_reset`, `cmd_prompt_set/add/reset`, `cmd_news_prompt_set/reset`, `cmd_rag_prompt_set/reset`, `cmd_author_prompt_set/reset`, `cmd_proactive_prompt_set/reset` |
 | `handlers/admin/panel_users.py` | 1337 | 3 | `send_users_panel`, `send_user_card`, `cmd_users` |
 | `handlers/admin/panel_rag.py` | 1000 | 6 | `send_rag_panel`, `cmd_rag`, `handle_kb_document`, `handle_kb_test_query` (панель из трёх экранов: разделы → список раздела → настройки поиска) |
 | `handlers/admin/panel_mod.py` | 589 | 3 | `send_mod_panel`, `cmd_mod`, `cmd_unmute` |
@@ -71,7 +71,7 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 
 | файл | строк | тянут | публичные имена |
 |---|---:|---:|---|
-| `services/gemini.py` | 2442 | 7 | `compress_newlines`, `ask_gemini`, `ask_gemini_audio`, `ask_gemini_video`, `format_news_as_colonel`, `author_brief`, `last_news_brief`, `ask_group_proactive`, `ask_group_proactive_media`, `generate_image` |
+| `services/gemini.py` | 2469 | 7 | `compress_newlines`, `ask_gemini`, `ask_gemini_audio`, `ask_gemini_video`, `format_news_as_colonel`, `author_brief`, `last_news_brief`, `ask_group_proactive`, `ask_group_proactive_media`, `generate_image` |
 | `services/antispam.py` | 861 | 7 | `is_enabled`, `get_thresholds`, `get_thresholds_for`, `trust_info`, `check_and_mute`, `unmute`, `mute_user`, `kick_user`, `ban_user`, `unban_user`, `notify_owners_ai_mute`, `is_linkfilter_enabled`, `check_and_delete_links`, `get_mute_stats`, `get_recent_actions`, `get_evidence` |
 | `services/daily_report.py` | 781 | 7 | `kyiv_now`, `kyiv_label`, `collect_counters`, `period_totals`, `render`, `midnight_report`, `today_so_far`, `weekly_report`, `week_so_far`, `last_report_text`, `last_weekly_text` и др. |
 | `services/rag.py` | 795 | 5 | `cosine_similarity`, `RagQuotaError`, `get_embedding`, `parse_article_file`, `is_active`, `sync_knowledge_base`, `index_lag`, `rebuild_knowledge_base`, `normalize_query`, `retrieve_relevant_context`, `test_search` |
@@ -87,7 +87,7 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 | `services/backup.py` | 272 | 2 | `backup_dir`, `human_size`, `make_backup`, `list_backups`, `make_kb_backup`, `kb_caption`, `due_today`, `note_done` |
 | `services/deploy.py` | 164 | 3 | `note_activity`, `quiet_for`, `can_update`, `update`, `describe` |
 | `services/user_settings.py` | 148 | 9 | `load`, `refresh`, `get`, `set_field`, `clear`, `thresholds_for`, `is_immune`, `links_allowed`, `ai_ignored`, `image_limit_for`, `honorary_rank` |
-| `services/chat_log.py` | 270 | 5 | `archive_path`, `current_path`, `started_label`, `note_check`, `note_media`, `note_request`, `note_answer`, `note_outcome`, `close_session`, `stats` (дословный лог проактивного режима в `logs/chat`) |
+| `services/chat_log.py` | 279 | 5 | `archive_path`, `current_path`, `started_label`, `note_check`, `note_media`, `note_request`, `note_answer`, `note_outcome`, `close_session`, `stats` (дословный лог проактивного режима в `logs/chat`) |
 | `services/http.py` | 58 | 5 | `session` |
 | `services/__init__.py` | 2 | 0 | — |
 

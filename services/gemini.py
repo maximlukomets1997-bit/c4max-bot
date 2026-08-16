@@ -1816,6 +1816,11 @@ def _who_is_talking(user_id: int | None) -> str:
     (_build_proactive_parts) и прямое обращение в ГРУППЕ (ask_gemini).
     В личке НЕ добавляется — там собеседник и так один.
 
+    Две первые строки (вступление) с 2026-08-16 правятся из Телеграма как
+    обычный промпт — /author_prompt_set, ключ settings
+    'author_brief_instruction'. Сами данные участника собираются здесь и
+    вшиты в код: их состав настройками не меняется.
+
     Возвращает готовый блок текста или "" (ни имени, ни ника / любая ошибка —
     модуль не должен ронять проверку из-за справки).
     """
@@ -1852,11 +1857,11 @@ def _who_is_talking(user_id: int | None) -> str:
         if rank:
             who += f"; звание: {rank}"
 
-        return (
-            "[С кем ты говоришь]\n"
-            "Справка на автора последнего сообщения (тебе, не для пересказа вслух):\n"
-            f"{who}."
-        )
+        # Вступление справки правится из Телеграма (/author_prompt_set, ключ
+        # settings 'author_brief_instruction'); не задано — заводское из
+        # config.AUTHOR_BRIEF_INSTRUCTION. Данные участника ВСЕГДА подставляются
+        # под ним — как статьи базы знаний под RAG-инструкцией.
+        return f"{hist.get_author_brief_instruction()}\n{who}."
     except Exception as e:
         logger.debug("🤖 Не удалось собрать справку об авторе %s: %s", user_id, e)
         return ""
@@ -1932,7 +1937,7 @@ def last_news_brief() -> str:
 
 
 def _build_proactive_parts(chat_id: int, bot_id: int, trigger_text: str,
-                           trigger_user_id: int | None) -> list[str] | None:
+                           trigger_user_id: int | None) -> tuple:
     """
     Подготовка контекста для проактивного режима: характер, RAG, последняя
     разосланная новость, справка об авторе, инструкция участия (с блоком рук
@@ -1945,8 +1950,11 @@ def _build_proactive_parts(chat_id: int, bot_id: int, trigger_text: str,
     (например «в реплике никакой разметки») перекрывают общие правила
     оформления — так и задумано.
 
-    Возвращает список кусков системного промпта или None, если говорить не о чем
-    (пустая стенограмма — например, сразу после кнопки «Очистить РАЗГОВОРЫ»).
+    Возвращает ДВА списка кусков системного промпта: (что уходит модели, что
+    писать в лог разговора). Второй отличается только тем, что заданные тексты
+    промптов в нём заменены строкой с длиной — см. комментарий ниже по коду.
+    Оба — None, если говорить не о чем (пустая стенограмма, например сразу
+    после кнопки «Очистить РАЗГОВОРЫ»).
     """
     # Размер стенограммы настраивается из панели (регулятор «контекст»);
     # settings хранит строки — приводим к int с фолбэком на дефолт конфига.
@@ -1957,7 +1965,7 @@ def _build_proactive_parts(chat_id: int, bot_id: int, trigger_text: str,
 
     rows = hist.get_recent_group_messages(chat_id, context_msgs)
     if not rows:
-        return None
+        return None, None
 
     # ── Стенограмма беседы: «Имя: текст», свои реплики бота — «Ты: …» ──
     lines = []
@@ -2046,7 +2054,7 @@ def _build_proactive_parts(chat_id: int, bot_id: int, trigger_text: str,
             lines.append(f"{name}: {text}")
         last_row_added = (i == len(rows) - 1)
     if not lines:
-        return None
+        return None, None
 
     # Если триггер — медиа с готовым результатом анализа (описание фото /
     # расшифровка голосового / описание видео), подменяем пометку
@@ -2080,9 +2088,24 @@ def _build_proactive_parts(chat_id: int, bot_id: int, trigger_text: str,
     # Персональный тумблер «PROMPT ВЫКЛ» админа тут не действует: это групповой
     # контекст, бот говорит своим обычным характером.
     system_parts = []
+
+    # ⚠️ ВТОРОЙ СПИСОК — ТО ЖЕ САМОЕ ДЛЯ ЛОГА РАЗГОВОРА (2026-08-16, решение
+    # Максима). Заданные им тексты промптов — характер и RAG-инструкция — в
+    # файл не пишутся: они видны в панели промптов, от проверки к проверке не
+    # меняются и занимали бы в записи больше места, чем сам разговор. Вместо
+    # текста остаётся строка с длиной — видно, что промпт уходил, и какой
+    # величины. ЖИВЫЕ данные (статьи базы знаний, справка об авторе, новость,
+    # стенограмма) пишутся целиком: ради них запись и ведётся.
+    log_parts = []
+
+    def _part(text: str, for_log: str | None = None) -> None:
+        """Добавить кусок промпта: в запрос — всегда, в лог — то, что можно."""
+        system_parts.append(text)
+        log_parts.append(text if for_log is None else for_log)
+
     persona, _, _ = hist.get_active_system_prompt()
     if persona:
-        system_parts.append(persona)
+        _part(persona, f"[SYSTEM PROMPT — {len(persona)} симв., в лог не пишется]")
 
     # RAG по последнему сообщению (триггеру) — как в ask_gemini: если чат
     # обсуждает игру, бот подтянет факты из базы знаний. Общий тумблер базы
@@ -2093,7 +2116,9 @@ def _build_proactive_parts(chat_id: int, bot_id: int, trigger_text: str,
             rag_context = rag_module.retrieve_relevant_context(trigger_text)
             if rag_context:
                 rag_instruction = hist.get_rag_instruction()
-                system_parts.append(f"{rag_instruction}\n\n{rag_context}")
+                _part(f"{rag_instruction}\n\n{rag_context}",
+                      f"[RAG-PROMPT — {len(rag_instruction)} симв., в лог не пишется]"
+                      f"\n\n{rag_context}")
                 logger.info("%s Контекст RAG добавлен в проактивную проверку", RAG_ICON)
         except Exception as rag_err:
             logger.error("⚠️ Не удалось добавить контекст RAG в проактивную проверку: %s", rag_err)
@@ -2102,13 +2127,13 @@ def _build_proactive_parts(chat_id: int, bot_id: int, trigger_text: str,
     # поэтому стоит рядом с RAG и ДО справки об авторе (2026-08-16).
     news_block = _last_news_block()
     if news_block:
-        system_parts.append(news_block)
+        _part(news_block)
 
     who = _who_is_talking(trigger_user_id)
     if who:
-        system_parts.append(who)
+        _part(who)
 
-    system_parts.append(hist.get_proactive_instruction())
+    _part(hist.get_proactive_instruction())
 
     # ⚠️ ДВА БЛОКА ВМЕСТО ОДНОГО СПИСКА (2026-08-11, формат продиктован
     # Максимом). Раньше все строки выглядели одинаково свежими, и модель не
@@ -2125,9 +2150,9 @@ def _build_proactive_parts(chat_id: int, bot_id: int, trigger_text: str,
     # читала обе одинаково. Понадобится вернуть — только служебной строкой БЕЗ
     # имени, вида «(сообщения выше ты уже видел)».
     if len(lines) > 1:
-        system_parts.append("[Контекст сообщений чата]\n" + "\n".join(lines[:-1]))
-    system_parts.append("[Последнее сообщение]\n" + lines[-1])
-    return system_parts
+        _part("[Контекст сообщений чата]\n" + "\n".join(lines[:-1]))
+    _part("[Последнее сообщение]\n" + lines[-1])
+    return system_parts, log_parts
 
 
 def ask_group_proactive_media(chat_id: int, bot_id: int, trigger_text: str,
@@ -2172,7 +2197,8 @@ def ask_group_proactive_media(chat_id: int, bot_id: int, trigger_text: str,
 
     Синхронная (requests) — звать через run_in_executor.
     """
-    system_parts = _build_proactive_parts(chat_id, bot_id, trigger_text, trigger_user_id)
+    system_parts, log_parts = _build_proactive_parts(chat_id, bot_id, trigger_text,
+                                                     trigger_user_id)
     if system_parts is None:
         return None
 
@@ -2198,7 +2224,7 @@ def ask_group_proactive_media(chat_id: int, bot_id: int, trigger_text: str,
     # же, а на три неудачные попытки легли бы три одинаковые простыни.
     from services import chat_log
     chat_log.note_request(f"{kind} + цепочка {', '.join(PROACTIVE_MEDIA_CHAIN)}",
-                          "\n\n".join(system_parts), task)
+                          "\n\n".join(log_parts), task)
 
     for model_name in PROACTIVE_MEDIA_CHAIN:
         if _quota_blocked_now(model_name):
@@ -2279,7 +2305,8 @@ def ask_group_proactive(chat_id: int, bot_id: int, trigger_text: str,
     # возвращать: ровно за это отладочную строку и убрали 11.08 (см. ниже).
     from services import chat_log
 
-    system_parts = _build_proactive_parts(chat_id, bot_id, trigger_text, trigger_user_id)
+    system_parts, log_parts = _build_proactive_parts(chat_id, bot_id, trigger_text,
+                                                     trigger_user_id)
     if system_parts is None:
         # Единственный путь, на котором модели не было вовсе. В логе разговора
         # это надо сказать словами: иначе запись выглядит как «бот подумал и
@@ -2314,7 +2341,7 @@ def ask_group_proactive(chat_id: int, bot_id: int, trigger_text: str,
     elapsed = time.perf_counter() - started_at
     # Пишем ПОСЛЕ запроса, а не до: имя ответившей модели известно только
     # теперь — цепочка подстраховки могла увести запрос на запасную.
-    chat_log.note_request(used_model or "—", messages[0]["content"], task)
+    chat_log.note_request(used_model or "—", "\n\n".join(log_parts), task)
     if data is None:
         # Все модели цепочки недоступны — молчим (тишина = штатный исход,
         # никакого SOFT_FAIL_MESSAGE в чат).

@@ -305,7 +305,9 @@ def _logs_back_row():
 def _chat_log_files_row():
     """Ряд скачивания записей разговора: текущая и архив прошлых."""
     return [
-        InlineKeyboardButton("💬 Текущая запись", callback_data="adm_logs_chat_file"),
+        # 💾 — как у «Текущего лога» бота: значок скачивания одинаковый у всех
+        # кнопок, которые присылают файл (решение Максима 2026-08-16).
+        InlineKeyboardButton("💾 Текущая запись", callback_data="adm_logs_chat_file"),
         InlineKeyboardButton("🗄 Архив разговоров", callback_data="adm_logs_chat_archive"),
     ]
 
