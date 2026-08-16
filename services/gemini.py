@@ -2096,12 +2096,14 @@ def _build_proactive_parts(chat_id: int, bot_id: int, trigger_text: str,
     system_parts = []
 
     # ⚠️ ВТОРОЙ СПИСОК — ТО ЖЕ САМОЕ ДЛЯ ЛОГА РАЗГОВОРА (2026-08-16, решение
-    # Максима). Заданные им тексты промптов — характер и RAG-инструкция — в
-    # файл не пишутся: они видны в панели промптов, от проверки к проверке не
-    # меняются и занимали бы в записи больше места, чем сам разговор. Вместо
-    # текста остаётся строка с длиной — видно, что промпт уходил, и какой
-    # величины. ЖИВЫЕ данные (статьи базы знаний, справка об авторе, новость,
-    # стенограмма) пишутся целиком: ради них запись и ведётся.
+    # Максима). В файл не пишутся: характер (SYSTEM PROMPT), RAG-инструкция
+    # ВМЕСТЕ С НАЙДЕННЫМИ СТАТЬЯМИ и PROMPT участия в разговоре. Вместо текста
+    # остаётся строка с длиной — видно, что кусок уходил, и какой величины.
+    # Причина: всё это Максим читает в панели промптов и в базе знаний, а в
+    # записи оно занимало больше места, чем сам разговор.
+    # ⚠️ Статьи базы знаний убраны ВТОРЫМ заходом (17.08): сначала их оставили
+    # как «живые данные», но на деле они и раздували запись сильнее всего.
+    # В логе остаются: последняя новость, справка об авторе и стенограмма.
     log_parts = []
 
     def _part(text: str, for_log: str | None = None) -> None:
@@ -2126,10 +2128,13 @@ def _build_proactive_parts(chat_id: int, bot_id: int, trigger_text: str,
                 rag_instruction = hist.get_rag_instruction()
                 if rag_instruction:
                     _part(f"{rag_instruction}\n\n{rag_context}",
-                          f"[RAG-PROMPT — {len(rag_instruction)} симв., в лог не пишется]"
-                          f"\n\n{rag_context}")
+                          f"[RAG-PROMPT + статьи базы знаний — "
+                          f"{len(rag_instruction)} + {len(rag_context)} симв., "
+                          f"в лог не пишутся]")
                 else:
-                    _part(rag_context)
+                    _part(rag_context,
+                          f"[Статьи базы знаний — {len(rag_context)} симв., "
+                          f"в лог не пишутся]")
                 logger.info("%s Контекст RAG добавлен в проактивную проверку", RAG_ICON)
         except Exception as rag_err:
             logger.error("⚠️ Не удалось добавить контекст RAG в проактивную проверку: %s", rag_err)
@@ -2151,7 +2156,9 @@ def _build_proactive_parts(chat_id: int, bot_id: int, trigger_text: str,
     # сам запрос (ask_group_proactive) — молчать она сможет.
     proactive_instruction = hist.get_proactive_instruction()
     if proactive_instruction:
-        _part(proactive_instruction)
+        _part(proactive_instruction,
+              f"[PROMPT участия в разговоре — {len(proactive_instruction)} симв., "
+              f"в лог не пишется]")
 
     # ⚠️ ДВА БЛОКА ВМЕСТО ОДНОГО СПИСКА (2026-08-11, формат продиктован
     # Максимом). Раньше все строки выглядели одинаково свежими, и модель не
