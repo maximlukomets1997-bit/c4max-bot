@@ -65,7 +65,7 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 | `handlers/admin/panel_quiz.py` | 548 | 3 | `send_quiz_panel`, `cmd_quiz_admin` |
 | `handlers/admin/panel_balance.py` | 440 | 3 | `send_balance_panel`, `handle_balance_input` |
 | `handlers/admin/panel_updates.py` | 181 | 3 | `send_updates_panel` |
-| `handlers/admin/panel_digest.py` | 178 | 2 | `digest_keyboard`, `send_digest_panel` |
+| `handlers/admin/panel_digest.py` | 179 | 2 | `digest_keyboard`, `send_digest_panel` |
 
 ## `services/` — логика, не привязанная к экрану
 
@@ -82,7 +82,7 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 | `services/scraper.py` | 346 | 1 | `fetch_latest_news`, `fetch_article` (сайт `https://wtmobile.com/ru/news`) |
 | `services/roles.py` | 311 | 11 | `load`, `make_moderator`, `unmake_moderator`, `grant_perm`, `is_owner`, `is_moderator`, `is_staff`, `role_of`, `can`, `has_any_perm`, `perms_of`, `list_moderators`, `can_act_on`, `perm_for_callback`, `may_press` |
 | `services/knowledge_store.py` | 300 | 6 | `save_pending_news`, `read_title`, `detect_kind`, `list_articles`, `read_article`, `approve_article`, `delete_article`, `add_article`, `replace_article` |
-| `services/group_digest.py` | 299 | 3 | `is_enabled`, `week_key`, `due_now`, `note_sent`, `collect`, `render`, `build` |
+| `services/group_digest.py` | 328 | 3 | `is_enabled`, `week_key`, `due_now`, `note_sent`, `collect`, `render`, `build` |
 | `services/update_log.py` | 263 | 1 | `available`, `version_of`, `recent`, `stats`, `fmt_time`, `fmt_day`, `fmt_ago` |
 | `services/backup.py` | 272 | 2 | `backup_dir`, `human_size`, `make_backup`, `list_backups`, `make_kb_backup`, `kb_caption`, `due_today`, `note_done` |
 | `services/deploy.py` | 164 | 3 | `note_activity`, `quiet_for`, `can_update`, `update`, `describe` |
@@ -95,7 +95,7 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 | файл | строк | публичные имена |
 |---|---:|---|
 | `jobs/__init__.py` | 36 | re-export; новая задача, не вписанная сюда, роняет старт `main.py` |
-| `jobs/reports.py` | 294 | `daily_report_loop`, `weekly_group_digest`, `nightly_backup` |
+| `jobs/reports.py` | 295 | `daily_report_loop`, `weekly_group_digest`, `nightly_backup` |
 | `jobs/cleanup.py` | 234 | `cleanup_loop` |
 | `jobs/update.py` | 221 | `forget_update_notice`, `auto_update_loop` |
 | `jobs/news.py` | 220 | `send_news_to_chat`, `news_polling_loop` |

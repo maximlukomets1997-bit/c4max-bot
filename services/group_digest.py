@@ -48,6 +48,10 @@ _MONTHS_RU = ("января", "февраля", "марта", "апреля", "�
 # Сколько людей показываем в топе активности.
 _TOP_LIMIT = 5
 
+# Черта между разделами дайджеста. Одна на весь текст: разъедутся по длине —
+# сообщение выглядит кривым, а заметно это только глазами.
+_SEP = "───────────────────────────"
+
 # ⚠️ Считается ТОЛЬКО то, что бот записал: архив групп чистится через 10 дней
 # (jobs/cleanup.py), так что неделя влезает в него с запасом в три дня, но
 # время, когда бот не работал, в цифрах просто отсутствует — «мало сообщений»
@@ -154,8 +158,14 @@ def _quiz_week(save: bool) -> tuple[int, str, int]:
 
 # ─── сбор цифр ──────────────────────────────────────────────────────
 
-def collect(chat_id: int, days: int = 7, save_quiz: bool = False) -> dict:
-    """Все цифры дайджеста одним словарём. Сеть не трогает."""
+def collect(chat_id: int, days: int = 7, save_quiz: bool = False,
+            bot_id: int = 0) -> dict:
+    """
+    Все цифры дайджеста одним словарём. Сеть не трогает.
+
+    `bot_id` — номер самого бота: его строки не идут ни в «Писали», ни в
+    «Самые активные». Не передали (0) — бот попадёт в оба места.
+    """
     end = _kyiv_now()
     start = end - timedelta(days=days)
     # ⚠️ Верхнюю границу НЕ передаём: период всегда кончается «сейчас», а все
@@ -187,6 +197,16 @@ def collect(chat_id: int, days: int = 7, save_quiz: bool = False) -> dict:
             by_hour[moment.hour] += 1
         except (TypeError, ValueError):
             continue
+
+    # ⚠️ Бот вычёркивается ЗДЕСЬ, до отбора пятёрки (решение Максима,
+    # 2026-08-16): свои реплики он кладёт в тот же архив, что и люди
+    # (services/proactive.py, jobs/news.py, handlers/messages.py — так модель
+    # видит в стенограмме собственные ответы), и по числу сообщений уверенно
+    # занимал первое место. Вычеркнуть ПОСЛЕ most_common нельзя — в списке
+    # осталось бы четыре человека вместо пяти.
+    # Строка «💬 Сообщений» считается по всем записям и бота включает: это
+    # оборот чата, а не соревнование.
+    authors.pop(bot_id, None)
 
     quiz_total, quiz_best, quiz_best_n = _quiz_week(save_quiz)
 
@@ -231,7 +251,7 @@ def render(data: dict, chat_title: str = "") -> str:
     lines = [
         f"{_ICON} <b>ИТОГИ НЕДЕЛИ</b>{title}",
         f"<i>{_period_label(data['start'], data['end'])}</i>",
-        "───────────────────────────",
+        _SEP,
     ]
 
     if not data["messages"]:
@@ -255,23 +275,29 @@ def render(data: dict, chat_title: str = "") -> str:
     if media:
         lines.append("📎 Медиа: " + " · ".join(media))
 
+    # Пьедестал отбит чертой сверху и снизу (решение Максима, 2026-08-16).
+    # Дальше блоки отделяются пустой строкой ТОЛЬКО если черты перед ними ещё
+    # нет: иначе после пьедестала получилась бы черта плюс пустая строка.
     if data["top"]:
-        lines.append("")
+        lines.append(_SEP)
         lines.append("🏆 <b>САМЫЕ АКТИВНЫЕ</b>")
         medals = ("🥇", "🥈", "🥉", "4.", "5.")
         for i, (name, count) in enumerate(data["top"]):
             lines.append(f"{medals[i] if i < len(medals) else f'{i + 1}.'} "
                          f"{html.escape(name[:24])} — <b>{count}</b>")
+        lines.append(_SEP)
 
     if data["quiz_total"]:
-        lines.append("")
+        if lines[-1] != _SEP:
+            lines.append("")
         lines.append("🎮 <b>ВИКТОРИНА</b>")
         lines.append(f"Верных ответов: <b>{data['quiz_total']}</b>")
         if data["quiz_best"]:
             lines.append(f"Лучший: {html.escape(data['quiz_best'][:24])} — "
                          f"<b>{data['quiz_best_n']}</b>")
 
-    lines.append("")
+    if lines[-1] != _SEP:
+        lines.append("")
     if data["news"]:
         lines.append(f"📰 Новостей с wtmobile: <b>{data['news']}</b>")
     proactive = data.get("proactive") or {}
@@ -287,12 +313,15 @@ def render(data: dict, chat_title: str = "") -> str:
         lines.append(f"🛡 DDoS-Guard: мутов <b>{mod.get('mutes', 0)}</b> · "
                      f"ссылок удалено <b>{mod.get('linkdels', 0)}</b>")
 
-    lines.append("───────────────────────────")
+    # Черты подряд не ставим: без викторины и без нижних строк подвал упёрся
+    # бы прямо в черту под пьедесталом.
+    if lines[-1] != _SEP:
+        lines.append(_SEP)
     lines.append("<i>Спросить о технике — /ttx · своё звание — /rank</i>")
     return "\n".join(lines)
 
 
 def build(chat_id: int, chat_title: str = "", days: int = 7,
-          save_quiz: bool = False) -> str:
+          save_quiz: bool = False, bot_id: int = 0) -> str:
     """Собрать и нарисовать дайджест одной строкой (то, что зовут снаружи)."""
-    return render(collect(chat_id, days, save_quiz), chat_title)
+    return render(collect(chat_id, days, save_quiz, bot_id), chat_title)

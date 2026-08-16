@@ -166,7 +166,8 @@ async def weekly_group_digest(application) -> bool:
             # save_quiz=True ТОЛЬКО у первой группы: снимок викторины один на
             # весь бот, и обновить его нужно ровно раз за отправку — иначе
             # вторая группа получила бы нулевую викторину.
-            text = group_digest.build(chat["chat_id"], title, save_quiz=(i == 0))
+            text = group_digest.build(chat["chat_id"], title, save_quiz=(i == 0),
+                                      bot_id=application.bot.id)
         except Exception as e:
             logger.error("⚠️ 📊 Не удалось собрать дайджест группы %s: %s", title, e)
             continue

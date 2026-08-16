@@ -86,7 +86,8 @@ async def send_digest_panel(bot, chat_id: int, user_id: int, target_chat: int | 
     # ⚠️ save_quiz=False: кнопка «показать сейчас» НЕ сдвигает точку отсчёта
     # викторины — иначе нажавший её человек обнулил бы себе цифры ближайшего
     # понедельничного дайджеста. Снимок обновляет только настоящая отправка.
-    text = group_digest.build(chat["chat_id"], title, save_quiz=False)
+    text = group_digest.build(chat["chat_id"], title, save_quiz=False,
+                              bot_id=bot.id)
     sent = await bot.send_message(
         chat_id=chat_id, text=text, parse_mode=ParseMode.HTML,
         reply_markup=digest_keyboard(chat["chat_id"]),
