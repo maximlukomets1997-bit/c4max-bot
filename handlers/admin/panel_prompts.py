@@ -576,13 +576,14 @@ def _build_prompt_panel_text_and_keyboard(user_id, bot_username=None):
     # «Шапка», которая уходит модели ПЕРЕД найденными статьями базы знаний
     # (сами статьи бот подставляет под ней автоматически).
     # ⚠️ С 2026-08-16 заводского текста нет: не задал — шапки нет вовсе,
-    # поэтому пометка честно говорит «не задана», а не «заводская».
+    # и в панели это видно по нулю символов.
+    # ⚠️ ПОМЕТКИ «(своя)» / «(не задана)» ПОСЛЕ СЧЁТЧИКА БОЛЬШЕ НЕТ (решение
+    # Максима 2026-08-16: «заводит в заблуждение»). Не возвращать без просьбы —
+    # ни здесь, ни у справки об авторе, ни у промпта участия.
     rag_instruction = get_rag_instruction()
-    rag_is_custom = bool(get_setting("rag_instruction", "").strip())
-    rag_origin = "своя" if rag_is_custom else "не задана"
     rag_section = (
         "\n───────────────────────────\n"
-        f"🧠<b>RAG-PROMPT:</b> {_num(len(rag_instruction))} <i>символов ({rag_origin})</i>\n"
+        f"🧠<b>RAG-PROMPT:</b> {_num(len(rag_instruction))} <i>символов</i>\n"
         f"{_expandable_preview(rag_instruction)}\n"
         "✏️ /rag_prompt_set &lt;текст&gt; — Изменить RAG-инструкцию\n"
         "🗑️ /rag_prompt_reset — Удалить (шапки не останется)"
@@ -601,7 +602,6 @@ def _build_prompt_panel_text_and_keyboard(user_id, bot_username=None):
     # Стоит ПЕРЕД блоком участия, потому что в запросе идёт в этом же порядке
     # (характер → база знаний → справка → правила участия → стенограмма).
     author_instruction = get_author_brief_instruction()
-    author_origin = "своя" if get_setting("author_brief_instruction", "").strip() else "заводская"
     try:
         from services.gemini import author_brief
         who_text = author_brief(user_id) or ""
@@ -617,7 +617,7 @@ def _build_prompt_panel_text_and_keyboard(user_id, bot_username=None):
     who_body = _expandable_preview(who_tail) if who_tail else "<i>(нет данных о тебе)</i>"
     who_section = (
         "\n───────────────────────────\n"
-        f"🪪<b>СПРАВКА ОБ АВТОРЕ:</b> {_num(len(author_instruction))} <i>символов ({author_origin})</i>\n"
+        f"🪪<b>СПРАВКА ОБ АВТОРЕ:</b> {_num(len(author_instruction))} <i>символов</i>\n"
         f"{_expandable_preview(author_instruction)}\n"
         "👤 <i>Данные участника — подставляет бот сам:</i>\n"
         f"{who_body}\n"
@@ -634,12 +634,12 @@ def _build_prompt_panel_text_and_keyboard(user_id, bot_username=None):
     # По ней модель решает, вступить ли в беседу группы без обращения к боту
     # (services/proactive.py).
     # ⚠️ С 2026-08-16 заводского текста нет: не задал — правил у модели нет
-    # вовсе, поэтому пометка честно говорит «не задана», а не «заводская».
+    # вовсе, и в панели это видно по нулю символов. Пометки «(своя)» после
+    # счётчика тут тоже больше нет — см. блок RAG выше.
     proactive_instruction = get_proactive_instruction()
-    proactive_origin = "своя" if get_setting("proactive_instruction", "").strip() else "не задана"
     proactive_section = (
         "\n───────────────────────────\n"
-        f"🗣<b>PROMPT УЧАСТИЯ В РАЗГОВОРЕ:</b> {_num(len(proactive_instruction))} <i>символов ({proactive_origin})</i>\n"
+        f"🗣<b>PROMPT УЧАСТИЯ В РАЗГОВОРЕ:</b> {_num(len(proactive_instruction))} <i>символов</i>\n"
         f"{_expandable_preview(proactive_instruction)}\n"
         "✏️ /proactive_prompt_set &lt;текст&gt; — Изменить инструкцию\n"
         "🗑️ /proactive_prompt_reset — Удалить (правил не останется)"
