@@ -63,8 +63,8 @@ from config import (
 )
 from database.history import get_setting, log_proactive_check, save_group_message
 from services.gemini import (ask_group_proactive, ask_group_proactive_media,
-                             _proactive_describe_image,
-                             _proactive_transcribe_audio, _proactive_describe_video)
+                             _describe_image,
+                             _transcribe_audio, _describe_video)
 from utils import should_respond_in_group, keep_chat_action
 from utils_format import send_formatted, strip_thoughts
 
@@ -405,14 +405,17 @@ async def _run_proactive(bot, chat_id: int, trigger_message_id: int, trigger_tex
         if has_photo and photo_file_id:
             try:
                 import base64 as _b64
-                logger.info("🤖 Чат %s: триггер — фото, активная модель не видит картинки → описание через Gemini",
-                            chat_id)
+                # ⚠️ Строка правлена 16.08.2026: раньше писала «активная модель
+                # не видит картинки → описание через Gemini». Условие выше
+                # активную модель НЕ проверяет — фото описывается ВСЕГДА, какая
+                # бы модель ни стояла. Читать лог по этой строке было нельзя.
+                logger.info("🤖 Чат %s: триггер — фото → описание через Gemini", chat_id)
                 photo_file = await bot.get_file(photo_file_id)
                 file_bytes = await photo_file.download_as_bytearray()
                 image_base64 = _b64.b64encode(file_bytes).decode('utf-8')
                 media_b64, media_mime, media_kind = image_base64, "image/jpeg", "фото"
                 description = await loop.run_in_executor(
-                    None, _proactive_describe_image, image_base64,
+                    None, _describe_image, image_base64,
                 )
                 if description:
                     # ⚠️ ТЕКСТА РАЗБОРА В ЛОГЕ НЕТ — решение Максима 2026-08-11
@@ -458,14 +461,15 @@ async def _run_proactive(bot, chat_id: int, trigger_message_id: int, trigger_tex
         elif has_voice and voice_file_id:
             try:
                 import base64 as _b64
-                logger.info("🤖 Чат %s: триггер — голосовое, активная модель не принимает аудио → расшифровка через Gemini",
-                            chat_id)
+                # Та же правка, что у фото выше: голосовое расшифровывается
+                # всегда, активная модель здесь ни при чём.
+                logger.info("🤖 Чат %s: триггер — голосовое → расшифровка через Gemini", chat_id)
                 voice_file = await bot.get_file(voice_file_id)
                 file_bytes = await voice_file.download_as_bytearray()
                 audio_base64 = _b64.b64encode(file_bytes).decode('utf-8')
                 media_b64, media_mime, media_kind = audio_base64, "audio/ogg", "голосовое"
                 transcription = await loop.run_in_executor(
-                    None, _proactive_transcribe_audio, audio_base64,
+                    None, _transcribe_audio, audio_base64,
                 )
                 if transcription:
                     logger.info("🤖 Чат %s: голосовое расшифровано (%d символов)",
@@ -483,7 +487,7 @@ async def _run_proactive(bot, chat_id: int, trigger_message_id: int, trigger_tex
                 video_base64 = _b64.b64encode(file_bytes).decode('utf-8')
                 media_b64, media_mime, media_kind = video_base64, video_mime, "видео"
                 description = await loop.run_in_executor(
-                    None, _proactive_describe_video, video_base64, video_mime,
+                    None, _describe_video, video_base64, video_mime,
                 )
                 if description:
                     logger.info("🤖 Чат %s: видео проанализировано (%d символов)",
