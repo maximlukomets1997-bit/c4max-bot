@@ -287,10 +287,12 @@ def _logs_menu_rows():
     не вмещает: у разговора свои цифры, свои файлы и свой счёт записей.
     Отсюда развилка, а сами экраны — ниже по роутеру.
     """
-    return [
-        [InlineKeyboardButton("⚙️ Работа бота", callback_data="adm_logs_bot")],
-        [InlineKeyboardButton("💬 Разговор в группе", callback_data="adm_logs_chat")],
-    ]
+    # Обе ветки в ОДИН ряд, два столбца (решение Максима 2026-08-16): выбор из
+    # двух равнозначных веток читается как выбор, а не как список.
+    return [[
+        InlineKeyboardButton("⚙️ Работа бота", callback_data="adm_logs_bot"),
+        InlineKeyboardButton("💬 Разговор в группе", callback_data="adm_logs_chat"),
+    ]]
 
 
 def _logs_back_row():
