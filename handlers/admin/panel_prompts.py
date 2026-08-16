@@ -559,7 +559,7 @@ def _build_prompt_panel_text_and_keyboard(user_id, bot_username=None):
             f"📰<b>NEWS PROMPT:</b> {_num(len(news_prompt))} <i>символов</i>\n"
             f"{_expandable_preview(news_prompt)}\n"
             "✏️ /news_prompt_set &lt;текст&gt; — Изменить промпт новостей\n"
-            "🗑️ /news_prompt_reset — Удалить промпт новостей"
+            "🗑️ /news_prompt_reset — Удалить промпт (новости пойдут без промпта)"
         )
     else:
         # Промпт новостей не задан — показываем счётчик и "(не задан)",
@@ -586,7 +586,7 @@ def _build_prompt_panel_text_and_keyboard(user_id, bot_username=None):
         f"🧠<b>RAG-PROMPT:</b> {_num(len(rag_instruction))} <i>символов</i>\n"
         f"{_expandable_preview(rag_instruction)}\n"
         "✏️ /rag_prompt_set &lt;текст&gt; — Изменить RAG-инструкцию\n"
-        "🗑️ /rag_prompt_reset — Удалить (шапки не останется)"
+        "🗑️ /rag_prompt_reset — Удалить промпт (статьи пойдут без шапки)"
     )
     full_text += rag_section
 
@@ -622,7 +622,7 @@ def _build_prompt_panel_text_and_keyboard(user_id, bot_username=None):
         "👤 <i>Данные участника — подставляет бот сам:</i>\n"
         f"{who_body}\n"
         "✏️ /author_prompt_set &lt;текст&gt; — Изменить вступление справки\n"
-        "🗑️ /author_prompt_reset — Вернуть заводское\n"
+        "🗑️ /author_prompt_reset — Удалить промпт (справка пойдёт без вступления)\n"
         "ℹ️ <i>Пример собран на тебе — у каждого участника он свой.</i>\n"
         "📋 <i>Берётся из карточки: имя · ник · роль · почётное звание</i>\n"
         "⚠️ <i>Уходит модели в режиме «Сам в разговор» и при обращении к боту "
@@ -642,7 +642,7 @@ def _build_prompt_panel_text_and_keyboard(user_id, bot_username=None):
         f"🗣<b>PROMPT УЧАСТИЯ В РАЗГОВОРЕ:</b> {_num(len(proactive_instruction))} <i>символов</i>\n"
         f"{_expandable_preview(proactive_instruction)}\n"
         "✏️ /proactive_prompt_set &lt;текст&gt; — Изменить инструкцию\n"
-        "🗑️ /proactive_prompt_reset — Удалить (правил не останется)"
+        "🗑️ /proactive_prompt_reset — Удалить промпт (модель останется без правил)"
     )
     full_text += proactive_section
 
@@ -786,7 +786,7 @@ def _collect_prompt_files():
          "своя" if get_setting("rag_instruction", "").strip() else "не задана",
          "/rag_prompt_set", rag_instruction),
         ("AUTHOR_BRIEF.txt", "🪪 СПРАВКА ОБ АВТОРЕ (вступление; данные бот добавит сам)",
-         "своя" if get_setting("author_brief_instruction", "").strip() else "заводская",
+         "своя" if get_setting("author_brief_instruction", "").strip() else "не задана",
          "/author_prompt_set", author_instruction),
         ("PROACTIVE_PROMPT.txt", "🗣 PROMPT УЧАСТИЯ В РАЗГОВОРЕ (включает блок рук)",
          "своя" if get_setting("proactive_instruction", "").strip() else "не задана",
@@ -988,11 +988,12 @@ _PROMPTS = {
                   "Новости теперь форматируются без системного промпта.",
         "cancel": "🔄 <b>Сброс промпта новостей отменён.</b>\n\nТекущий промпт остался без изменений.",
     },
-    # ⚠️ У ТРЁХ ПРОМПТОВ ЗАВОДСКОГО ТЕКСТА НЕТ ВОВСЕ (2026-08-16, решение
-    # Максима): системный, RAG-инструкция и инструкция участия в config.py
-    # пустые. Поэтому их «сброс» — это удаление насовсем, и тексты ниже
-    # обязаны говорить именно так. Заводской текст остался только у справки
-    # об авторе — там формулировки про возврат правдивы.
+    # ⚠️ ЗАВОДСКИХ ТЕКСТОВ НЕТ НИ У ОДНОГО ПРОМПТА (2026-08-16, решение
+    # Максима): в config.py пустые и SYSTEM_PROMPT, и RAG_INSTRUCTION, и
+    # PROACTIVE_INSTRUCTION, и AUTHOR_BRIEF_INSTRUCTION. Поэтому «сброс» у всех
+    # пяти — это удаление насовсем, и тексты ниже обязаны говорить именно так.
+    # Слова про «возврат заводского» сюда не возвращать: они станут неправдой
+    # в ту же секунду.
     "rag_prompt": {
         "set_key": "rag_instruction",
         "file_what": "RAG-инструкции",
@@ -1008,7 +1009,7 @@ _PROMPTS = {
                      "<code>/rag_prompt_set Ты эксперт по технике War Thunder Mobile...</code>\n\n"
                      "<b>Способ 2:</b> Отправь <code>.txt</code> файл с текстом, "
                      "затем ответь (Reply) на него командой <code>/rag_prompt_set</code>\n\n"
-                     "🗑️ Удалить свою (шапки не останется) — /rag_prompt_reset",
+                     "🗑️ Удалить промпт (статьи пойдут без шапки) — /rag_prompt_reset",
         "reset_reader": lambda: [(None, get_setting("rag_instruction", "").strip())],
         "reset_btn": "✅ Да, стереть",
         "reset_empty": "ℹ️ <b>Стирать нечего.</b>\n\n"
@@ -1046,22 +1047,26 @@ _PROMPTS = {
                      "<code>/author_prompt_set [С кем ты говоришь] Справка для тебя...</code>\n\n"
                      "<b>Способ 2:</b> Отправь <code>.txt</code> файл с текстом, "
                      "затем ответь (Reply) на него командой <code>/author_prompt_set</code>\n\n"
-                     "🗑️ Вернуть заводское — /author_prompt_reset",
+                     "🗑️ Удалить промпт (справка пойдёт без вступления) — /author_prompt_reset",
         "reset_reader": lambda: [(None, get_setting("author_brief_instruction", "").strip())],
-        "reset_btn": "✅ Да, вернуть заводское",
-        "reset_empty": "ℹ️ <b>Сейчас уже действует заводское вступление справки.</b>\n\n"
-                       "Своё не задано — возвращать нечего.",
-        "reset_body": "🗑️ <b>Возврат заводского вступления справки об авторе</b>\n\n"
-                      "Твой текст ({length} символов) будет удалён, "
-                      "вернётся заводской.\n\n"
+        "reset_btn": "✅ Да, стереть",
+        "reset_empty": "ℹ️ <b>Стирать нечего.</b>\n\n"
+                       "Своё вступление не задано — справка и так уходит модели "
+                       "одной строкой данных участника.",
+        "reset_body": "🗑️ <b>Удаление вступления справки об авторе</b>\n\n"
+                      "Твой текст ({length} символов) будет удалён.\n"
+                      "⚠️ <b>Заводского НЕТ</b> — модель начнёт получать голую строку "
+                      "вида «Имя (@ник) — Владелец» без пояснений и, скорее всего, "
+                      "станет зачитывать людям их роли и звания вслух.\n\n"
                       "⚠️ <b>Подтвердить?</b>",
         "keys":   ("author_brief_instruction",),
         "what":   "вступления справки об авторе",
-        "log":    "вернул заводское вступление справки об авторе",
-        "popup":  "✅ Заводское вступление справки возвращено!",
-        "done":   "✅ <b>Заводское вступление справки об авторе возвращено.</b>\n\n"
-                  "Своё удалено — модель снова получает стандартную подводку к данным участника.",
-        "cancel": "🔄 <b>Возврат заводского вступления справки отменён.</b>\n\nТвой текст остался без изменений.",
+        "log":    "удалил вступление справки об авторе",
+        "popup":  "✅ Вступление справки удалено!",
+        "done":   "✅ <b>Вступление справки об авторе удалено.</b>\n\n"
+                  "⚠️ Данные участника уходят модели без пояснений. "
+                  "Задать новое: /author_prompt_set",
+        "cancel": "🔄 <b>Удаление вступления справки отменено.</b>\n\nТвой текст остался без изменений.",
     },
     "proactive_prompt": {
         "set_key": "proactive_instruction",
@@ -1078,7 +1083,7 @@ _PROMPTS = {
                      "<code>/proactive_prompt_set Вступай, только если можешь пошутить...</code>\n\n"
                      "<b>Способ 2:</b> Отправь <code>.txt</code> файл с текстом, "
                      "затем ответь (Reply) на него командой <code>/proactive_prompt_set</code>\n\n"
-                     "🗑️ Удалить свою (правил не останется) — /proactive_prompt_reset",
+                     "🗑️ Удалить промпт (модель останется без правил) — /proactive_prompt_reset",
         "reset_reader": lambda: [(None, get_setting("proactive_instruction", "").strip())],
         "reset_btn": "✅ Да, стереть",
         "reset_empty": "ℹ️ <b>Стирать нечего.</b>\n\n"
@@ -1325,5 +1330,5 @@ async def cmd_author_prompt_set(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def cmd_author_prompt_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Возвращает заводское вступление справки об авторе (с подтверждением)."""
+    """Удаляет своё вступление справки (заводского нет — останутся голые данные, с подтверждением)."""
     await _prompt_reset_command(update, context, "author_prompt")

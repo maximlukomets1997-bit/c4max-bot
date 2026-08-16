@@ -1625,9 +1625,12 @@ def get_author_brief_instruction() -> str:
     под ним имя, ник, роль и звание).
 
     Живой текст хранится в settings под ключом 'author_brief_instruction'.
-    Как у RAG-инструкции: пустое/сброшенное значение → заводской текст
-    AUTHOR_BRIEF_INSTRUCTION (без вступления модель получила бы голую строку
-    «Имя — Владелец» и не поняла бы, что это и зачем).
+
+    ⚠️ ЗАВОДСКОГО ТЕКСТА БОЛЬШЕ НЕТ (2026-08-16, решение Максима):
+    config.AUTHOR_BRIEF_INSTRUCTION пуст, как SYSTEM_PROMPT. Не задал или
+    сбросил — вернётся пустая строка, и модель получит голую строку «Имя —
+    Владелец» без пояснения, что это и зачем (зачитает вслух). Фолбэк на
+    константу оставлен на случай возврата заводского текста.
     """
     from config import AUTHOR_BRIEF_INSTRUCTION
     return get_setting("author_brief_instruction", "").strip() or AUTHOR_BRIEF_INSTRUCTION
