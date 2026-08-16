@@ -548,7 +548,7 @@ def _build_prompt_panel_text_and_keyboard(user_id, bot_username=None):
         "\n"
         "✏️ /prompt_add &lt;текст&gt; — Добавить новые инструкции к промпту\n"
         "🔄 /prompt_set &lt;текст&gt; — Полностью заменить текущий промпт\n"
-        "🗑️ /prompt_reset — Сбросить промпт к заводским настройкам"
+        "🗑️ /prompt_reset — Удалить промпт (бот останется без характера)"
     )
 
     # ── Промпт для новостей ──────────────────────────────────────────────
@@ -574,17 +574,18 @@ def _build_prompt_panel_text_and_keyboard(user_id, bot_username=None):
 
     # ── RAG-инструкция ───────────────────────────────────────────────────
     # «Шапка», которая уходит модели ПЕРЕД найденными статьями базы знаний
-    # (сами статьи бот подставляет под ней автоматически). Инструкция задана
-    # ВСЕГДА — своя или заводская, поэтому ветки «(не задан)» тут нет.
+    # (сами статьи бот подставляет под ней автоматически).
+    # ⚠️ С 2026-08-16 заводского текста нет: не задал — шапки нет вовсе,
+    # поэтому пометка честно говорит «не задана», а не «заводская».
     rag_instruction = get_rag_instruction()
     rag_is_custom = bool(get_setting("rag_instruction", "").strip())
-    rag_origin = "своя" if rag_is_custom else "заводская"
+    rag_origin = "своя" if rag_is_custom else "не задана"
     rag_section = (
         "\n───────────────────────────\n"
         f"🧠<b>RAG-PROMPT:</b> {_num(len(rag_instruction))} <i>символов ({rag_origin})</i>\n"
         f"{_expandable_preview(rag_instruction)}\n"
         "✏️ /rag_prompt_set &lt;текст&gt; — Изменить RAG-инструкцию\n"
-        "🗑️ /rag_prompt_reset — Вернуть заводскую"
+        "🗑️ /rag_prompt_reset — Удалить (шапки не останется)"
     )
     full_text += rag_section
 
@@ -631,15 +632,17 @@ def _build_prompt_panel_text_and_keyboard(user_id, bot_username=None):
 
     # ── Инструкция участия в разговоре («Сам в разговор») ────────────────
     # По ней модель решает, вступить ли в беседу группы без обращения к боту
-    # (services/proactive.py). Задана всегда — своя или заводская.
+    # (services/proactive.py).
+    # ⚠️ С 2026-08-16 заводского текста нет: не задал — правил у модели нет
+    # вовсе, поэтому пометка честно говорит «не задана», а не «заводская».
     proactive_instruction = get_proactive_instruction()
-    proactive_origin = "своя" if get_setting("proactive_instruction", "").strip() else "заводская"
+    proactive_origin = "своя" if get_setting("proactive_instruction", "").strip() else "не задана"
     proactive_section = (
         "\n───────────────────────────\n"
         f"🗣<b>PROMPT УЧАСТИЯ В РАЗГОВОРЕ:</b> {_num(len(proactive_instruction))} <i>символов ({proactive_origin})</i>\n"
         f"{_expandable_preview(proactive_instruction)}\n"
         "✏️ /proactive_prompt_set &lt;текст&gt; — Изменить инструкцию\n"
-        "🗑️ /proactive_prompt_reset — Вернуть заводскую"
+        "🗑️ /proactive_prompt_reset — Удалить (правил не останется)"
     )
     full_text += proactive_section
 
@@ -775,18 +778,18 @@ def _collect_prompt_files():
     # сейчас это промпт новостей, пока он не задан.
     items = [
         ("SYSTEM_PROMPT.txt", "📝 SYSTEM PROMPT",
-         "своя" if get_setting("custom_system_prompt", "").strip() else "заводская",
+         "своя" if get_setting("custom_system_prompt", "").strip() else "не задана",
          "/prompt_set", system_prompt),
         ("NEWS_PROMPT.txt", "📰 NEWS PROMPT",
          "своя", "/news_prompt_set", news_prompt),
         ("RAG_PROMPT.txt", "🧠 RAG-PROMPT",
-         "своя" if get_setting("rag_instruction", "").strip() else "заводская",
+         "своя" if get_setting("rag_instruction", "").strip() else "не задана",
          "/rag_prompt_set", rag_instruction),
         ("AUTHOR_BRIEF.txt", "🪪 СПРАВКА ОБ АВТОРЕ (вступление; данные бот добавит сам)",
          "своя" if get_setting("author_brief_instruction", "").strip() else "заводская",
          "/author_prompt_set", author_instruction),
         ("PROACTIVE_PROMPT.txt", "🗣 PROMPT УЧАСТИЯ В РАЗГОВОРЕ (включает блок рук)",
-         "своя" if get_setting("proactive_instruction", "").strip() else "заводская",
+         "своя" if get_setting("proactive_instruction", "").strip() else "не задана",
          "/proactive_prompt_set", proactive_instruction),
     ]
     return [it for it in items if it[4] and it[4].strip()]
@@ -936,22 +939,25 @@ _PROMPTS = {
         # Поэтому подтверждение перечисляет их списком, а не одной длиной.
         "reset_reader": lambda: [("Кастомный промпт", get_setting("custom_system_prompt", "")),
                                  ("Дополнения", get_setting("prompt_additions", ""))],
-        "reset_btn": "✅ Да, сбросить",
-        "reset_empty": "ℹ️ <b>Сброс не требуется.</b>\n\n"
-                       "Бот уже использует заводской промпт из <code>config.py</code>.\n"
-                       "Кастомных изменений и дополнений не обнаружено.",
-        "reset_body": "🔄 <b>Сброс системного промпта</b>\n\n"
+        "reset_btn": "✅ Да, стереть",
+        "reset_empty": "ℹ️ <b>Стирать нечего.</b>\n\n"
+                       "Своего промпта и дополнений нет — бот и так работает "
+                       "без системного промпта.",
+        "reset_body": "🗑️ <b>Удаление системного промпта</b>\n\n"
                       "Будет удалено:\n{details}\n"
-                      "Бот вернётся к заводскому промпту из <code>config.py</code>.\n\n"
+                      "⚠️ <b>Заводского промпта НЕТ</b> — бот останется совсем без "
+                      "характера. Вернуть можно будет только новым текстом "
+                      "через /prompt_set.\n\n"
                       "⚠️ <b>Это действие нельзя отменить. Подтвердить?</b>",
         "keys":   ("custom_system_prompt", "prompt_additions"),
         "what":   "промпта",
-        "log":    "сбросил системный промпт к заводским настройкам",
-        "popup":  "✅ Промпт сброшен к заводским настройкам!",
-        "done":   "✅ <b>Системный промпт сброшен!</b>\n\n"
-                  "Кастомный промпт и все дополнения удалены.\n"
-                  "Бот снова использует заводской промпт из <code>config.py</code>.",
-        "cancel": "🔄 <b>Сброс промпта отменён.</b>\n\nТекущий промпт остался без изменений.",
+        "log":    "удалил системный промпт",
+        "popup":  "✅ Системный промпт удалён!",
+        "done":   "✅ <b>Системный промпт удалён.</b>\n\n"
+                  "Свой промпт и все дополнения стёрты.\n"
+                  "⚠️ Бот остался <b>без характера</b> — заводского промпта нет. "
+                  "Задать новый: /prompt_set",
+        "cancel": "🔄 <b>Удаление промпта отменено.</b>\n\nТекущий промпт остался без изменений.",
     },
     "news_prompt": {
         "set_key": "news_system_prompt",
@@ -982,8 +988,11 @@ _PROMPTS = {
                   "Новости теперь форматируются без системного промпта.",
         "cancel": "🔄 <b>Сброс промпта новостей отменён.</b>\n\nТекущий промпт остался без изменений.",
     },
-    # Своя инструкция стирается, а не заменяется текстом: get_rag_instruction
-    # и get_proactive_instruction сами вернутся к заводской из config.py.
+    # ⚠️ У ТРЁХ ПРОМПТОВ ЗАВОДСКОГО ТЕКСТА НЕТ ВОВСЕ (2026-08-16, решение
+    # Максима): системный, RAG-инструкция и инструкция участия в config.py
+    # пустые. Поэтому их «сброс» — это удаление насовсем, и тексты ниже
+    # обязаны говорить именно так. Заводской текст остался только у справки
+    # об авторе — там формулировки про возврат правдивы.
     "rag_prompt": {
         "set_key": "rag_instruction",
         "file_what": "RAG-инструкции",
@@ -999,22 +1008,26 @@ _PROMPTS = {
                      "<code>/rag_prompt_set Ты эксперт по технике War Thunder Mobile...</code>\n\n"
                      "<b>Способ 2:</b> Отправь <code>.txt</code> файл с текстом, "
                      "затем ответь (Reply) на него командой <code>/rag_prompt_set</code>\n\n"
-                     "🗑️ Вернуть заводскую — /rag_prompt_reset",
+                     "🗑️ Удалить свою (шапки не останется) — /rag_prompt_reset",
         "reset_reader": lambda: [(None, get_setting("rag_instruction", "").strip())],
-        "reset_btn": "✅ Да, вернуть заводскую",
-        "reset_empty": "ℹ️ <b>Сейчас уже действует заводская RAG-инструкция.</b>\n\n"
-                       "Своя не задана — возвращать нечего.",
-        "reset_body": "🗑️ <b>Возврат заводской RAG-инструкции</b>\n\n"
-                      "Твоя инструкция ({length} символов) будет удалена, "
-                      "вернётся заводская.\n\n"
+        "reset_btn": "✅ Да, стереть",
+        "reset_empty": "ℹ️ <b>Стирать нечего.</b>\n\n"
+                       "Своя RAG-инструкция не задана — статьи базы знаний и так "
+                       "уходят модели без шапки.",
+        "reset_body": "🗑️ <b>Удаление RAG-инструкции</b>\n\n"
+                      "Твоя инструкция ({length} символов) будет удалена.\n"
+                      "⚠️ <b>Заводской НЕТ</b> — шапки перед статьями не останется "
+                      "вовсе: модель начнёт получать статьи без объяснения, "
+                      "что с ними делать.\n\n"
                       "⚠️ <b>Подтвердить?</b>",
         "keys":   ("rag_instruction",),
         "what":   "RAG-инструкции",
-        "log":    "вернул заводскую RAG-инструкцию",
-        "popup":  "✅ Заводская RAG-инструкция возвращена!",
-        "done":   "✅ <b>Заводская RAG-инструкция возвращена.</b>\n\n"
-                  "Своя удалена — модель снова получает стандартную «шапку» перед статьями.",
-        "cancel": "🔄 <b>Возврат заводской RAG-инструкции отменён.</b>\n\nТвоя инструкция осталась без изменений.",
+        "log":    "удалил RAG-инструкцию",
+        "popup":  "✅ RAG-инструкция удалена!",
+        "done":   "✅ <b>RAG-инструкция удалена.</b>\n\n"
+                  "⚠️ Шапки перед статьями больше нет — они уходят модели голыми. "
+                  "Задать новую: /rag_prompt_set",
+        "cancel": "🔄 <b>Удаление RAG-инструкции отменено.</b>\n\nТвоя инструкция осталась без изменений.",
     },
     "author_prompt": {
         "set_key": "author_brief_instruction",
@@ -1065,22 +1078,26 @@ _PROMPTS = {
                      "<code>/proactive_prompt_set Вступай, только если можешь пошутить...</code>\n\n"
                      "<b>Способ 2:</b> Отправь <code>.txt</code> файл с текстом, "
                      "затем ответь (Reply) на него командой <code>/proactive_prompt_set</code>\n\n"
-                     "🗑️ Вернуть заводскую — /proactive_prompt_reset",
+                     "🗑️ Удалить свою (правил не останется) — /proactive_prompt_reset",
         "reset_reader": lambda: [(None, get_setting("proactive_instruction", "").strip())],
-        "reset_btn": "✅ Да, вернуть заводскую",
-        "reset_empty": "ℹ️ <b>Сейчас уже действует заводская инструкция участия в разговоре.</b>\n\n"
-                       "Своя не задана — возвращать нечего.",
-        "reset_body": "🗑️ <b>Возврат заводской инструкции участия в разговоре</b>\n\n"
-                      "Твоя инструкция ({length} символов) будет удалена, "
-                      "вернётся заводская.\n\n"
+        "reset_btn": "✅ Да, стереть",
+        "reset_empty": "ℹ️ <b>Стирать нечего.</b>\n\n"
+                       "Своя инструкция участия не задана — в режиме «Сам в разговор» "
+                       "модель и так решает без правил.",
+        "reset_body": "🗑️ <b>Удаление инструкции участия в разговоре</b>\n\n"
+                      "Твоя инструкция ({length} символов) будет удалена.\n"
+                      "⚠️ <b>Заводской НЕТ</b> — модель останется без правил участия "
+                      "и без блока рук (мут). Молчать она сможет, но решать будет "
+                      "наугад.\n\n"
                       "⚠️ <b>Подтвердить?</b>",
         "keys":   ("proactive_instruction",),
         "what":   "инструкции участия",
-        "log":    "вернул заводскую инструкцию участия в разговоре",
-        "popup":  "✅ Заводская инструкция участия возвращена!",
-        "done":   "✅ <b>Заводская инструкция участия в разговоре возвращена.</b>\n\n"
-                  "Своя удалена — режим «Сам в разговор» снова работает по стандартным правилам.",
-        "cancel": "🔄 <b>Возврат заводской инструкции участия отменён.</b>\n\nТвоя инструкция осталась без изменений.",
+        "log":    "удалил инструкцию участия в разговоре",
+        "popup":  "✅ Инструкция участия удалена!",
+        "done":   "✅ <b>Инструкция участия в разговоре удалена.</b>\n\n"
+                  "⚠️ Правил участия и блока рук у модели больше нет. "
+                  "Задать новые: /proactive_prompt_set",
+        "cancel": "🔄 <b>Удаление инструкции участия отменено.</b>\n\nТвоя инструкция осталась без изменений.",
     },
 }
 
@@ -1264,7 +1281,7 @@ async def cmd_prompt_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_prompt_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Сбрасывает системный промпт к заводским настройкам (с подтверждением)."""
+    """Удаляет системный промпт и дополнения (заводского текста нет, с подтверждением)."""
     await _prompt_reset_command(update, context, "prompt")
 
 
@@ -1286,7 +1303,7 @@ async def cmd_rag_prompt_set(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def cmd_rag_prompt_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Возвращает заводскую RAG-инструкцию (удаляет свою, с подтверждением)."""
+    """Удаляет свою RAG-инструкцию (заводской нет — шапки не останется, с подтверждением)."""
     await _prompt_reset_command(update, context, "rag_prompt")
 
 
@@ -1296,7 +1313,7 @@ async def cmd_proactive_prompt_set(update: Update, context: ContextTypes.DEFAULT
 
 
 async def cmd_proactive_prompt_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Возвращает заводскую инструкцию участия (с подтверждением)."""
+    """Удаляет свою инструкцию участия (заводской нет — правил не останется, с подтверждением)."""
     await _prompt_reset_command(update, context, "proactive_prompt")
 
 

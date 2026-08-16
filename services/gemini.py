@@ -1193,7 +1193,10 @@ def _rag_block(query_text: str, *, remember_query: bool = True) -> str:
             query_text, remember_query=remember_query)
         if not rag_context:
             return ""
-        return f"{hist.get_rag_instruction()}\n\n{rag_context}"
+        # Шапки может не быть вовсе (заводская опустошена 2026-08-16, своя не
+        # задана) — тогда статьи уходят одни, без пары пустых строк в начале.
+        instruction = hist.get_rag_instruction()
+        return f"{instruction}\n\n{rag_context}" if instruction else rag_context
     except Exception as rag_err:
         logger.error("⚠️ Не удалось добавить контекст RAG: %s", rag_err)
         return ""
@@ -2115,10 +2118,15 @@ def _build_proactive_parts(chat_id: int, bot_id: int, trigger_text: str,
             import services.rag as rag_module
             rag_context = rag_module.retrieve_relevant_context(trigger_text)
             if rag_context:
+                # Шапки может не быть вовсе (заводская опустошена 2026-08-16) —
+                # тогда статьи уходят одни, без пустых строк в начале.
                 rag_instruction = hist.get_rag_instruction()
-                _part(f"{rag_instruction}\n\n{rag_context}",
-                      f"[RAG-PROMPT — {len(rag_instruction)} симв., в лог не пишется]"
-                      f"\n\n{rag_context}")
+                if rag_instruction:
+                    _part(f"{rag_instruction}\n\n{rag_context}",
+                          f"[RAG-PROMPT — {len(rag_instruction)} симв., в лог не пишется]"
+                          f"\n\n{rag_context}")
+                else:
+                    _part(rag_context)
                 logger.info("%s Контекст RAG добавлен в проактивную проверку", RAG_ICON)
         except Exception as rag_err:
             logger.error("⚠️ Не удалось добавить контекст RAG в проактивную проверку: %s", rag_err)
@@ -2133,7 +2141,14 @@ def _build_proactive_parts(chat_id: int, bot_id: int, trigger_text: str,
     if who:
         _part(who)
 
-    _part(hist.get_proactive_instruction())
+    # Инструкции участия может не быть вовсе (заводская опустошена 2026-08-16,
+    # своя не задана) — пустой кусок в промпт не кладём, иначе между справкой
+    # об авторе и стенограммой встанет дыра из пустых строк. Правила участия
+    # тогда модели никто не объясняет, но слово ПРОПУСК ей всё равно называет
+    # сам запрос (ask_group_proactive) — молчать она сможет.
+    proactive_instruction = hist.get_proactive_instruction()
+    if proactive_instruction:
+        _part(proactive_instruction)
 
     # ⚠️ ДВА БЛОКА ВМЕСТО ОДНОГО СПИСКА (2026-08-11, формат продиктован
     # Максимом). Раньше все строки выглядели одинаково свежими, и модель не
