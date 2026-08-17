@@ -147,10 +147,15 @@ def note_media(kind: str, size_bytes: int, text: str) -> None:
     _write(f"── РАЗБОР ({kind}{size}) ──\n{(text or '').strip() or '(пусто)'}\n")
 
 
-def note_request(model: str, prompt: str, task: str) -> None:
-    """Всё, что уходит модели: системная часть целиком и задание."""
-    _write(f"── УХОДИТ МОДЕЛИ ({model}, {len(prompt)} симв.) ──\n{prompt}\n"
-           f"── ЗАДАНИЕ ──\n{task}\n")
+def note_request(model: str, prompt: str) -> None:
+    """Всё, что уходит модели: системная часть запроса.
+
+    ⚠️ БЛОКА «── ЗАДАНИЕ ──» ЗДЕСЬ БОЛЬШЕ НЕТ (решение Максима 2026-08-16).
+    Задание («вступить или ответить ПРОПУСК») — строка, зашитая в код: она
+    одинакова во всех проверках и в записи только шумела. Сам текст задания
+    никуда не делся, он в services/gemini.py::ask_group_proactive.
+    """
+    _write(f"── УХОДИТ МОДЕЛИ ({model}, {len(prompt)} симв.) ──\n{prompt}\n")
 
 
 def note_answer(model: str, seconds: float, answer: str) -> None:

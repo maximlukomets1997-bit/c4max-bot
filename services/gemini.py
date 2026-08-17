@@ -2280,7 +2280,7 @@ def ask_group_proactive_media(chat_id: int, bot_id: int, trigger_text: str,
     # же, а на три неудачные попытки легли бы три одинаковые простыни.
     from services import chat_log
     chat_log.note_request(f"{kind} + цепочка {', '.join(PROACTIVE_MEDIA_CHAIN)}",
-                          "\n\n".join(log_parts), task)
+                          "\n\n".join(log_parts))
 
     for model_name in PROACTIVE_MEDIA_CHAIN:
         if _quota_blocked_now(model_name):
@@ -2398,7 +2398,7 @@ def ask_group_proactive(chat_id: int, bot_id: int, trigger_text: str,
     elapsed = time.perf_counter() - started_at
     # Пишем ПОСЛЕ запроса, а не до: имя ответившей модели известно только
     # теперь — цепочка подстраховки могла увести запрос на запасную.
-    chat_log.note_request(used_model or "—", "\n\n".join(log_parts), task)
+    chat_log.note_request(used_model or "—", "\n\n".join(log_parts))
     if data is None:
         # Все модели цепочки недоступны — молчим (тишина = штатный исход,
         # никакого SOFT_FAIL_MESSAGE в чат).
