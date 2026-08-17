@@ -427,7 +427,7 @@ def check_panels():
     смотрящего, а нам нужен самый полный вариант — в нём больше всего кнопок.
     """
     from services import roles, user_settings
-    from handlers.admin.panel_balance import _build_balance_panel, _build_zero_panel
+    from handlers.admin.panel_balance import _build_balance_panel, _build_cost_panel
     from handlers.admin.panel_main import (_build_api_keyboard,
                                            _build_model_panel_text_and_keyboard,
                                            build_adm_keyboard)
@@ -466,7 +466,7 @@ def check_panels():
         "модели и API": lambda: _build_model_panel_text_and_keyboard(active, active_image, owner),
         "клавиатура API": lambda: ("", _build_api_keyboard(owner)),
         "счета и квоты": _build_balance_panel,
-        "обнуление счётчиков": _build_zero_panel,
+        "правка «потрачено»": _build_cost_panel,
         "промпты": lambda: _build_prompt_panel_text_and_keyboard(owner, "c4max_bot"),
         "итоги участия": _build_proactive_stats_panel,
         "модерация": lambda: _build_mod_panel_text_and_keyboard(owner),

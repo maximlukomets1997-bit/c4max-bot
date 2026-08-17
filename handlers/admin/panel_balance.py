@@ -60,10 +60,15 @@ _BALANCE_FIELDS = {
     for pid in _BALANCE_ORDER
 }
 
-# Счётчики «потрачено» — их можно обнулить (при смене ключа или рабочего
-# пространства). Обнуление руками нужно потому, что вечные счётчики
-# (DeepSeek, Xiaomi) месячный сброс не трогает вовсе, а у месячных
-# (Qwen, картинки) бывает нужно начать счёт заново посреди месяца.
+# Счётчики «потрачено» — их можно ПРАВИТЬ ЧИСЛОМ (2026-08-17, просьба Максима).
+# До этого их умели только обнулять, и вписать настоящую сумму из кабинета
+# провайдера было нечем — а нужда в этом появилась ровно в тот день, когда
+# выяснилось, что цены DeepSeek в боте устарели и счётчик занижен.
+# Ноль набирается руками, поэтому отдельного «обнулить» с подтверждением
+# больше нет — см. _build_cost_panel ниже.
+# Правка руками нужна ещё и потому, что вечные счётчики (DeepSeek, Xiaomi)
+# месячный сброс не трогает вовсе, а у месячных (Qwen, картинки) бывает нужно
+# начать счёт заново посреди месяца.
 _COST_FIELDS = {
     pid: {"key": PROVIDERS[pid]["cost_key"], "provider": pid,
           "name": PROVIDERS[pid]["title"]}
@@ -136,6 +141,25 @@ def _balance_field(field_id: str):
             "clear": "убрать значение совсем",
             "absent": "не задан",
         }
+    if field_id.startswith("cost:"):
+        # Счётчик «потрачено» (2026-08-17). Правится тем же вводом, что остатки
+        # и квоты: заводить второй механизм ради четырёх значений незачем.
+        cfg = _COST_FIELDS.get(field_id[len("cost:"):])
+        if cfg:
+            return {
+                "key": cfg["key"],
+                "kind": "money",
+                "title": f"{_icon(cfg['provider'])} ПОТРАЧЕНО: {cfg['name'].upper()}",
+                "short": f"Потрачено {cfg['name']}",
+                "example": "2.87",
+                # ⚠️ Прочерк здесь означает не то же, что у остатка. У остатка
+                # «нет ключа» бережёт от ухода в минус, а счётчик расхода
+                # заведётся заново сам при следующем запросе — с его стоимости.
+                # В панели до этого момента будет стоять $0.000000.
+                "clear": "начать счёт заново",
+                "absent": "не задан",
+            }
+        return None
     if field_id.startswith("qwen:"):
         model = field_id[len("qwen:"):]
         # Модель может быть уже удалена из конфига, но с заведённой квотой —
@@ -226,28 +250,40 @@ def _build_balance_panel(flash: str = ""):
     qw_buttons = [InlineKeyboardButton(f"🎫 Квота {m}", callback_data=f"bal:set:qwen:{m}")
                   for m in _qwen_model_keys()]
     rows += [qw_buttons[i:i + 2] for i in range(0, len(qw_buttons), 2)]
-    rows.append([InlineKeyboardButton("♻️ Обнулить «потрачено»", callback_data="bal:zero")])
+    rows.append([InlineKeyboardButton("✏️ Изменить «потрачено»", callback_data="bal:cost")])
     # Обе кнопки возврата — ОДНИМ рядом (решение Максима 2026-07-27).
     rows.append([InlineKeyboardButton("⬅️ Настройки API", callback_data="adm_open_api")]
                 + _adm_back_row())
     return "".join(parts), InlineKeyboardMarkup(rows)
 
 
-def _build_zero_panel(flash: str = ""):
-    """Экран «♻️ Обнулить «потрачено»»: текущие суммы и кнопка на каждый счётчик."""
+def _build_cost_panel():
+    """
+    Экран «✏️ Потрачено — правка»: текущие суммы и кнопка на каждый счётчик.
+
+    ⚠️ Раньше назывался `_build_zero_panel` и умел ТОЛЬКО обнулять, с отдельным
+    подтверждением (2026-07-27 … 2026-08-17). Теперь кнопка ведёт в общий ввод
+    числа, а ноль набирается руками — это и есть подтверждение. Имя функции
+    переименовано вместе с назначением НАМЕРЕННО: «zero», делающий правку, через
+    месяц стоил бы получаса разбирательств. Имя читает ещё и preflight.py
+    (сборка панелей) — менять оба места одновременно.
+
+    ⚠️ Строки «было → стало» здесь НЕТ (в отличие от главного экрана): ввод
+    числа заканчивается возвратом на ГЛАВНЫЙ экран счетов, и итог показывается
+    там. Довод `flash` держать «на всякий случай» незачем — его никто не
+    передаёт.
+    """
     sep = "───────────────────────────\n"
-    text = f"♻️ <b>ОБНУЛИТЬ СЧЁТЧИК «ПОТРАЧЕНО»</b>\n{sep}"
-    if flash:
-        text += f"{flash}\n{sep}"
-    text += ("Эти счётчики вечные — их обнуляют, когда меняется ключ или рабочее "
-             "пространство. На реальные деньги в кабинете провайдера обнуление "
-             "НЕ влияет, остаток на счету оно тоже не трогает.\n\n")
+    text = f"✏️ <b>ПОТРАЧЕНО — ПРАВКА</b>\n{sep}"
+    text += ("Это счётчик бота. На реальные деньги в кабинете провайдера правка "
+             "НЕ влияет, остаток на счету она тоже не трогает. Пригодится, когда "
+             "цифра бота разошлась с кабинетом или сменился ключ.\n\n")
     for cfg in _COST_FIELDS.values():
         spent, _ = _read_number(cfg["key"], "money")
         text += f"  • {_icon(cfg['provider'])} {cfg['name']}: <b>{_money_str(spent)}</b>\n"
 
     buttons = [InlineKeyboardButton(f"{_icon(cfg['provider'])} {cfg['name']}",
-                                    callback_data=f"bal:zeroask:{code}")
+                                    callback_data=f"bal:set:cost:{code}")
                for code, cfg in _COST_FIELDS.items()]
     rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
     rows.append([InlineKeyboardButton("⬅️ Назад к счетам", callback_data="bal:panel")])
@@ -282,11 +318,15 @@ async def _handle_balance_callback(query, context, data: str, chat_id: int, user
       bal:panel                    — сам экран
       bal:set:<код>                — начать ввод числа (ждём сообщение)
       bal:cancel                   — отменить ожидание числа
-      bal:zero                     — экран обнуления «потрачено»
-      bal:zeroask:<провайдер>      — подтверждение обнуления
-      bal:zerogo:<провайдер>       — выполнить обнуление
+      bal:cost                     — экран правки «потрачено»
     В _CALLBACK_RULES этих кнопок нет намеренно: запрет по умолчанию оставляет
     их владельцу, как и всю панель API.
+
+    ⚠️ Веток `bal:zeroask` / `bal:zerogo` (подтверждение обнуления) больше НЕТ —
+    убраны 2026-08-17 вместе с самим обнулением: теперь ноль вводится числом,
+    как любая другая сумма. Заведёшь кнопку обратно, не добавив ветку сюда, —
+    нажатие молча ничего не сделает; это ловит предполётная проверка «кнопки ↔
+    роутер».
     """
     parts = data.split(":")
     action = parts[1] if len(parts) > 1 else ""
@@ -327,47 +367,9 @@ async def _handle_balance_callback(query, context, data: str, chat_id: int, user
         await _show_screen(context, query, text, markup)
         return
 
-    if action == "zero":
+    if action == "cost":
         await query.answer()
-        text, markup = _build_zero_panel()
-        await _show_screen(context, query, text, markup)
-        return
-
-    if action == "zeroask":
-        code = parts[2] if len(parts) > 2 else ""
-        cfg = _COST_FIELDS.get(code)
-        if not cfg:
-            await query.answer("⚠️ Неизвестный счётчик.", show_alert=True)
-            return
-        await query.answer()
-        spent, _ = _read_number(cfg["key"], "money")
-        text = (
-            f"❗️ <b>ОБНУЛИТЬ «ПОТРАЧЕНО» У {cfg['name'].upper()}?</b>\n"
-            "───────────────────────────\n"
-            f"Сейчас: <b>{_money_str(spent)}</b> → станет <b>{_money_str(0)}</b>\n"
-            "Остаток на счету не изменится."
-        )
-        markup = InlineKeyboardMarkup([[
-            InlineKeyboardButton("❗️ Да, обнулить", callback_data=f"bal:zerogo:{code}"),
-            InlineKeyboardButton("Отмена", callback_data="bal:zero"),
-        ]])
-        await _show_screen(context, query, text, markup)
-        return
-
-    if action == "zerogo":
-        code = parts[2] if len(parts) > 2 else ""
-        cfg = _COST_FIELDS.get(code)
-        if not cfg:
-            await query.answer("⚠️ Неизвестный счётчик.", show_alert=True)
-            return
-        was, _ = _read_number(cfg["key"], "money")
-        set_setting(cfg["key"], "0")
-        logger.info("🔧 Владелец %s обнулил счётчик расхода %s (было %s)",
-                    user_id, cfg["key"], _money_str(was))
-        _audit(user_id, "cost_zero", 0, f"{cfg['name']}: было {_money_str(was)} → $0")
-        await query.answer("✅ Счётчик обнулён")
-        text, markup = _build_zero_panel(
-            f"✅ <b>{cfg['name']}</b>: было {_money_str(was)} → стало {_money_str(0)}")
+        text, markup = _build_cost_panel()
         await _show_screen(context, query, text, markup)
         return
 
