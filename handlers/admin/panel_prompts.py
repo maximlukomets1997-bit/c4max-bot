@@ -677,6 +677,8 @@ def _build_prompt_panel_text_and_keyboard(user_id, bot_username=None):
         f"5. 🗣 PROMPT участия — {_num(len(proactive_instruction))} <i>симв.</i>\n"
         f"6. 💬 Стенограмма чата — <i>последние {proactive_ctx} сообщ.</i>\n"
         f"<i>Постоянная часть (1+4+5): {fixed_total} символов</i>\n"
+        "<i>Пункты 1–5 уходят системным текстом, стенограмма — отдельным "
+        "сообщением от лица человека.</i>\n"
         "<i>Новость уходит и в обычных ответах — в группе и в личке.</i>"
     )
 
