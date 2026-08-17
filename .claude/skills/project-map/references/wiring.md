@@ -122,7 +122,7 @@ user_image_calls, user_settings, user_token_usage
 
 ## Конфигурация
 
-`config.py` (1023 строки, 106 констант) — читают 34 модуля. Значения
+`config.py` (1061 строка, 106 констант) — читают 34 модуля. Значения
 берутся из `.env` (`python-dotenv`). Ключи из `.env.example`:
 
 ```
@@ -136,7 +136,7 @@ RAG_STRONG_SIM, WATCHDOG_URL
 `DB_PATH = "history.db"`, `BACKUP_DIR = "backups"`,
 `RAG_INDEX_FILE = "knowledge/knowledge_base_vectors.json"`,
 `KNOWLEDGE_PENDING_DIR`, `KNOWLEDGE_APPROVED_DIR`,
-`AVAILABLE_MODELS` (10 моделей), `PROVIDERS` (4: deepseek, gemini, qwen,
+`AVAILABLE_MODELS` (12 моделей), `PROVIDERS` (4: deepseek, gemini, qwen,
 xiaomi), `AVAILABLE_IMAGE_MODELS` (2), `QUIZ_RANKS` (20 званий),
 `AUTO_UPDATE_INTERVAL_SEC = 300`, `AUTO_UPDATE_QUIET_SEC = 60`,
 `WATCHDOG_PING_SEC = 60`.

@@ -114,7 +114,7 @@ pull request не черновиком и сразу включать авто-�
 | `handlers/admin/panel_users.py` | 1337 | 28 |
 | `handlers/admin/panel_prompts.py` | 1241 | 30 |
 | `handlers/admin/panel_rag.py` | 1000 | 17 |
-| `config.py` | 1023 | 106 констант |
+| `config.py` | 1061 | 106 констант |
 | `services/antispam.py` | 861 | 29 |
 | `services/rag.py` | 795 | 25 |
 | `services/daily_report.py` | 781 | 41 |

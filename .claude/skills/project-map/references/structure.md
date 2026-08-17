@@ -22,7 +22,7 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 |---|---:|---:|---|
 | `bot.py` | 11 | 0 | — (только вызывает `main.main`) |
 | `main.py` | 571 | 1 | `post_init`, `post_stop`, `post_shutdown`, `main` |
-| `config.py` | 1023 | 33 | `read_build_mark` + 106 констант верхнего уровня (заводские тексты всех пяти промптов — пустые строки) |
+| `config.py` | 1061 | 33 | `read_build_mark` + 106 констант верхнего уровня (заводские тексты всех пяти промптов — пустые строки) |
 | `utils.py` | 181 | 19 | `should_respond_in_group`, `clean_mention`, `keep_chat_action`, `delete_user_message_safe`, `mention`, `schedule_delete`, `register_and_clean_bot_message` |
 | `utils_format.py` | 304 | 7 | `strip_thoughts`, `thoughts_enabled`, `build_text_and_entities`, `send_formatted`, `convert_md`, `fits_caption`, `reply_md` |
 | `logging_setup.py` | 248 | 2 | `archive_old_logs`, `setup_logging` |
@@ -57,7 +57,7 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 | `handlers/admin/__init__.py` | 40 | 4 | только re-export; новое имя, не вписанное сюда, роняет старт бота |
 | `handlers/admin/common.py` | 490 | 13 | публичных нет — всё через имена с подчёркиванием (`_onoff`, `_require`, `_send_panel_message`, `_adm_back_row` и др.), но тянут его 13 модулей |
 | `handlers/admin/router.py` | 707 | 1 | `handle_callback_query` — единственный роутер всех кнопок |
-| `handlers/admin/panel_main.py` | 436 | 4 | `send_stats_panel`, `send_api_panel`, `send_daily_report_panel`, `send_weekly_report_panel`, `cmd_stats`, `build_adm_keyboard`, `send_adm_panel`, `cmd_adm` |
+| `handlers/admin/panel_main.py` | 443 | 4 | `send_stats_panel`, `send_api_panel`, `send_daily_report_panel`, `send_weekly_report_panel`, `cmd_stats`, `build_adm_keyboard`, `send_adm_panel`, `cmd_adm` |
 | `handlers/admin/panel_prompts.py` | 1335 | 3 | `send_prompt_files`, `send_prompts_panel`, `handle_prompt_reset`, `cmd_prompt_set/add/reset`, `cmd_news_prompt_set/reset`, `cmd_rag_prompt_set/reset`, `cmd_author_prompt_set/reset`, `cmd_proactive_prompt_set/reset` |
 | `handlers/admin/panel_users.py` | 1337 | 3 | `send_users_panel`, `send_user_card`, `cmd_users` |
 | `handlers/admin/panel_rag.py` | 1000 | 6 | `send_rag_panel`, `cmd_rag`, `handle_kb_document`, `handle_kb_test_query` (панель из трёх экранов: разделы → список раздела → настройки поиска) |
