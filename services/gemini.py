@@ -32,6 +32,7 @@ import time
 import json
 import base64
 import requests
+from datetime import datetime, timezone
 
 from config import (
     PROACTIVE_MEDIA_CHAIN,
@@ -46,6 +47,7 @@ from config import (
     DEEPSEEK_API_URL,
     DEEPSEEK_API_KEY,
     DEEPSEEK_PRICES,
+    DEEPSEEK_PEAK_UTC,
     XIAOMI_API_URL,
     XIAOMI_API_KEY,
     XIAOMI_PRICES,
@@ -644,9 +646,11 @@ def _deepseek_chat_request(model_name: str, messages: list, thinking_override: b
     одна. У v4-pro на 2026-08-10 работают только "high" и "max" ("low" тоже
     подтягивается до "high"); три полноценные ступени обещаны в начале августа.
 
-    ⚠️ ЦЕНА: рассуждения тарифицируются как обычный ответ (v4-pro $0.87, v4-flash
-    $0.28 за млн токенов) — на "max" их заметно больше, и ответы дольше.
-    Сверять при правках цен в config.DEEPSEEK_PRICES.
+    ⚠️ ЦЕНА: рассуждения тарифицируются как обычный ответ, а он у DeepSeek с
+    2026-08-16 стоит по-разному в пик и вне пика (v4-pro $3.96 / $1.98, v4-flash
+    $1.32 / $0.66 за млн токенов) — на "max" размышлений заметно больше, и
+    ответы дольше. Точные числа и окна пика — config.DEEPSEEK_PRICES и
+    config.DEEPSEEK_PEAK_UTC; сверять при правках цен там.
     """
     if _is_thinking(model_name, thinking_override):
         extra = {"thinking": {"type": "enabled", "reasoning_effort": "max"}}
@@ -701,15 +705,37 @@ def _xiaomi_cost(model_name: str, usage: dict):
     return (hit * prices["cache_hit"] + miss * prices["cache_miss"] + out * prices["output"]) / 1_000_000
 
 
-def _deepseek_cost(model_name: str, usage: dict):
+def _deepseek_peak_now() -> bool:
+    """
+    Пиковый ли тариф DeepSeek прямо сейчас (окна config.DEEPSEEK_PEAK_UTC).
+
+    ⚠️ Час берётся В UTC, а не по Киеву: окна заданы провайдером в UTC и
+    перевода часов не знают (см. оговорку у константы в config.py).
+    ⚠️ Момент — «сейчас», то есть КОНЕЦ запроса: стоимость считается сразу
+    после ответа. Документация DeepSeek не оговаривает, по началу или по концу
+    запроса определяется тариф; конец заодно осторожнее — запрос, начатый в
+    00:59 и законченный в 01:02 UTC, попадёт в дорогую колонку, и расход мы
+    не занизим. Задевает это только запросы на стыке часа.
+    """
+    hour = datetime.now(timezone.utc).hour
+    return any(start <= hour < end for start, end in DEEPSEEK_PEAK_UTC)
+
+
+def _deepseek_cost(model_name: str, usage: dict, peak: bool):
     """Точная стоимость запроса DeepSeek в долларах по официальным ценам
     (DEEPSEEK_PRICES). Все токены присылает сам API: вход из кэша, вход без
     кэша, ответ (рассуждения уже входят в completion_tokens и оплачиваются
     как ответ). Если кэш-поля не пришли, весь вход считается «без кэша» —
-    оценка сверху, чтобы не занизить расход. None — модели нет в таблице цен."""
-    prices = DEEPSEEK_PRICES.get(model_name)
-    if not prices:
+    оценка сверху, чтобы не занизить расход. None — модели нет в таблице цен.
+
+    `peak` — какую колонку цен брать (с 2026-08-16 их две). Флаг ПЕРЕДАЁТСЯ
+    снаружи, а не считается здесь: та же величина нужна строке лога, а два
+    отдельных взгляда на часы на стыке часа дали бы «посчитал по пику,
+    в логе написал вне пика»."""
+    table = DEEPSEEK_PRICES.get(model_name)
+    if not table:
         return None
+    prices = table["peak" if peak else "offpeak"]
     hit = usage.get("prompt_cache_hit_tokens", 0) or 0
     miss = usage.get("prompt_cache_miss_tokens", 0) or 0
     if not hit and not miss:
@@ -1029,15 +1055,19 @@ def _gemini_chat_request(messages: list, kind: str = "текст", has_image: bo
             if _provider_of(model_name) == "deepseek":
                 # DeepSeek: считаем точную стоимость (цены DEEPSEEK_PRICES,
                 # кэш-поля из usage) и копим сумму в settings для панели /stats.
-                _cost = _deepseek_cost(model_name, _u)
+                # Тариф (пик / вне пика) определяется ОДИН раз на запрос — им
+                # пользуются и подсчёт, и строка лога.
+                _peak = _deepseek_peak_now()
+                _cost = _deepseek_cost(model_name, _u, _peak)
                 if _cost is not None:
                     try:
                         hist.add_provider_cost("deepseek", _cost)
                     except Exception as e:
                         logger.warning("⚠️ Не удалось записать расход DeepSeek в БД: %s", e)
                 _hit = _u.get("prompt_cache_hit_tokens", 0) or 0
-                logger.info("%s Ответ от %s за %.1f с | контекст=%s (из кэша %s) | ответ=%s | размышления=%s | всего=%s | ≈$%.6f",
-                            _icon_of(model_name), model_name, elapsed, _pt, _hit, _ct, _think, _tt, _cost or 0.0)
+                logger.info("%s Ответ от %s за %.1f с | контекст=%s (из кэша %s) | ответ=%s | размышления=%s | всего=%s | ≈$%.6f (%s)",
+                            _icon_of(model_name), model_name, elapsed, _pt, _hit, _ct, _think, _tt,
+                            _cost or 0.0, "пик" if _peak else "вне пика")
             elif _provider_of(model_name) == "xiaomi":
                 # Xiaomi MiMo: точная стоимость по XIAOMI_PRICES (кэш из
                 # prompt_tokens_details, рассуждения оплачиваются как выход) —

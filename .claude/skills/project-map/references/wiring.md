@@ -49,7 +49,7 @@
 ## Регистрация обработчиков — только `handlers/__init__.py::setup_handlers`
 
 Второго места регистрации в проекте нет. `preflight.py::check_handlers`
-считает зарегистрированные обработчики и группы (на 2026-08-16 — **37 в 4
+считает зарегистрированные обработчики и группы (на 2026-08-17 — **39 в 4
 группах**).
 
 **Группа 0 (по умолчанию)** — команды и основной разбор сообщений:
@@ -58,6 +58,7 @@
   `prompt_set`, `prompt_add`, `prompt_reset`, `news_prompt_set`,
   `news_prompt_reset`, `rag_prompt_set`, `rag_prompt_reset`,
   `proactive_prompt_set`, `proactive_prompt_reset`,
+  `author_prompt_set`, `author_prompt_reset`,
   `adm`, `stats`, `mod`, `rag`, `unmute`, `users`,
   `quizadm`, `imagine` (`block=False`), `rank`, `ttx` (`block=False`)
 - `InlineQueryHandler(inline_ttx, block=False)`
@@ -84,7 +85,7 @@
 
 Единственный роутер — `handlers/admin/router.py::handle_callback_query`.
 `preflight.py::check_callbacks` сверяет кнопки, найденные в коде панелей,
-с ветками роутера (на 2026-08-16, поздний вечер — **217 кнопок, 36 точных
+с ветками роутера (на 2026-08-17 — **219 кнопок, 38 точных
 веток + 13 по приставке**).
 
 Ограничение Telegram: `callback_data` ≤ 64 байта. Права на нажатие
@@ -97,7 +98,7 @@
 
 ## База данных
 
-Один файл — `database/history.py` (2767 строк, 111 публичных функций),
+Один файл — `database/history.py` (2792 строки, 112 публичных функций),
 одно соединение на процесс, доступ под общим замком `_lock`.
 
 Схема создаётся в `_create_schema`; на 2026-08-16 — **24 таблицы**:
@@ -121,7 +122,7 @@ user_image_calls, user_settings, user_token_usage
 
 ## Конфигурация
 
-`config.py` (997 строк, 105 констант) — читают 34 модуля. Значения
+`config.py` (1023 строки, 106 констант) — читают 34 модуля. Значения
 берутся из `.env` (`python-dotenv`). Ключи из `.env.example`:
 
 ```

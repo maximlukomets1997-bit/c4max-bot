@@ -109,12 +109,12 @@ pull request не черновиком и сразу включать авто-�
 
 | файл | строк | функций |
 |---|---:|---:|
-| `database/history.py` | 2767 | 121 |
-| `services/gemini.py` | 2494 | 47 |
+| `database/history.py` | 2792 | 122 |
+| `services/gemini.py` | 2526 | 48 |
 | `handlers/admin/panel_users.py` | 1337 | 28 |
 | `handlers/admin/panel_prompts.py` | 1241 | 30 |
 | `handlers/admin/panel_rag.py` | 1000 | 17 |
-| `config.py` | 997 | 104 константы |
+| `config.py` | 1023 | 106 констант |
 | `services/antispam.py` | 861 | 29 |
 | `services/rag.py` | 795 | 25 |
 | `services/daily_report.py` | 781 | 41 |
