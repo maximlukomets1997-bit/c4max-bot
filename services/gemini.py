@@ -27,7 +27,6 @@
 
 import logging
 import re
-import threading
 import time
 import json
 import base64
@@ -100,48 +99,85 @@ def compress_newlines(text: str) -> str:
 
 
 # ───────────────────────────────────────────────
-#  Уведомление админов о работе на запасной модели
+#  Уведомление владельцев о сбоях моделей
 # ───────────────────────────────────────────────
+#
+#  Отправка идёт НАПРЯМУЮ через Bot API (requests): код выполняется в
+#  синхронном рабочем потоке (run_in_executor), где объекта бота
+#  python-telegram-bot нет. Любая ошибка отправки глушится — уведомление
+#  не должно ломать ответ человеку.
+#
+#  ⚠️ СООБЩЕНИЯ ПРИХОДЯТ ВСЕГДА, НА КАЖДЫЙ СБОЙНЫЙ ЗАПРОС (2026-08-18, решение
+#  Максима). Прежнего часа молчания больше НЕТ. Он заводился, чтобы при долгой
+#  аварии не засыпать личку, но прятал больше половины сбоев, а его отсчёт жил
+#  в памяти процесса и обнулялся при каждом перезапуске — то есть «раз в час»
+#  на деле означало «раз в час или чаще, как повезёт».
+#  Перед правкой считали по живому логу: за пять часов работы бота один отказ
+#  (503 у Gemini). «Всегда» — это несколько сообщений в сутки, а не поток; при
+#  настоящей аварии Google придёт по сообщению на запрос, и это осознанная цена.
+#  Захочешь ограничение обратно — это одна проверка времени здесь.
+#
+#  ⚠️ ПОВОД — САМ ФАКТ ОТКАЗА, а не то, каким путём пошёл запрос. Раньше
+#  уведомление глушилось целиком, когда фото уходило в обход «слепой» Qwen или
+#  DeepSeek (vision-reroute), — вместе с настоящими отказами внутри той же
+#  цепочки. Теперь нет отказов — нет и сообщения, особый случай не нужен.
 
-# Когда запрос обслужила НЕ активная модель (сработала цепочка фолбэка),
-# админам уходит сообщение в личку — сигнал, что активная модель сбоит.
-# Не чаще раза в час (_FALLBACK_NOTIFY_COOLDOWN), чтобы при длительном сбое
-# не засыпать личку. Отправка идёт напрямую через Bot API (requests): этот
-# код выполняется в синхронном потоке (run_in_executor), где объекта бота
-# python-telegram-bot нет. Любая ошибка отправки глушится — уведомление
-# не должно ломать ответ пользователю.
-_FALLBACK_NOTIFY_COOLDOWN = 3600  # секунд (1 час)
-_last_fallback_notify = 0.0
-# ⚠️ Замок к метке времени: запросы к моделям идут из РАЗНЫХ рабочих потоков
-# (run_in_executor), и без него два одновременно отказавших запроса успевали
-# оба пройти проверку «прошёл ли час» до того, как первый обновит метку —
-# в личку прилетала пара одинаковых уведомлений вместо одного.
-_fallback_notify_lock = threading.Lock()
 
-
-def _notify_admins_fallback(active_model: str, used_model: str) -> None:
-    """Шлёт админам в личку «активная модель не ответила, работаю на запасной»."""
-    global _last_fallback_notify
-    now = time.monotonic()
-    # Проверка «прошёл ли час» и обновление метки — одной неделимой операцией.
-    with _fallback_notify_lock:
-        if _last_fallback_notify and now - _last_fallback_notify < _FALLBACK_NOTIFY_COOLDOWN:
-            return
-        _last_fallback_notify = now
-
-    active_name = AVAILABLE_MODELS.get(active_model, {}).get("name", active_model)
-    used_name = AVAILABLE_MODELS.get(used_model, {}).get("name", used_model)
-    text = (
-        f"⚠️ Активная модель {active_name} не ответила — запрос обслужила запасная {used_name}.\n\n"
-        f"Активная модель не менялась: следующий запрос снова пойдёт на {active_name}. "
-        f"Если сбои продолжатся, это уведомление повторится не раньше чем через час."
-    )
+def _notify_admins(text: str) -> None:
+    """Шлёт владельцам (config.ADMIN_IDS) сообщение в личку. Тихая."""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     for admin_id in ADMIN_IDS:
         try:
             _http().post(url, json={"chat_id": admin_id, "text": text}, timeout=10)
         except Exception as e:
-            logger.warning("⚠️ Не удалось уведомить админа %s о запасной модели: %s", admin_id, e)
+            logger.warning("⚠️ Не удалось уведомить админа %s о сбое модели: %s", admin_id, e)
+
+
+def _model_title(model_name: str) -> str:
+    """Человеческое имя модели для сообщения владельцу."""
+    return AVAILABLE_MODELS.get(model_name, {}).get("name", model_name)
+
+
+def _failed_list(failures: list) -> str:
+    """«Gemini 3.7 Flash (код 503), Qwen3.7 Plus (таймаут)» — кто и почему."""
+    return ", ".join(f"{_model_title(m)} ({why})" for m, why in failures) or "—"
+
+
+def _notify_models_failed(kind: str, failures: list,
+                          used_model: str = "", active_model: str = "") -> None:
+    """
+    Сбой одной или нескольких моделей в ОДНОМ запросе.
+
+    ⚠️ Одно сообщение на ЗАПРОС, а не на попытку: активная модель пробуется
+    дважды, в цепочке до четырёх моделей — без этого правила один сбойный
+    вопрос давал бы до пяти сообщений подряд.
+    """
+    if not failures:
+        return
+    if used_model:
+        head = f"⚠️ Сбой модели · {kind}"
+        tail = (f"Ответила запасная: {_model_title(used_model)}.\n"
+                f"Активная модель не менялась.")
+    else:
+        head = f"🛑 Не ответил никто · {kind}"
+        tail = "Человек получил сообщение-заглушку."
+    _notify_admins(f"{head}\nНе ответили: {_failed_list(failures)}.\n{tail}")
+
+
+def _notify_chain_dead(what: str, failures: list) -> None:
+    """
+    Цепочка разбора медиа не справилась НИ ОДНОЙ моделью (2026-08-18, просьба
+    Максима «добавить сообщения про голосовые с видео на их полный провал»).
+
+    Это самая тихая поломка бота: человек прислал голосовое или ролик, бот его
+    молча не понял — в чате это выглядит как «проигнорировал сообщение».
+    Отдельные отказы внутри цепочки НЕ сообщаются (следующая модель подхватит,
+    иначе сыпалось бы на каждую картинку) — только полный провал.
+    """
+    why = (f"Не ответили: {_failed_list(failures)}." if failures
+           else "Все модели цепочки сидят на скамейке после ошибки квоты (429).")
+    _notify_admins(f"🛑 {what}: не справилась ни одна модель\n{why}\n"
+                   f"Бот промолчал — в чате это выглядит как «проигнорировал сообщение».")
 
 
 # ───────────────────────────────────────────────
@@ -380,6 +416,7 @@ def _describe_image(image_base64: str, chain_limit: int = 0) -> str:
     content = [{"type": "image_url",
                 "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}}]
 
+    failures = []          # [(модель, причина)] — для уведомления владельцу
     for model_name in _media_chain(chain_limit):
         try:
             payload = {
@@ -404,15 +441,18 @@ def _describe_image(image_base64: str, chain_limit: int = 0) -> str:
                 # Пустой ответ — тоже отказ: идём к следующей модели, иначе в
                 # стенограмму уйдут пустые скобки вместо разбора.
                 logger.warning("🤖 %s вернула пустое описание фото — пробую следующую", model_name)
+                failures.append((model_name, "пустой ответ"))
                 continue
             logger.info("🤖 Ответ от %s за %.1f с (описание фото)", model_name, elapsed)
             return text
         except Exception as e:
             # ⚠️ warning, а не debug (2026-08-10): молчаливый сбой разбора
             # выглядит как «бот проигнорировал сообщение» и не находится в логе.
+            failures.append((model_name, _err_code(e)))
             if not _note_quota_error(model_name, e):
                 logger.warning("🤖 %s не описала фото: %s", model_name, e)
     logger.error("⚠️ 🤖 Фото не описала НИ ОДНА модель цепочки")
+    _notify_chain_dead("Фото (разбор для стенограммы)", failures)
     return ""
 
 
@@ -436,6 +476,7 @@ def _transcribe_audio(audio_base64: str, chain_limit: int = 0) -> str:
     """
     parts = [{"inlineData": {"mimeType": "audio/ogg", "data": audio_base64}}]
 
+    failures = []          # [(модель, причина)] — для уведомления владельцу
     for model_name in _media_chain(chain_limit):
         try:
             payload = {
@@ -457,13 +498,16 @@ def _transcribe_audio(audio_base64: str, chain_limit: int = 0) -> str:
             text = _native_text_only(data)
             if not text:
                 logger.warning("🤖 %s вернула пустую расшифровку — пробую следующую", model_name)
+                failures.append((model_name, "пустой ответ"))
                 continue
             logger.info("🤖 Ответ от %s за %.1f с (расшифровка аудио)", model_name, elapsed)
             return text
         except Exception as e:
+            failures.append((model_name, _err_code(e)))
             if not _note_quota_error(model_name, e):
                 logger.warning("🤖 %s не расшифровала голосовое: %s", model_name, e)
     logger.error("⚠️ 🤖 Голосовое не расшифровала НИ ОДНА модель цепочки")
+    _notify_chain_dead("Голосовое (расшифровка для стенограммы)", failures)
     return ""
 
 
@@ -497,6 +541,7 @@ def _describe_video(video_base64: str, mime_type: str = "video/mp4",
     """
     parts = [{"inlineData": {"mimeType": mime_type, "data": video_base64}}]
 
+    failures = []          # [(модель, причина)] — для уведомления владельцу
     for model_name in _media_chain(chain_limit):
         try:
             payload = {
@@ -518,13 +563,16 @@ def _describe_video(video_base64: str, mime_type: str = "video/mp4",
             text = _native_text_only(data)
             if not text:
                 logger.warning("🤖 %s вернула пустое описание видео — пробую следующую", model_name)
+                failures.append((model_name, "пустой ответ"))
                 continue
             logger.info("🤖 Ответ от %s за %.1f с (описание видео)", model_name, elapsed)
             return text
         except Exception as e:
+            failures.append((model_name, _err_code(e)))
             if not _note_quota_error(model_name, e):
                 logger.warning("🤖 %s не описала видео: %s", model_name, e)
     logger.error("⚠️ 🤖 Видео не описала НИ ОДНА модель цепочки")
+    _notify_chain_dead("Видео (разбор для стенограммы)", failures)
     return ""
 
 
@@ -895,8 +943,11 @@ def _gemini_chat_request(messages: list, kind: str = "текст", has_image: bo
     под дефолт), поэтому мы не передаём эти параметры.
     """
 
+    failures = []          # [(модель, причина)] — для уведомления владельцу
+
     def _try_model(model_name: str, attempts: int = 2):
         provider = _provider_of(model_name)
+        last_error = None
         for attempt in range(attempts):
             try:
                 if provider == "qwen":
@@ -938,6 +989,7 @@ def _gemini_chat_request(messages: list, kind: str = "текст", has_image: bo
                 response.raise_for_status()
                 return response.json()
             except Exception as e:
+                last_error = e
                 logger.warning(
                     "⚠️ Модель %s не ответила (попытка %s из %s, %s): %s%s",
                     model_name, attempt + 1, attempts, _err_code(e), _err_short(e), _err_body(e),
@@ -951,6 +1003,10 @@ def _gemini_chat_request(messages: list, kind: str = "текст", has_image: bo
                     break
                 if attempt < attempts - 1:
                     time.sleep((attempt + 1) * 2)
+        # Копилка отказов ОДНОГО запроса (2026-08-18): что не ответило и почему.
+        # Причину берём последнюю — она же в строке лога выше. Список нужен
+        # уведомлению владельцу: одно сообщение на запрос со всеми отказавшими.
+        failures.append((model_name, _err_code(last_error) if last_error else "нет ответа"))
         return None
 
     active_model = hist.get_setting("active_model", GEMINI_MODEL)
@@ -1039,11 +1095,12 @@ def _gemini_chat_request(messages: list, kind: str = "текст", has_image: bo
                 hist.register_api_call(model_name)
             except Exception as e:
                 logger.warning("⚠️ Не удалось учесть вызов модели в статистике: %s", e)
-            # Ответила запасная модель — сообщаем админам (не чаще раза в час).
-            # При vision-reroute НЕ сообщаем: обход «слепой» модели на фото —
-            # штатный режим (как у голосовых), а не сбой активной модели.
-            if model_name != active_model and not vision_reroute and not chain_override:
-                _notify_admins_fallback(active_model, model_name)
+            # Ответ получен. Если по дороге кто-то отказал — сообщаем владельцу
+            # (2026-08-18: всегда, без часа молчания). Условия «не активная» и
+            # «не vision-reroute» больше НЕ нужны: поводом стал сам факт отказа,
+            # а обход «слепой» модели отказом не является и копилку не трогает.
+            _notify_models_failed(kind, failures, used_model=model_name,
+                                  active_model=active_model)
             elapsed = time.perf_counter() - start
             # Модель + время ответа + токены в одной строке.
             # контекст=вход, ответ=видимый текст, размышления=скрытые токены «думающих»
@@ -1126,6 +1183,9 @@ def _gemini_chat_request(messages: list, kind: str = "текст", has_image: bo
             logger.warning("⚠️ Переключаюсь на запасную модель %s (активная %s не меняется)", chain[i + 1], active_model)
             time.sleep(1.5)
 
+    # Не ответил НИКТО — раньше владелец об этом не узнавал вовсе: человек
+    # получал заглушку, а в личку не приходило ничего (2026-08-18, исправлено).
+    _notify_models_failed(kind, failures, active_model=active_model)
     return None, active_model
 
 
@@ -1320,7 +1380,10 @@ def ask_gemini_audio(chat_id: int, user_id: int, audio_base64: str) -> str:
 
     headers = {"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY}
 
+    audio_failures = []    # [(модель, причина)] — для уведомления владельцу
+
     def _try_audio(model_name: str, attempts: int = 2):
+        last_error = None
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
         # Просьба о размышлениях зависит от МОДЕЛИ, а payload общий на всю
         # цепочку — поэтому конфиг добавляется в копию, на каждое звено своё.
@@ -1338,8 +1401,10 @@ def ask_gemini_audio(chat_id: int, user_id: int, audio_base64: str) -> str:
                     "⚠️ Модель %s не ответила (попытка %s из %s, %s): %s%s",
                     model_name, attempt + 1, attempts, _err_code(e), _err_short(e), _err_body(e),
                 )
+                last_error = e
                 if attempt < attempts - 1:
                     time.sleep((attempt + 1) * 2)
+        audio_failures.append((model_name, _err_code(last_error) if last_error else "нет ответа"))
         return None
 
     # Цепочка аудио-моделей: активная первой (если она поддерживает аудио),
@@ -1376,6 +1441,9 @@ def ask_gemini_audio(chat_id: int, user_id: int, audio_base64: str) -> str:
 
     if data is None:
         logger.error("⚠️ Не удалось получить аудио-ответ — недоступны все модели цепочки (пользователь %s)", user_id)
+        # Полный провал цепочки — сообщаем владельцу (2026-08-18, просьба
+        # Максима). Человек при этом получает заглушку, а не тишину.
+        _notify_chain_dead("Голосовое (ответ человеку)", audio_failures)
         return SOFT_FAIL_MESSAGE
 
     # Учёт вызова — под своим try: ответ уже получен и оплачен (см. текстовый путь).
@@ -1383,11 +1451,12 @@ def ask_gemini_audio(chat_id: int, user_id: int, audio_base64: str) -> str:
         hist.register_api_call(used_model)
     except Exception as e:
         logger.warning("⚠️ Не удалось учесть вызов модели в статистике: %s", e)
-    # Ответила запасная модель вместо активной — сообщаем админам (не чаще раза
-    # в час). Если активная модель аудио вообще не принимает, обход цепочки —
-    # штатный режим, а не сбой, поэтому уведомления нет.
-    if active_model in AUDIO_FALLBACK_CHAIN and used_model != active_model:
-        _notify_admins_fallback(active_model, used_model)
+    # Кто-то из цепочки отказал, но ответ получен — сообщаем владельцу
+    # (2026-08-18: всегда). Проверки «активная принимает аудио» больше нет:
+    # поводом стал сам факт отказа, а обход модели, которая аудио не понимает,
+    # отказом не является и в копилку не попадает.
+    _notify_models_failed("голосовое", audio_failures, used_model=used_model,
+                          active_model=active_model)
     try:
         raw_answer = _native_answer_with_thoughts(data)
     except (KeyError, IndexError):
@@ -1495,7 +1564,10 @@ def ask_gemini_video(chat_id: int, user_id: int, video_base64: str,
 
     headers = {"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY}
 
+    video_failures = []    # [(модель, причина)] — для уведомления владельцу
+
     def _try_video(model_name: str, attempts: int = 1):
+        last_error = None
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
         # Конфиг размышлений — свой на каждое звено цепочки (см. _try_audio).
         req = dict(payload)
@@ -1512,8 +1584,10 @@ def ask_gemini_video(chat_id: int, user_id: int, video_base64: str,
                     "⚠️ Модель %s не ответила на видео (попытка %s из %s, %s): %s%s",
                     model_name, attempt + 1, attempts, _err_code(e), _err_short(e), _err_body(e),
                 )
+                last_error = e
                 if attempt < attempts - 1:
                     time.sleep((attempt + 1) * 2)
+        video_failures.append((model_name, _err_code(last_error) if last_error else "нет ответа"))
         return None
 
     # Цепочка: активная первой (если она видео принимает), затем остальные.
@@ -1551,6 +1625,7 @@ def ask_gemini_video(chat_id: int, user_id: int, video_base64: str,
 
     if data is None:
         logger.error("⚠️ Не удалось разобрать видео — недоступны все модели цепочки (пользователь %s)", user_id)
+        _notify_chain_dead("Видео (ответ человеку)", video_failures)
         return SOFT_FAIL_MESSAGE
 
     # Учёт вызова — под своим try: ответ уже получен и оплачен (см. текстовый путь).
@@ -1558,11 +1633,10 @@ def ask_gemini_video(chat_id: int, user_id: int, video_base64: str,
         hist.register_api_call(used_model)
     except Exception as e:
         logger.warning("⚠️ Не удалось учесть вызов модели в статистике: %s", e)
-    # Ответила запасная вместо активной — уведомляем админов (не чаще раза в час).
-    # Если активная видео вообще не принимает, обход цепочки — штатный режим
-    # (как у аудио и у vision-reroute), поэтому уведомления нет.
-    if _supports_video(active_model) and used_model != active_model:
-        _notify_admins_fallback(active_model, used_model)
+    # Кто-то из цепочки отказал, но ответ получен (2026-08-18: сообщаем всегда,
+    # см. аудио выше — там же про снятые проверки).
+    _notify_models_failed("видео", video_failures, used_model=used_model,
+                          active_model=active_model)
 
     try:
         raw_answer = _native_answer_with_thoughts(data)
