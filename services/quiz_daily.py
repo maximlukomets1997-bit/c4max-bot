@@ -152,6 +152,10 @@ def restore() -> int:
                 "question": rec.get("question", ""),
                 "options": rec.get("options", []),
                 "explanation": rec.get("explanation", ""),
+                # ⚠️ Метка обязательна и здесь: без неё после перезапуска бота
+                # ответ на восстановленный вопрос дня запустил бы цепочку
+                # «следующий вопрос» — правило смотрит именно на неё.
+                "auto": True,
             }
             restored += 1
         if restored:

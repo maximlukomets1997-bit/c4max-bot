@@ -97,6 +97,12 @@ async def send_quiz_question(chat_id: int, context: ContextTypes.DEFAULT_TYPE,
             "correct_idx": q["correct_idx"],
             "chat_id": chat_id,
             "triggered_next": False,
+            # ⚠️ Вопрос дня НЕ порождает следующий вопрос (2026-08-20, решение
+            # Максима). Правило «ответил — получи следующий» писалось для кнопки
+            # «сыграть сейчас», и на суточном вопросе давало цепочку: первый же
+            # ответивший запускал поток вопросов в группе. Метка читается
+            # в handle_poll_answer.
+            "auto": auto,
             "question": q["question"],
             "options": q["options"],
             "explanation": q["explanation"]
@@ -352,6 +358,11 @@ async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # Пауза — ОТЛОЖЕННОЙ задачей, а не sleep прямо в обработчике: обработчик
     # с ожиданием внутри держал бы всю очередь апдейтов бота 2.5 секунды.
     # application.create_task — чтобы ошибки задачи попадали в error handler.
+    # ⚠️ У ВОПРОСА ДНЯ ПРОДОЛЖЕНИЯ НЕТ (2026-08-20). Марафон остаётся только
+    # у кнопки «сыграть сейчас». Проверка обязана быть здесь, а не в отправке:
+    # цепочку запускает ОТВЕТ, а не сама отправка.
+    if quiz_info.get("auto"):
+        return
     if not quiz_info.get("triggered_next", False):
         quiz_info["triggered_next"] = True
 
