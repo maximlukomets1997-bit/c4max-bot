@@ -61,6 +61,7 @@ pull request не черновиком и сразу включать авто-�
 | `services/antispam.py` | `get_thresholds_for` |
 | `services/backup.py` | `backup_dir` |
 | `services/group_digest.py` | `week_key`, `collect` |
+| `services/quiz_daily.py` | `day_key` — считает ключ суток внутри самого файла |
 | `services/roles.py` | `perm_for_callback` — зовётся внутри `may_press` |
 | `services/gemini.py` | `compress_newlines` |
 | `services/knowledge_store.py` | `detect_kind` |
@@ -103,7 +104,7 @@ pull request не черновиком и сразу включать авто-�
 Правка в них почти наверняка заденет что-то, чего не видно с экрана.
 Перед изменением — обязательно `scripts/impact.py` по конкретному имени.
 
-Числа — снимок на 2026-08-20 (код версии v4.54)
+Числа — снимок на 2026-08-20 (код версии v4.56)
 (`scripts/map.py`), «функций» = имён верхнего уровня, включая служебные с
 подчёркиванием.
 
@@ -111,7 +112,7 @@ pull request не черновиком и сразу включать авто-�
 |---|---:|---:|
 | `database/history.py` | 2772 | 121 |
 | `services/gemini.py` | 2559 | 50 |
-| `handlers/admin/panel_users.py` | 1343 | 28 |
+| `handlers/admin/panel_users.py` | 1345 | 28 |
 | `handlers/admin/panel_prompts.py` | 1330 | 32 |
 | `handlers/admin/panel_rag.py` | 1000 | 17 |
 | `config.py` | 1088 | 106 констант |
@@ -121,7 +122,7 @@ pull request не черновиком и сразу включать авто-�
 
 ## 6. Половина связей не видна в шапках файлов
 
-В проекте **320 импортов спрятаны внутри функций**, в 39 файлах из 56.
+В проекте **331 импортов спрятаны внутри функций**, в 40 файлах из 57.
 Так разорваны кольцевые зависимости — например, `handlers/commands.py`
 тянет пакет `handlers.admin`, тот через re-export тянет
 `handlers/admin/panel_users.py`, а он снова тянет `handlers/commands.py`.

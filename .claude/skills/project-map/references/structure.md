@@ -1,6 +1,6 @@
 # Структура: файл → что в нём объявлено
 
-Снимок от 2026-08-20 по коду версии v4.54 (последний коммит): таблица
+Снимок от 2026-08-20 по коду версии v4.56 (последний коммит): таблица
 пересобрана скриптом и сверена с кодом. Пересобрать:
 
 ```
@@ -22,7 +22,7 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 |---|---:|---:|---|
 | `bot.py` | 11 | 0 | — (только вызывает `main.main`) |
 | `main.py` | 580 | 1 | `post_init`, `post_stop`, `post_shutdown`, `main` |
-| `config.py` | 1088 | 33 | `read_build_mark` + 106 констант верхнего уровня (заводские тексты всех пяти промптов — пустые строки) |
+| `config.py` | 1088 | 34 | `read_build_mark` + 106 констант верхнего уровня (заводские тексты всех пяти промптов — пустые строки) |
 | `utils.py` | 181 | 19 | `should_respond_in_group`, `clean_mention`, `keep_chat_action`, `delete_user_message_safe`, `mention`, `schedule_delete`, `register_and_clean_bot_message` |
 | `utils_format.py` | 304 | 8 | `strip_thoughts`, `thoughts_enabled`, `build_text_and_entities`, `send_formatted`, `convert_md`, `fits_caption`, `reply_md` |
 | `logging_setup.py` | 248 | 3 | `archive_old_logs`, `setup_logging` |
@@ -35,7 +35,7 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 | файл | строк | тянут | публичные имена |
 |---|---:|---:|---|
 | `database/__init__.py` | 2 | 0 | — |
-| `database/history.py` | 2772 | 34 | **111 функций**. Ключевые группы: соединение и схема (`init_db`, `close_db`, `backup_to`), переписка (`get_history`, `add_messages`, `clear_history`), настройки (`get_setting`, `set_setting`, `delete_setting`), деньги и счётчики (`add_provider_cost`, `register_api_call`, `get_bot_stats`, `save_stats_snapshot`), модерация (`log_moderation_action`, `save_mute_evidence`, `get_dossier`), персонал и права (`get_all_staff`, `set_staff_perm`, `log_staff_action`), викторина (`add_quiz_question`, `get_random_quiz_question`, `set_quiz_question_approved`), группы (`save_group_message`, `get_recent_group_messages`), новости (`is_news_already_sent`, `mark_news_as_sent`, `count_sent_news_between`), журналы (`add_kb_action`, `log_proactive_check`, `log_join`) |
+| `database/history.py` | 2772 | 35 | **111 функций**. Ключевые группы: соединение и схема (`init_db`, `close_db`, `backup_to`), переписка (`get_history`, `add_messages`, `clear_history`), настройки (`get_setting`, `set_setting`, `delete_setting`), деньги и счётчики (`add_provider_cost`, `register_api_call`, `get_bot_stats`, `save_stats_snapshot`), модерация (`log_moderation_action`, `save_mute_evidence`, `get_dossier`), персонал и права (`get_all_staff`, `set_staff_perm`, `log_staff_action`), викторина (`add_quiz_question`, `get_random_quiz_question`, `set_quiz_question_approved`), группы (`save_group_message`, `get_recent_group_messages`), новости (`is_news_already_sent`, `mark_news_as_sent`, `count_sent_news_between`), журналы (`add_kb_action`, `log_proactive_check`, `log_join`) |
 
 Полный список — `python -c "import ast;print([n.name for n in ast.parse(open('database/history.py',encoding='utf-8').read()).body if hasattr(n,'name')])"`.
 
@@ -47,7 +47,7 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 | `handlers/commands.py` | 416 | 4 | `public_commands`, `bot_display_name`, `cmd_start`, `cmd_help`, `cmd_clear`, `cmd_subscribe`, `cmd_unsubscribe`, `handle_menu_callback`, `log_incoming_command`, `handle_unknown_command` |
 | `handlers/messages.py` | 511 | 1 | `handle_photo`, `handle_voice`, `handle_video`, `handle_message`, `collect_group_message` |
 | `handlers/media.py` | 93 | 1 | `cmd_imagine` |
-| `handlers/quiz.py` | 365 | 3 | `send_quiz_question`, `cmd_quiz`, `cmd_rank`, `send_rank_panel`, `handle_poll_answer` |
+| `handlers/quiz.py` | 365 | 5 | `send_quiz_question`, `cmd_quiz`, `cmd_rank`, `send_rank_panel`, `handle_poll_answer` |
 | `handlers/tech.py` | 485 | 3 | `cmd_ttx`, `catalog_text`, `catalog_keyboard`, `handle_ttx_callback`, `inline_ttx` |
 
 ## `handlers/admin/` — админ-панели
@@ -73,7 +73,7 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 |---|---:|---:|---|
 | `services/gemini.py` | 2559 | 7 | `compress_newlines`, `ask_gemini`, `ask_gemini_audio`, `ask_gemini_video`, `format_news_as_colonel`, `author_brief`, `ask_group_proactive`, `ask_group_proactive_media`, `generate_image` |
 | `services/antispam.py` | 861 | 7 | `is_enabled`, `get_thresholds`, `get_thresholds_for`, `trust_info`, `check_and_mute`, `unmute`, `mute_user`, `kick_user`, `ban_user`, `unban_user`, `notify_owners_ai_mute`, `is_linkfilter_enabled`, `check_and_delete_links`, `get_mute_stats`, `get_recent_actions`, `get_evidence` |
-| `services/daily_report.py` | 781 | 7 | `kyiv_now`, `kyiv_label`, `collect_counters`, `period_totals`, `render`, `midnight_report`, `today_so_far`, `weekly_report`, `week_so_far`, `last_report_text`, `last_weekly_text` и др. |
+| `services/daily_report.py` | 781 | 8 | `kyiv_now`, `kyiv_label`, `collect_counters`, `period_totals`, `render`, `midnight_report`, `today_so_far`, `weekly_report`, `week_so_far`, `last_report_text`, `last_weekly_text` и др. |
 | `services/rag.py` | 795 | 5 | `cosine_similarity`, `RagQuotaError`, `get_embedding`, `parse_article_file`, `is_active`, `sync_knowledge_base`, `index_lag`, `rebuild_knowledge_base`, `normalize_query`, `retrieve_relevant_context`, `test_search` |
 | `services/proactive.py` | 644 | 2 | `skip_counts`, `is_enabled`, `hands_enabled`, `note_bot_group_reply`, `forget_conversations`, `consider_message` |
 | `services/tech_card.py` | 514 | 2 | `index`, `find_local`, `suggest`, `by_kind`, `by_title`, `token`, `by_token`, `load`, `render_card`, `render_section`, `render_candidates`, `kinds_summary`, `section_label`, `is_specs`, `short_title`, `kind_icon` |
