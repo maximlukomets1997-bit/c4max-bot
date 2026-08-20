@@ -110,7 +110,7 @@ pull request не черновиком и сразу включать авто-�
 | файл | строк | функций |
 |---|---:|---:|
 | `database/history.py` | 2772 | 121 |
-| `services/gemini.py` | 2551 | 50 |
+| `services/gemini.py` | 2559 | 50 |
 | `handlers/admin/panel_users.py` | 1337 | 28 |
 | `handlers/admin/panel_prompts.py` | 1330 | 30 |
 | `handlers/admin/panel_rag.py` | 1000 | 17 |
