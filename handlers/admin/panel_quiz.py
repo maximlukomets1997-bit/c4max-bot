@@ -151,6 +151,14 @@ def _build_panel(context):
     if kb["failed"]:
         failed_line = f"⚠️ Не разобрались: <code>{kb['failed']}</code>\n"
 
+    # 🕛 Вопрос дня (2026-08-20): состояние тумблера и когда уйдёт следующий.
+    # Цифры живые, считаются при каждом открытии панели.
+    from services import quiz_daily
+    auto_on = quiz_daily.is_enabled()
+    auto_line = (f"🕛 Вопрос дня: <b>{'ВКЛ' if auto_on else 'ВЫКЛ'}</b>"
+                 + (f" · следующий {quiz_daily.next_run_label()}" if auto_on else "")
+                 + "\n")
+
     text = (
         f"{_ICON} <b>ВИКТОРИНА</b>\n"
         f"{_LINE}\n"
@@ -161,12 +169,15 @@ def _build_panel(context):
         f"📝 Черновиков: <code>{counts['drafts']}</code>\n"
         f"📚 Статей в базе знаний: <code>{kb['articles_total']}</code>\n"
         f"🎖 Игроков со статистикой: <code>{players}</code>\n"
+        f"{auto_line}"
         f"{failed_line}"
         f"{_LINE}\n"
         f"{status}"
     )
 
     rows = [
+        [InlineKeyboardButton(f"🕛 ВОПРОС ДНЯ В 12:00: {'ВКЛ' if auto_on else 'ВЫКЛ'}",
+                              callback_data="quiz:auto")],
         [InlineKeyboardButton("🧠 Собрать вопросы", callback_data="quiz:gen")],
         [
             InlineKeyboardButton(f"📝 Черновики ({counts['drafts']})", callback_data="quiz:list:draft"),
@@ -313,6 +324,23 @@ async def _handle_quiz_callback(query, context, data: str, chat_id: int, user_id
 
     if action == "panel":
         await query.answer()
+        await send_quiz_panel(context.bot, chat_id, context)
+        return
+
+    # 🕛 Тумблер вопроса дня (2026-08-20, просьба Максима). По умолчанию ВЫКЛ:
+    # механизм сам пишет в группы, включаться молча он не должен.
+    if action == "auto":
+        from services import quiz_daily
+        new_val = not quiz_daily.is_enabled()
+        quiz_daily.set_enabled(new_val)
+        state = "включён" if new_val else "выключен"
+        logger.info("🔧 Владелец %s: вопрос дня %s", user_id, state)
+        _audit(user_id, "quiz_auto", 0, f"вопрос дня {state}")
+        await query.answer(
+            f"🕛 Вопрос дня {state}."
+            + (f" Следующий уйдёт {quiz_daily.next_run_label()} по Киеву." if new_val else ""),
+            show_alert=True,
+        )
         await send_quiz_panel(context.bot, chat_id, context)
         return
 

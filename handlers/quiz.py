@@ -26,10 +26,19 @@ async def _auto_delete_quiz(context, chat_id: int, message_id: int, poll_id: str
         pass  # уже удалена / нет прав — молча
 
 
-async def send_quiz_question(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+async def send_quiz_question(chat_id: int, context: ContextTypes.DEFAULT_TYPE,
+                             auto: bool = False):
     """
     Отправляет случайный тактический опрос в режиме викторины (Quiz Poll)
     и регистрирует его в ACTIVE_QUIZZES.
+
+    auto=True — это ВОПРОС ДНЯ (2026-08-20, просьба Максима): раз в сутки в
+    12:00 по Киеву, см. services/quiz_daily.py. Отличий ровно два:
+      • НЕ ставится авто-удаление через минуту — вопрос висит сутки, чтобы люди
+        успели ответить; вчерашний убирает следующая отправка;
+      • возвращается запись об опросе (chat_id, message_id, poll_id, правильный
+        ответ) — её кладут в базу, чтобы ответы считались и после перезапуска.
+    Обычный вызов (кнопка «сыграть») возвращает None и ведёт себя как раньше.
 
     ⚠️ ВОПРОСЫ БЕРУТСЯ ИЗ БАНКА В БАЗЕ (2026-08-05, решение Максима), а не из
     списка в коде: их собирает по статьям базы знаний панель /quizadm, и в игру
@@ -46,6 +55,10 @@ async def send_quiz_question(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     q = get_random_quiz_question()
     if not q:
         logger.info("🎮 Викторина: банк вопросов пуст (чат %s)", chat_id)
+        if auto:
+            # Вопрос дня при пустом банке просто не приходит: писать в группу
+            # «вопросов пока нет» каждый полдень — худшее из возможного.
+            return None
         try:
             sent_msg = await context.bot.send_message(
                 chat_id=chat_id,
@@ -89,10 +102,29 @@ async def send_quiz_question(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
         note_quiz_question_asked(q["id"])
         logger.info("🎮 Новая викторина отправлена (чат %s)", chat_id)
 
-        # Авто-удаление этой викторины через 60 сек — и отвеченной, и неотвеченной.
-        asyncio.create_task(_auto_delete_quiz(context, chat_id, poll_msg.message_id, poll_msg.poll.id))
+        # Авто-удаление через 60 сек — только у вопроса ПО КНОПКЕ.
+        # ⚠️ У вопроса дня удаления нет намеренно: минута жизни означала бы, что
+        # его увидит только тот, кто смотрел в чат ровно в полдень. Вчерашний
+        # опрос убирает следующая суточная отправка (jobs/reports.py).
+        if not auto:
+            asyncio.create_task(_auto_delete_quiz(context, chat_id, poll_msg.message_id, poll_msg.poll.id))
+            return None
+        return {
+            "message_id": poll_msg.message_id,
+            "poll_id": poll_msg.poll.id,
+            "correct_idx": q["correct_idx"],
+            "question": q["question"],
+            "options": q["options"],
+            "explanation": q["explanation"],
+        }
     except Exception as e:
         logger.error("⚠️ Не удалось отправить викторину в чат %s: %s", chat_id, e)
+        # ⚠️ У вопроса дня сообщения об ошибке в чат НЕ шлём: люди его не
+        # просили, и «❌ Ошибка связи» в группе выглядела бы поломкой на пустом
+        # месте. Владелец узнает из лога, а суточная метка не поставится —
+        # значит бот попробует снова в ближайший час.
+        if auto:
+            return None
         # Пробуем сообщить об ошибке
         try:
             sent_msg = await context.bot.send_message(

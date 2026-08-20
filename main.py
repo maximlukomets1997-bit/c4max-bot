@@ -520,6 +520,15 @@ def main():
     except Exception as e:
         logger.error("⚠️ Не удалось загрузить модераторов: %s", e)
 
+    # 🕛 Вопрос дня — обратно в память (2026-08-20). Опрос висит в группе сутки,
+    # а бот за сутки перезапускается сколько угодно раз: без этого ответы на
+    # уже отправленный опрос молча не засчитывались бы — бот их «не помнит».
+    try:
+        from services import quiz_daily
+        quiz_daily.restore()
+    except Exception as e:
+        logger.error("⚠️ Не удалось восстановить вопрос дня: %s", e)
+
     if RAG_ENABLED:
         try:
             import services.rag as rag_module

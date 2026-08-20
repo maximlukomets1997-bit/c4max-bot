@@ -43,7 +43,8 @@
 | `watchdog_loop` | `jobs/watchdog.py` |
 | `auto_update_loop` | `jobs/update.py` |
 
-`jobs/reports.py` отдаёт наружу ещё `weekly_group_digest` и `nightly_backup`;
+`jobs/reports.py` отдаёт наружу ещё `weekly_group_digest`, `nightly_backup` и
+`daily_quiz` (вопрос дня, 12:00 по Киеву);
 `jobs/update.py` — `forget_update_notice`.
 
 ## Регистрация обработчиков — только `handlers/__init__.py::setup_handlers`
@@ -85,7 +86,7 @@
 
 Единственный роутер — `handlers/admin/router.py::handle_callback_query`.
 `preflight.py::check_callbacks` сверяет кнопки, найденные в коде панелей,
-с ветками роутера (на 2026-08-17 — **217 кнопок, 38 точных
+с ветками роутера (на 2026-08-20 — **218 кнопок, 38 точных
 веток + 13 по приставке**).
 
 Ограничение Telegram: `callback_data` ≤ 64 байта. Права на нажатие
@@ -122,7 +123,7 @@ user_image_calls, user_settings, user_token_usage
 
 ## Конфигурация
 
-`config.py` (1081 строк, 106 констант) — читают 34 модуля. Значения
+`config.py` (1088, 106 констант) — читают 34 модуля. Значения
 берутся из `.env` (`python-dotenv`). Ключи из `.env.example`:
 
 ```

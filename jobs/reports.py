@@ -112,6 +112,14 @@ async def daily_report_loop(application):
         except Exception as e:
             logger.error("⚠️ Недельный дайджест группы не отправлен: %s", e)
 
+        # 🕛 Вопрос дня — тоже своим try и в этом же цикле, по той же причине,
+        # что и дайджест: он просыпается по киевскому времени кусками не больше
+        # часа, переживает спящий сервер и перевод часов. Уходит в полдень.
+        try:
+            await daily_quiz(application)
+        except Exception as e:
+            logger.error("⚠️ Вопрос дня не отправлен: %s", e)
+
         try:
             delay = min(daily_report.seconds_to_next_midnight(), 3600)
         except Exception:
@@ -188,6 +196,87 @@ async def weekly_group_digest(application) -> bool:
         logger.info("📊 Недельный дайджест группы отправлен владельцу (сообщений: %d)", delivered)
         return True
     logger.error("⚠️ 📊 Дайджест собран, но НЕ доставлен ни одному владельцу")
+    return False
+
+
+# ───────────────────────────────────────────────
+#  🕛 Вопрос дня (2026-08-20)
+# ───────────────────────────────────────────────
+
+async def daily_quiz(application) -> bool:
+    """
+    Раз в сутки в 12:00 по Киеву отправляет ОДИН вопрос викторины во ВСЕ
+    группы, где есть бот, и удаляет там вчерашний опрос. Возвращает True,
+    если хоть куда-то ушло.
+
+    ⚠️ ПОРЯДОК ВАЖЕН: сначала отправляем новый, потом удаляем старый. Если
+    новый почему-то не ушёл, вчерашний остаётся висеть — лучше вчерашний
+    вопрос, чем пустое место (решение Максима 2026-08-20).
+
+    ⚠️ Отметка суток ставится ТОЛЬКО после удачной отправки — как у дайджеста
+    и ночной копии: не ушло никуда, значит бот попробует снова в ближайший час.
+
+    ⚠️ Группы берём из known_chats (там только группы — их пишет архиватор
+    сообщений). Подписка на новости тут ни при чём: на неё подписаны и личные
+    чаты, а вопрос дня — групповая затея.
+
+    Запись об отправленном опросе кладётся в settings (services/quiz_daily.py):
+    ею же завтра удаляется вчерашний опрос, и ею же ответы считаются после
+    перезапуска бота.
+    """
+    from services import quiz_daily
+    from database.history import get_known_chats
+    from handlers.quiz import send_quiz_question
+
+    if not quiz_daily.due_now():
+        return False
+
+    chats = [c for c in get_known_chats() if c["chat_id"] < 0]
+    if not chats:
+        logger.info("🎮 Вопрос дня: групп бот не знает — отправлять некуда")
+        return False
+
+    was = quiz_daily.active()
+    delivered = 0
+    for chat in chats:
+        chat_id = chat["chat_id"]
+        title = chat.get("title") or str(chat_id)
+        try:
+            record = await send_quiz_question(chat_id, application, auto=True)
+        except Exception as e:
+            logger.error("⚠️ 🎮 Вопрос дня не ушёл в группу %s: %s", title, e)
+            continue
+        if not record:
+            # Пустой банк или отказ Telegram — вчерашний НЕ трогаем.
+            continue
+        delivered += 1
+        quiz_daily.remember(chat_id, record)
+
+        # Вчерашний опрос убираем ПОСЛЕ удачной отправки нового.
+        old = was.get(str(chat_id)) or {}
+        old_msg = old.get("message_id")
+        if old_msg:
+            try:
+                await application.bot.delete_message(chat_id=chat_id, message_id=old_msg)
+                logger.info("🎮 Вчерашний вопрос удалён из группы %s", title)
+            except Exception as e:
+                # Права забрали, сообщение слишком старое, удалено руками —
+                # не беда: новый вопрос уже на месте.
+                logger.debug("🎮 Не удалось удалить вчерашний вопрос в %s: %s", title, e)
+        old_poll = old.get("poll_id")
+        if old_poll:
+            # Ответы на удалённый опрос больше не придут — чистим память.
+            try:
+                from handlers.quiz import ACTIVE_QUIZZES
+                ACTIVE_QUIZZES.pop(old_poll, None)
+            except Exception:
+                pass
+
+    if delivered:
+        quiz_daily.note_sent()
+        logger.info("🎮 Вопрос дня разослан (групп: %d из %d)", delivered, len(chats))
+        return True
+    logger.error("⚠️ 🎮 Вопрос дня не доставлен НИ В ОДНУ группу (%d)", len(chats))
     return False
 
 
