@@ -1,6 +1,6 @@
 # Проводка: чем что запускается и где регистрируется
 
-Снимок от 2026-08-16. Всё ниже проверено чтением кода; если правишь что-то из
+Снимок от 2026-08-20 (код версии v4.54). Всё ниже проверено чтением кода; если правишь что-то из
 этого — перечитай исходный файл, а не этот текст.
 
 ## Точки входа
@@ -122,7 +122,7 @@ user_image_calls, user_settings, user_token_usage
 
 ## Конфигурация
 
-`config.py` (1075 строк, 106 констант) — читают 34 модуля. Значения
+`config.py` (1081 строк, 106 констант) — читают 34 модуля. Значения
 берутся из `.env` (`python-dotenv`). Ключи из `.env.example`:
 
 ```
@@ -136,8 +136,9 @@ RAG_STRONG_SIM, WATCHDOG_URL
 `DB_PATH = "history.db"`, `BACKUP_DIR = "backups"`,
 `RAG_INDEX_FILE = "knowledge/knowledge_base_vectors.json"`,
 `KNOWLEDGE_PENDING_DIR`, `KNOWLEDGE_APPROVED_DIR`,
-`AVAILABLE_MODELS` (11 моделей), `PROVIDERS` (4: deepseek, gemini, qwen,
-xiaomi), `AVAILABLE_IMAGE_MODELS` (2), `QUIZ_RANKS` (20 званий),
+`AVAILABLE_MODELS` (11 моделей), `PROVIDERS` (5 ключей: gemini, image, qwen, deepseek, xiaomi — «image» это
+не провайдер моделей, а картинки; `preflight` считает четвёрку по
+`AVAILABLE_MODELS`), `AVAILABLE_IMAGE_MODELS` (2), `QUIZ_RANKS` (20 званий),
 `AUTO_UPDATE_INTERVAL_SEC = 300`, `AUTO_UPDATE_QUIET_SEC = 60`,
 `WATCHDOG_PING_SEC = 60`.
 
