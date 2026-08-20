@@ -27,7 +27,7 @@ async def _auto_delete_quiz(context, chat_id: int, message_id: int, poll_id: str
 
 
 async def send_quiz_question(chat_id: int, context: ContextTypes.DEFAULT_TYPE,
-                             auto: bool = False):
+                             auto: bool = False, question: dict | None = None):
     """
     Отправляет случайный тактический опрос в режиме викторины (Quiz Poll)
     и регистрирует его в ACTIVE_QUIZZES.
@@ -39,6 +39,11 @@ async def send_quiz_question(chat_id: int, context: ContextTypes.DEFAULT_TYPE,
       • возвращается запись об опросе (chat_id, message_id, poll_id, правильный
         ответ) — её кладут в базу, чтобы ответы считались и после перезапуска.
     Обычный вызов (кнопка «сыграть») возвращает None и ведёт себя как раньше.
+
+    question — готовый вопрос вместо случайного из банка (2026-08-20, решение
+    Максима «во все группы один и тот же вопрос»). Тогда отметку «задан»
+    ставит ВЫЗЫВАЮЩИЙ и ровно один раз: иначе счётчик вырос бы на число групп,
+    и банк расходовался бы вдвое-втрое быстрее, чем идут дни.
 
     ⚠️ ВОПРОСЫ БЕРУТСЯ ИЗ БАНКА В БАЗЕ (2026-08-05, решение Максима), а не из
     списка в коде: их собирает по статьям базы знаний панель /quizadm, и в игру
@@ -52,7 +57,7 @@ async def send_quiz_question(chat_id: int, context: ContextTypes.DEFAULT_TYPE,
         for k in oldest_keys:
             ACTIVE_QUIZZES.pop(k, None)
 
-    q = get_random_quiz_question()
+    q = question or get_random_quiz_question()
     if not q:
         logger.info("🎮 Викторина: банк вопросов пуст (чат %s)", chat_id)
         if auto:
@@ -99,7 +104,10 @@ async def send_quiz_question(chat_id: int, context: ContextTypes.DEFAULT_TYPE,
         # Отметку «вопрос задан» ставим ТОЛЬКО после удачной отправки: она
         # опускает вопрос в конец очереди выбора, и считать заданным то, что
         # в чат не ушло, значит незаметно выдавливать вопросы из игры.
-        note_quiz_question_asked(q["id"])
+        # Вопрос пришёл готовым (вопрос дня во все группы) — отметку ставит
+        # вызывающий, один раз на все чаты.
+        if question is None:
+            note_quiz_question_asked(q["id"])
         logger.info("🎮 Новая викторина отправлена (чат %s)", chat_id)
 
         # Авто-удаление через 60 сек — только у вопроса ПО КНОПКЕ.

@@ -225,7 +225,7 @@ async def daily_quiz(application) -> bool:
     перезапуска бота.
     """
     from services import quiz_daily
-    from database.history import get_known_chats
+    from database.history import get_known_chats, get_random_quiz_question, note_quiz_question_asked
     from handlers.quiz import send_quiz_question
 
     if not quiz_daily.due_now():
@@ -236,18 +236,29 @@ async def daily_quiz(application) -> bool:
         logger.info("🎮 Вопрос дня: групп бот не знает — отправлять некуда")
         return False
 
+    # ⚠️ ВОПРОС БЕРЁТСЯ ОДИН РАЗ НА ВСЕ ГРУППЫ (2026-08-20, решение Максима).
+    # Раньше каждый чат тянул свой: счётчик «сколько раз задавали» растёт между
+    # отправками, и во вторую группу уходил следующий по очереди — банк
+    # расходовался вдвое быстрее, чем идут дни. Отметку «задан» ставим ниже,
+    # один раз и только если хоть куда-то ушло.
+    question = get_random_quiz_question()
+    if not question:
+        logger.info("🎮 Вопрос дня: банк вопросов пуст — отправлять нечего")
+        return False
+
     was = quiz_daily.active()
     delivered = 0
     for chat in chats:
         chat_id = chat["chat_id"]
         title = chat.get("title") or str(chat_id)
         try:
-            record = await send_quiz_question(chat_id, application, auto=True)
+            record = await send_quiz_question(chat_id, application, auto=True,
+                                              question=question)
         except Exception as e:
             logger.error("⚠️ 🎮 Вопрос дня не ушёл в группу %s: %s", title, e)
             continue
         if not record:
-            # Пустой банк или отказ Telegram — вчерашний НЕ трогаем.
+            # Отказ Telegram — вчерашний в этой группе НЕ трогаем.
             continue
         delivered += 1
         quiz_daily.remember(chat_id, record)
@@ -273,6 +284,12 @@ async def daily_quiz(application) -> bool:
                 pass
 
     if delivered:
+        # Отметка «вопрос задан» — одна на все группы, иначе банк тает быстрее,
+        # чем идут дни. Ставится только после удачной отправки.
+        try:
+            note_quiz_question_asked(question["id"])
+        except Exception as e:
+            logger.warning("⚠️ 🎮 Не удалось отметить вопрос дня заданным: %s", e)
         quiz_daily.note_sent()
         logger.info("🎮 Вопрос дня разослан (групп: %d из %d)", delivered, len(chats))
         return True
