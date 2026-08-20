@@ -37,7 +37,8 @@ from database.history import (
 )
 from utils import delete_user_message_safe, schedule_delete
 
-from .common import _adm_back_row, _audit, _is_group_chat, _require, _send_panel_message
+from .common import (_adm_back_row, _audit, _is_group_chat, _onoff, _require,
+                     _send_panel_message)
 
 logger = logging.getLogger(__name__)
 
@@ -155,7 +156,11 @@ def _build_panel(context):
     # Цифры живые, считаются при каждом открытии панели.
     from services import quiz_daily
     auto_on = quiz_daily.is_enabled()
-    auto_line = (f"🕛 Вопрос дня: <b>{'ВКЛ' if auto_on else 'ВЫКЛ'}</b>"
+    # Метка состояния — ТОЛЬКО через общий _onoff: он единственный источник
+    # надписей «🟢ВКЛ» / «🔴ВЫКЛ» на все 18 тумблеров бота. Собранная руками
+    # (как было у этой кнопки с 2026-08-20 до вечера того же дня) разъезжается
+    # со всеми соседними экранами.
+    auto_line = (f"🕛 Вопрос дня: <b>{_onoff(auto_on)}</b>"
                  + (f" · следующий {quiz_daily.next_run_label()}" if auto_on else "")
                  + "\n")
 
@@ -176,7 +181,7 @@ def _build_panel(context):
     )
 
     rows = [
-        [InlineKeyboardButton(f"🕛 ВОПРОС ДНЯ В 12:00: {'ВКЛ' if auto_on else 'ВЫКЛ'}",
+        [InlineKeyboardButton(f"🕛 ВОПРОС ДНЯ В 12:00: {_onoff(auto_on)}",
                               callback_data="quiz:auto")],
         [InlineKeyboardButton("🧠 Собрать вопросы", callback_data="quiz:gen")],
         [
