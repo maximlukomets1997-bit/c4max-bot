@@ -1338,13 +1338,6 @@ def ask_gemini_audio(chat_id: int, user_id: int, audio_base64: str) -> str:
                 f"{current_system_prompt}\n\n{block}" if current_system_prompt else block
             )
 
-    # Своя последняя публикация — сразу за базой знаний, как в ask_gemini.
-    news_block = _last_news_block()
-    if news_block:
-        current_system_prompt = (
-            f"{current_system_prompt}\n\n{news_block}" if current_system_prompt else news_block
-        )
-
     native_history = []
     for msg in history:
         content = (msg.get("content") or "").strip()
@@ -1522,13 +1515,6 @@ def ask_gemini_video(chat_id: int, user_id: int, video_base64: str,
             current_system_prompt = (
                 f"{current_system_prompt}\n\n{block}" if current_system_prompt else block
             )
-
-    # Своя последняя публикация — сразу за базой знаний, как в ask_gemini.
-    news_block = _last_news_block()
-    if news_block:
-        current_system_prompt = (
-            f"{current_system_prompt}\n\n{news_block}" if current_system_prompt else news_block
-        )
 
     native_history = []
     for msg in history:
@@ -1719,21 +1705,6 @@ def ask_gemini(chat_id: int, user_id: int, user_text: str, image_base64: str = N
             # Состав подсказки печатает сам поиск (services/rag.py) — там
             # известны названия статей. Вторая строка «контекст добавлен»
             # только путала: непонятно, добавили в базу или в промпт.
-
-    # ── Своя последняя публикация (2026-08-16) ──
-    # Идёт СРАЗУ ЗА базой знаний и до справки об авторе — тот же порядок, что
-    # в _build_proactive_parts, чтобы два пути не разъезжались. Добавляется и
-    # в личке тоже (решение Максима «везде»): рассылка не оседает ни в личной
-    # переписке, ни в архиве групп дольше окна стенограммы, и без этого блока
-    # бот не знал бы о собственной новости нигде, кроме свежего разговора.
-    try:
-        news_block = _last_news_block()
-        if news_block:
-            current_system_prompt = (
-                f"{current_system_prompt}\n\n{news_block}" if current_system_prompt else news_block
-            )
-    except Exception as news_err:
-        logger.debug("📰 Не удалось добавить последнюю новость в запрос: %s", news_err)
 
     # ── Справка об авторе при ПРЯМОМ обращении в группе (2026-07-26) ──
     # Решение Максима: когда бота зовут через @ или отвечают на его сообщение,
@@ -2002,68 +1973,6 @@ def author_brief(user_id: int | None) -> str:
     return _who_is_talking(user_id)
 
 
-def _last_news_block() -> str:
-    """
-    Справка о ПОСЛЕДНЕЙ новости, которую бот разослал сам (2026-08-16,
-    решение Максима «бот должен знать о своей рассылке везде»). Подставляется
-    во ВСЕ пути ответа: текст и фото (ask_gemini), голосовые
-    (ask_gemini_audio), видео (ask_gemini_video) и режим «Сам в разговор»
-    (_build_proactive_parts, а через него оба его пути — текстовый и медийный).
-    Везде идёт сразу за базой знаний: и то и другое — факты, а не характер.
-
-    Зачем: рассылку бот отправляет фоновой задачей (jobs/news.py), апдейтом
-    она не приходит и в личную переписку (таблица messages) не попадает
-    вовсе — на вопрос «что ты только что прислал?» бот честно не знал ответа.
-    В группах новость видна ещё и в стенограмме, но лишь пока не уедет из
-    окна последних сообщений; эта справка живёт до следующей новости.
-
-    ⚠️ ТЕКСТ ИДЁТ ЦЕЛИКОМ И В КАЖДЫЙ ЗАПРОС (решение Максима: «полный текст
-    сводки», «только последнюю»). Сводка бывает в пару тысяч символов —
-    столько и уходит, пока не придёт новая новость. Станет дорого — резать
-    надо здесь и осознанно, а не подкручивать где-то ещё.
-
-    ⚠️ В ПРОАКТИВНЫЙ РЕЖИМ БОЛЬШЕ НЕ ПОДСТАВЛЯЕТСЯ (2026-08-20) — см.
-    оговорку в `_build_proactive_parts`. Отсюда же 20.08 убран довод
-    `for_log`, который отдавал короткую строку для лога разговора: сокращать
-    стало нечего, раз блок туда вообще не попадает.
-
-    Возвращает готовый блок или "" (бот ещё ничего не рассылал / любая
-    ошибка — справка не должна ронять ответ).
-    """
-    try:
-        news = hist.get_last_news()
-    except Exception as e:
-        logger.debug("📰 Не удалось прочитать последнюю новость: %s", e)
-        return ""
-    if not news:
-        return ""
-
-    lines = [
-        "[Последняя новость, которую ты разослал]",
-        "Это твоя собственная публикация: ты сам разослал её в чат с сайта wtmobile.com. "
-        "Спросят о ней — отвечай как о своей новости, ссылку дать можно. "
-        "Сам разговор с неё не начинай, если о ней не спрашивают.",
-    ]
-    if news.get("title"):
-        lines.append(f"Заголовок: {news['title']}")
-    if news.get("url"):
-        lines.append(f"Ссылка: {news['url']}")
-    lines.append(f"Текст, который увидели люди:\n{news.get('text', '')}")
-    return "\n".join(lines)
-
-
-def last_news_brief() -> str:
-    """ПУБЛИЧНОЕ имя справки о последней разосланной новости — тот же текст,
-    что уходит модели (2026-08-16, для показа в панели промптов).
-
-    Заведена по образцу `author_brief`: панель не должна звать приватную
-    `_last_news_block` напрямую, иначе показанное владельцу и отправленное
-    модели однажды разъедутся. Источник один — меняешь состав блока, панель
-    подхватывает сама.
-    """
-    return _last_news_block()
-
-
 def _build_proactive_parts(chat_id: int, bot_id: int, trigger_text: str,
                            trigger_user_id: int | None) -> tuple:
     """
@@ -2274,7 +2183,9 @@ def _build_proactive_parts(chat_id: int, bot_id: int, trigger_text: str,
     #
     # В ОСТАЛЬНЫХ путях новость осталась: прямое обращение в группе и личка
     # (ask_gemini), голосовые (ask_gemini_audio), видео (ask_gemini_video).
-    # Вернуть сюда — одна строка `_part(_last_news_block())` на этом месте.
+    # ⚠️ 2026-08-20 память о последней новости удалена ЦЕЛИКОМ: сводка
+    # теперь ложится в контекст получателя при отправке (jobs/news.py) и
+    # уезжает из окна сама, как любое другое сообщение.
 
     who = _who_is_talking(trigger_user_id)
     if who:

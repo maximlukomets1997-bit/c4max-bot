@@ -774,6 +774,42 @@ def add_messages(
         conn.commit()
 
 
+def add_bot_message(chat_id: int, user_id: int, text: str) -> None:
+    """
+    Кладёт в личную память ОДНО сообщение бота — без вопроса человека рядом
+    (2026-08-20, решение Максима). Нужно рассылке новостей: бот пишет человеку
+    сам, апдейтом это не приходит, и без записи он через минуту не помнил бы,
+    что именно отправил.
+
+    Окно то же и подрезается так же, как в add_messages: последние
+    MAX_CONTEXT_MESSAGES сообщений этого пользователя по всем чатам. Значит
+    новость живёт как любое другое сообщение и уезжает из памяти сама — ради
+    этого всё и затевалось (прежняя «вечная» память о последней новости
+    удалена в тот же день).
+
+    ⚠️ Два сообщения бота подряд в истории — нормальная пара: проверено живым
+    запросом ко всем четырём провайдерам (Gemini, DeepSeek, Qwen, Xiaomi),
+    все ответили. Служебной строки «от лица человека» рядом не нужно.
+
+    Учёт токенов НЕ трогает: запроса к модели тут не было.
+    """
+    if not text:
+        return
+    with _lock:
+        conn = _get_connection()
+        conn.execute(
+            "INSERT INTO messages (chat_id, user_id, role, content, model_name) VALUES (?,?,?,?,?)",
+            (chat_id, user_id, "assistant", text, None),
+        )
+        conn.execute(
+            "DELETE FROM messages WHERE user_id=? AND id NOT IN ("
+            "SELECT id FROM messages WHERE user_id=? ORDER BY id DESC LIMIT ?)",
+            (user_id, user_id, MAX_CONTEXT_MESSAGES),
+        )
+        conn.commit()
+
+
+
 def clear_history(user_id: int):
     """Полностью удаляет объединённое контекстное окно пользователя (команда /clear).
 
@@ -854,62 +890,6 @@ def mark_news_as_sent(url: str):
         conn = _get_connection()
         conn.execute("INSERT OR IGNORE INTO sent_news (url) VALUES (?)", (url,))
         conn.commit()
-
-
-# ───────────────────────────────────────────────
-#  Последняя разосланная новость — память бота о своей публикации
-# ───────────────────────────────────────────────
-#
-#  ⚠️ 2026-08-16, решение Максима. Бот рассылал новость и тут же о ней
-#  забывал: в личной переписке (таблица messages) рассылки нет вовсе, а в
-#  архиве групп она жила только пока не уезжала из окна стенограммы. На
-#  вопрос «что ты там прислал?» бот честно не знал ответа.
-#
-#  ⚠️ ХРАНИМ В `settings`, А НЕ ОТДЕЛЬНОЙ ТАБЛИЦЕЙ — намеренно: новость
-#  ровно одна, схему базы ради одной строки не трогаем. Тот же приём уже
-#  используют суточный отчёт и недельный дайджест (json.dumps в set_setting).
-#  Понадобится история публикаций (а не последняя) — вот тогда таблица.
-#
-#  ⚠️ ХРАНИТСЯ ЦЕЛИКОМ И БЕЗ СРОКА ГОДНОСТИ (решение Максима: «полный текст
-#  сводки», «только последнюю»). Запись живёт до следующей новости, и весь
-#  её текст уходит модели в КАЖДЫЙ запрос — это осознанная цена.
-
-_LAST_NEWS_KEY = "last_news_json"
-
-
-def set_last_news(title: str, url: str, text: str) -> None:
-    """
-    Запоминает новость, которую бот только что разослал (одну, последнюю).
-    Никогда не бросает исключений: сбой памяти не должен ломать рассылку.
-    """
-    try:
-        set_setting(_LAST_NEWS_KEY, json.dumps(
-            {
-                "title": (title or "").strip(),
-                "url": (url or "").strip(),
-                "text": (text or "").strip(),
-                "at": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
-            },
-            ensure_ascii=False,
-        ))
-    except Exception as e:
-        logger.debug("📰 Не удалось запомнить последнюю новость: %s", e)
-
-
-def get_last_news() -> dict:
-    """
-    Последняя разосланная новость: {"title", "url", "text", "at"} или пустой
-    словарь, если бот ещё ничего не рассылал (или запись испорчена).
-    Время `at` — UTC, как и остальные отметки времени в базе.
-    """
-    raw = get_setting(_LAST_NEWS_KEY, "")
-    if not raw:
-        return {}
-    try:
-        data = json.loads(raw)
-    except Exception:
-        return {}
-    return data if isinstance(data, dict) and data.get("text") else {}
 
 
 def add_quiz_attempt(user_id: int, username: str, is_correct: bool):
