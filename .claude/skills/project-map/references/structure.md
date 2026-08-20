@@ -62,7 +62,7 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 | `handlers/admin/panel_users.py` | 1345 | 3 | `send_users_panel`, `send_user_card`, `cmd_users` |
 | `handlers/admin/panel_rag.py` | 1000 | 6 | `send_rag_panel`, `cmd_rag`, `handle_kb_document`, `handle_kb_test_query` (панель из трёх экранов: разделы → список раздела → настройки поиска) |
 | `handlers/admin/panel_mod.py` | 589 | 3 | `send_mod_panel`, `cmd_mod`, `cmd_unmute` |
-| `handlers/admin/panel_quiz.py` | 578 | 3 | `send_quiz_panel`, `cmd_quiz_admin` |
+| `handlers/admin/panel_quiz.py` | 581 | 3 | `send_quiz_panel`, `cmd_quiz_admin` |
 | `handlers/admin/panel_balance.py` | 442 | 3 | `send_balance_panel`, `handle_balance_input` |
 | `handlers/admin/panel_updates.py` | 181 | 3 | `send_updates_panel` |
 | `handlers/admin/panel_digest.py` | 179 | 2 | `digest_keyboard`, `send_digest_panel` |
