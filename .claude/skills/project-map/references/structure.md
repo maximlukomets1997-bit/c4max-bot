@@ -78,7 +78,7 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 | `services/proactive.py` | 644 | 2 | `skip_counts`, `is_enabled`, `hands_enabled`, `note_bot_group_reply`, `forget_conversations`, `consider_message` |
 | `services/tech_card.py` | 514 | 2 | `index`, `find_local`, `suggest`, `by_kind`, `by_title`, `token`, `by_token`, `load`, `render_card`, `render_section`, `render_candidates`, `kinds_summary`, `section_label`, `is_specs`, `short_title`, `kind_icon` |
 | `services/quiz_daily.py` | 177 | 3 | `is_enabled`, `set_enabled`, `day_key`, `due_now`, `note_sent`, `active`, `remember`, `forget`, `restore`, `next_run_label` (вопрос дня: расписание, тумблер, память о разосланных опросах) |
-| `services/quiz_bank.py` | 478 | 2 | `articles_without_questions`, `generate_for_article`, `generate_batch`, `retry_failed`, `stats`, `seed_stats`, `load_seed` |
+| `services/quiz_bank.py` | 486 | 2 | `articles_without_questions`, `generate_for_article`, `generate_batch`, `retry_failed`, `stats`, `seed_stats`, `load_seed` |
 | `services/greeter.py` | 418 | 3 | `is_enabled`, `captcha_enabled`, `kick_enabled`, `timeout_sec`, `on_chat_member`, `handle_join_callback` |
 | `services/scraper.py` | 346 | 1 | `fetch_latest_news`, `fetch_article` (сайт `https://wtmobile.com/ru/news`) |
 | `services/roles.py` | 311 | 11 | `load`, `make_moderator`, `unmake_moderator`, `grant_perm`, `is_owner`, `is_moderator`, `is_staff`, `role_of`, `can`, `has_any_perm`, `perms_of`, `list_moderators`, `can_act_on`, `perm_for_callback`, `may_press` |
@@ -109,7 +109,7 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 | путь | что это |
 |---|---|
 | `quiz/add.py` | отдельный скрипт (53 строки, `main`), тянет `services.quiz_bank`; из бота не вызывается |
-| `quiz/questions.json` | 143 КБ данных |
+| `quiz/questions.json` | 133 КБ данных, 219 вопросов; читается только на кнопку «📥 Загрузить мои вопросы» |
 | `knowledge/approved/` | статьи базы знаний (`.md`) — источник RAG и справочника `/ttx`; **в git не едет** (папка принадлежит серверу, 12.08.2026) |
 | `knowledge/pending/` | статьи, ждущие одобрения; тоже мимо git |
 | `knowledge/knowledge_base_vectors.json` | указатель RAG; строится ботом, в git не едет |
