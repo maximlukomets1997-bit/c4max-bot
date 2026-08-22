@@ -112,7 +112,14 @@ def _menu_keyboard(chat_id: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton("🎖 Моё звание", callback_data="menu:rank"),
             InlineKeyboardButton(f"📰 Новости: {_onoff(news)}", callback_data="menu:news"),
         ],
-        [InlineKeyboardButton("📖 Все команды", callback_data="menu:help")],
+        # «Очистить историю» переехала сюда с экрана «🎖 Моё звание»
+        # (решение Максима 2026-08-22): все публичные кнопки собраны на одном
+        # экране. Ветка та же самая, clear_history_btn в роутере — она стоит
+        # ДО гейта прав, значит кнопка доступна всем, как и была.
+        [
+            InlineKeyboardButton("📖 Все команды", callback_data="menu:help"),
+            InlineKeyboardButton("🗑️ Очистить историю", callback_data="clear_history_btn"),
+        ],
     ])
 
 

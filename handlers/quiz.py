@@ -316,12 +316,14 @@ async def send_rank_panel(bot, chat_id: int, user):
         f"👉 {progress_text}"
     )
 
+    # 2026-08-22: «🗑️ Очистить историю» отсюда УБРАНА — переехала на главный
+    # экран /start (handlers/commands.py::_menu_keyboard). Обратно не
+    # возвращать: две одинаковые кнопки на соседних экранах Максим не просил.
     rank_keyboard = InlineKeyboardMarkup([
         [
             InlineKeyboardButton("🎮 Викторина", callback_data="quiz_start"),
-            InlineKeyboardButton("🗑️ Очистить историю", callback_data="clear_history_btn"),
+            InlineKeyboardButton("⬅️ Главное меню", callback_data="menu:back"),
         ],
-        [InlineKeyboardButton("⬅️ Главное меню", callback_data="menu:back")],
     ])
 
     sent_msg = await bot.send_message(
