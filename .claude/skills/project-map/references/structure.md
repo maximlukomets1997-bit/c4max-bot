@@ -47,7 +47,7 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 | `handlers/commands.py` | 416 | 4 | `public_commands`, `bot_display_name`, `cmd_start`, `cmd_help`, `cmd_clear`, `cmd_subscribe`, `cmd_unsubscribe`, `handle_menu_callback`, `log_incoming_command`, `handle_unknown_command` |
 | `handlers/messages.py` | 511 | 1 | `handle_photo`, `handle_voice`, `handle_video`, `handle_message`, `collect_group_message` |
 | `handlers/media.py` | 93 | 1 | `cmd_imagine` |
-| `handlers/quiz.py` | 376 | 5 | `send_quiz_question`, `cmd_quiz`, `cmd_rank`, `send_rank_panel`, `handle_poll_answer` |
+| `handlers/quiz.py` | 422 | 5 | `send_quiz_question`, `cmd_quiz`, `cmd_rank`, `send_rank_panel`, `handle_poll_answer` |
 | `handlers/tech.py` | 485 | 3 | `cmd_ttx`, `catalog_text`, `catalog_keyboard`, `handle_ttx_callback`, `inline_ttx` |
 
 ## `handlers/admin/` — админ-панели

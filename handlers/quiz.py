@@ -13,15 +13,49 @@ ACTIVE_QUIZZES = {}
 logger = logging.getLogger(__name__)
 
 
+# Сколько живёт викторина ПО КНОПКЕ. У вопроса дня таймеров нет вовсе.
+# ⚠️ Числа подставляются в лог ОТСЮДА, а не пишутся в строку словами: зашитое
+# в текст число переживает правку и начинает врать молча — проект на этом уже
+# стоял. Меняешь срок — меняешь ровно одну из этих двух величин.
+QUIZ_THINK_SEC        = 60   # столько ждём ответа, пока вопрос висит нетронутым
+QUIZ_AFTER_ANSWER_SEC = 30   # столько вопрос ещё виден ПОСЛЕ ответа
+
+
 async def _auto_delete_quiz(context, chat_id: int, message_id: int, poll_id: str):
-    """Через 60 сек удаляет викторину (отвеченную или нет) и пишет об этом в лог."""
-    await asyncio.sleep(60)
+    """
+    Убирает викторину по кнопке. Отсчёт зависит от того, ответили или нет
+    (решение Максима 2026-08-22):
+      • ответили — вопрос виден ещё QUIZ_AFTER_ANSWER_SEC сек (успеть прочесть
+        разбор) и удаляется;
+      • не ответили за QUIZ_THINK_SEC сек — удаляется как есть.
+
+    ⚠️ Раньше таймер был ОДИН на оба случая: 60 сек от появления вопроса.
+    Замеры по журналу за 22.08.2026 (108 вопросов подряд): дольше 30 сек
+    Максим думает над каждым четвёртым вопросом, дольше 60 — раз за день.
+    Поэтому «просто уменьшить срок» нельзя: исчезнувший вопрос уже не
+    ответишь, а следующий приходит ТОЛЬКО в ответ на ответ — марафон встаёт
+    молча. Отсюда два отдельных срока, а не один.
+    """
     info = ACTIVE_QUIZZES.get(poll_id)
-    answered = bool(info and info.get("triggered_next"))
+    event = info.get("answered_event") if info else None
+    answered = False
+    try:
+        if event is None:
+            # Отметки об ответе нет (вопрос пришёл не из send_quiz_question) —
+            # ведём себя как прежде: ждём срок раздумий и убираем.
+            await asyncio.sleep(QUIZ_THINK_SEC)
+        else:
+            await asyncio.wait_for(event.wait(), timeout=QUIZ_THINK_SEC)
+            answered = True
+            await asyncio.sleep(QUIZ_AFTER_ANSWER_SEC)
+    except asyncio.TimeoutError:
+        pass  # за срок раздумий не ответили — убираем вопрос
     try:
         await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-        logger.info("🎮 Викторина авто-удалена через 60 сек (чат %s, %s)",
-                    chat_id, "был ответ" if answered else "без ответа")
+        logger.info(
+            "🎮 Викторина убрана (чат %s, %s)", chat_id,
+            f"через {QUIZ_AFTER_ANSWER_SEC} сек после ответа" if answered
+            else f"без ответа за {QUIZ_THINK_SEC} сек")
     except Exception:
         pass  # уже удалена / нет прав — молча
 
@@ -103,6 +137,10 @@ async def send_quiz_question(chat_id: int, context: ContextTypes.DEFAULT_TYPE,
             # ответивший запускал поток вопросов в группе. Метка читается
             # в handle_poll_answer.
             "auto": auto,
+            # Сигнал «на этот вопрос ответили» для задачи удаления
+            # (_auto_delete_quiz). Ставит его handle_poll_answer. У вопроса
+            # дня удаления нет вовсе — значит, и ждать сигнал некому.
+            "answered_event": None if auto else asyncio.Event(),
             "question": q["question"],
             "options": q["options"],
             "explanation": q["explanation"]
@@ -116,7 +154,8 @@ async def send_quiz_question(chat_id: int, context: ContextTypes.DEFAULT_TYPE,
             note_quiz_question_asked(q["id"])
         logger.info("🎮 Новая викторина отправлена (чат %s)", chat_id)
 
-        # Авто-удаление через 60 сек — только у вопроса ПО КНОПКЕ.
+        # Авто-удаление — только у вопроса ПО КНОПКЕ; сроки и правило
+        # «после ответа / без ответа» — в _auto_delete_quiz.
         # ⚠️ У вопроса дня удаления нет намеренно: минута жизни означала бы, что
         # его увидит только тот, кто смотрел в чат ровно в полдень. Вчерашний
         # опрос убирает следующая суточная отправка (jobs/reports.py).
@@ -315,6 +354,13 @@ async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if selected_option is None:
         return
         
+    # Ответ пришёл — отсюда задача удаления начинает отсчитывать свой срок
+    # (_auto_delete_quiz). Ставится на ЛЮБОЙ ответ, верный или нет, и только
+    # один раз: у вопроса дня отметки нет вовсе, там удаления не бывает.
+    answered_event = quiz_info.get("answered_event")
+    if answered_event is not None and not answered_event.is_set():
+        answered_event.set()
+
     is_correct = (selected_option == correct_idx)
     
     # Получаем старую статистику перед записью
