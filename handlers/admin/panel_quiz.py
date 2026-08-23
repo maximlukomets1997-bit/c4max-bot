@@ -181,7 +181,10 @@ def _build_panel(context):
     )
 
     rows = [
-        [InlineKeyboardButton(f"🕛 ВОПРОС ДНЯ В 12:00: {_onoff(auto_on)}",
+        # Часы в надписи — ИЗ РАСПИСАНИЯ (quiz_daily.hours_label), а не строкой:
+        # зашитое «В 12:00» пережило добавление вечернего срока и начало бы
+        # врать — те же грабли, что с именем модели в логе.
+        [InlineKeyboardButton(f"🕛 ВОПРОС ДНЯ {quiz_daily.hours_label()}: {_onoff(auto_on)}",
                               callback_data="quiz:auto")],
         [InlineKeyboardButton("🧠 Собрать вопросы", callback_data="quiz:gen")],
         [

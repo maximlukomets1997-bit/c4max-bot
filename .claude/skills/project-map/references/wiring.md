@@ -44,7 +44,8 @@
 | `auto_update_loop` | `jobs/update.py` |
 
 `jobs/reports.py` отдаёт наружу ещё `weekly_group_digest`, `nightly_backup` и
-`daily_quiz` (вопрос дня, 12:00 по Киеву);
+`daily_quiz` (вопрос дня, сроки из `config.QUIZ_AUTO_HOURS` — 12:00 и 18:00
+по Киеву);
 `jobs/update.py` — `forget_update_notice`.
 
 ## Регистрация обработчиков — только `handlers/__init__.py::setup_handlers`

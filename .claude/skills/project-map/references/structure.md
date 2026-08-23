@@ -22,7 +22,7 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 |---|---:|---:|---|
 | `bot.py` | 11 | 0 | — (только вызывает `main.main`) |
 | `main.py` | 580 | 1 | `post_init`, `post_stop`, `post_shutdown`, `main` |
-| `config.py` | 1088 | 34 | `read_build_mark` + 106 констант верхнего уровня (заводские тексты всех пяти промптов — пустые строки) |
+| `config.py` | 1092 | 34 | `read_build_mark` + 106 констант верхнего уровня (заводские тексты всех пяти промптов — пустые строки) |
 | `utils.py` | 181 | 19 | `should_respond_in_group`, `clean_mention`, `keep_chat_action`, `delete_user_message_safe`, `mention`, `schedule_delete`, `register_and_clean_bot_message` |
 | `utils_format.py` | 304 | 8 | `strip_thoughts`, `thoughts_enabled`, `build_text_and_entities`, `send_formatted`, `convert_md`, `fits_caption`, `reply_md` |
 | `logging_setup.py` | 248 | 3 | `archive_old_logs`, `setup_logging` |
@@ -47,7 +47,7 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 | `handlers/commands.py` | 423 | 4 | `public_commands`, `bot_display_name`, `cmd_start`, `cmd_help`, `cmd_clear`, `cmd_subscribe`, `cmd_unsubscribe`, `handle_menu_callback`, `log_incoming_command`, `handle_unknown_command` |
 | `handlers/messages.py` | 511 | 1 | `handle_photo`, `handle_voice`, `handle_video`, `handle_message`, `collect_group_message` |
 | `handlers/media.py` | 93 | 1 | `cmd_imagine` |
-| `handlers/quiz.py` | 424 | 5 | `send_quiz_question`, `cmd_quiz`, `cmd_rank`, `send_rank_panel`, `handle_poll_answer` |
+| `handlers/quiz.py` | 425 | 5 | `send_quiz_question`, `cmd_quiz`, `cmd_rank`, `send_rank_panel`, `handle_poll_answer` |
 | `handlers/tech.py` | 485 | 3 | `cmd_ttx`, `catalog_text`, `catalog_keyboard`, `handle_ttx_callback`, `inline_ttx` |
 
 ## `handlers/admin/` — админ-панели
@@ -59,10 +59,10 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 | `handlers/admin/router.py` | 707 | 1 | `handle_callback_query` — единственный роутер всех кнопок |
 | `handlers/admin/panel_main.py` | 445 | 4 | `send_stats_panel`, `send_api_panel`, `send_daily_report_panel`, `send_weekly_report_panel`, `cmd_stats`, `build_adm_keyboard`, `send_adm_panel`, `cmd_adm` |
 | `handlers/admin/panel_prompts.py` | 1330 | 3 | `send_prompt_files`, `send_prompts_panel`, `handle_prompt_reset`, `cmd_prompt_set/add/reset`, `cmd_news_prompt_set/reset`, `cmd_rag_prompt_set/reset`, `cmd_author_prompt_set/reset`, `cmd_proactive_prompt_set/reset` |
-| `handlers/admin/panel_users.py` | 1345 | 3 | `send_users_panel`, `send_user_card`, `cmd_users` |
+| `handlers/admin/panel_users.py` | 1346 | 3 | `send_users_panel`, `send_user_card`, `cmd_users` |
 | `handlers/admin/panel_rag.py` | 1000 | 6 | `send_rag_panel`, `cmd_rag`, `handle_kb_document`, `handle_kb_test_query` (панель из трёх экранов: разделы → список раздела → настройки поиска) |
 | `handlers/admin/panel_mod.py` | 589 | 3 | `send_mod_panel`, `cmd_mod`, `cmd_unmute` |
-| `handlers/admin/panel_quiz.py` | 581 | 3 | `send_quiz_panel`, `cmd_quiz_admin` |
+| `handlers/admin/panel_quiz.py` | 584 | 3 | `send_quiz_panel`, `cmd_quiz_admin` |
 | `handlers/admin/panel_balance.py` | 442 | 3 | `send_balance_panel`, `handle_balance_input` |
 | `handlers/admin/panel_updates.py` | 181 | 3 | `send_updates_panel` |
 | `handlers/admin/panel_digest.py` | 179 | 2 | `digest_keyboard`, `send_digest_panel` |
@@ -77,7 +77,7 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 | `services/rag.py` | 795 | 5 | `cosine_similarity`, `RagQuotaError`, `get_embedding`, `parse_article_file`, `is_active`, `sync_knowledge_base`, `index_lag`, `rebuild_knowledge_base`, `normalize_query`, `retrieve_relevant_context`, `test_search` |
 | `services/proactive.py` | 644 | 2 | `skip_counts`, `is_enabled`, `hands_enabled`, `note_bot_group_reply`, `forget_conversations`, `consider_message` |
 | `services/tech_card.py` | 514 | 2 | `index`, `find_local`, `suggest`, `by_kind`, `by_title`, `token`, `by_token`, `load`, `render_card`, `render_section`, `render_candidates`, `kinds_summary`, `section_label`, `is_specs`, `short_title`, `kind_icon` |
-| `services/quiz_daily.py` | 177 | 3 | `is_enabled`, `set_enabled`, `day_key`, `due_now`, `note_sent`, `active`, `remember`, `forget`, `restore`, `next_run_label` (вопрос дня: расписание, тумблер, память о разосланных опросах) |
+| `services/quiz_daily.py` | 233 | 3 | `is_enabled`, `set_enabled`, `day_key`, `hours_label`, `due_now`, `note_sent`, `active`, `remember`, `forget`, `restore`, `next_run_label` (вопрос дня: расписание, тумблер, память о разосланных опросах) |
 | `services/quiz_bank.py` | 486 | 2 | `articles_without_questions`, `generate_for_article`, `generate_batch`, `retry_failed`, `stats`, `seed_stats`, `load_seed` |
 | `services/greeter.py` | 418 | 3 | `is_enabled`, `captcha_enabled`, `kick_enabled`, `timeout_sec`, `on_chat_member`, `handle_join_callback` |
 | `services/scraper.py` | 346 | 1 | `fetch_latest_news`, `fetch_article` (сайт `https://wtmobile.com/ru/news`) |
@@ -97,7 +97,7 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 | файл | строк | публичные имена |
 |---|---:|---|
 | `jobs/__init__.py` | 37 | re-export; новая задача, не вписанная сюда, роняет старт `main.py` |
-| `jobs/reports.py` | 401 | `daily_report_loop`, `weekly_group_digest`, `nightly_backup` |
+| `jobs/reports.py` | 405 | `daily_report_loop`, `weekly_group_digest`, `daily_quiz`, `nightly_backup` |
 | `jobs/cleanup.py` | 234 | `cleanup_loop` |
 | `jobs/update.py` | 221 | `forget_update_notice`, `auto_update_loop` |
 | `jobs/news.py` | 230 | `send_news_to_chat`, `news_polling_loop` |
