@@ -54,6 +54,9 @@ import re
 import time
 
 from config import (
+    PROACTIVE_ALBUM_MAX_PHOTOS,
+    PROACTIVE_ALBUM_MAX_WAIT_SEC,
+    PROACTIVE_ALBUM_WAIT_SEC,
     PROACTIVE_ENABLED_DEFAULT,
     PROACTIVE_MIN_MSGS,
     PROACTIVE_HANDS_DEFAULT,
@@ -75,6 +78,25 @@ _msgs_since_check: dict[int, int] = {}    # chat_id → новых сообще�
 _last_judge_ts: dict[int, float] = {}     # chat_id → monotonic последней проверки моделью
 _last_reply_ts: dict[int, float] = {}     # chat_id → monotonic последней реплики бота
 _in_flight: set[int] = set()              # чаты с проверкой «в полёте» (защёлка от гонки)
+
+# ─── копилка альбома (2026-08-27, просьба Максима) ───────────────────
+#
+#  Telegram шлёт альбом НЕ одной посылкой, а несколькими сообщениями подряд.
+#  До этой правки первый кадр запускал проверку и взводил защёлку `_in_flight`,
+#  а остальные упирались в неё и отсеивались с причиной «в полёте» — модель
+#  видела один кадр из шести и совершенно логично молчала (живой случай
+#  27.08.2026, чат -1002682757322: шесть фото в 14:41:53, одна проверка).
+#
+#  Теперь первый кадр открывает копилку, следующие кадры того же альбома в неё
+#  складываются, а проверка ждёт (см. _collect_album) и забирает всё разом.
+#
+#  ⚠️ КОПИЛКА НА ЧАТ ОДНА, и это не упрощение: защёлка `_in_flight` и так не
+#  даёт начаться второй проверке в том же чате, значит и второго альбома в
+#  сборе быть не может. Ключ альбома всё равно храним — чтобы не подмешать в
+#  проверку кадры СЛЕДУЮЩЕГО альбома, если человек шлёт их один за другим.
+#
+#  Как и всё остальное здесь, живёт в памяти и обнуляется перезапуском.
+_albums: dict[int, dict] = {}             # chat_id → {"id", "file_ids", "message_ids", "last_add"}
 
 # Исходы проверки человеческими словами — для строки «ИТОГ» в логе разговора.
 # Коды те же, что уходят в журнал proactive_log.
@@ -173,7 +195,8 @@ def _extract_mute(answer: str) -> tuple[str, int | None]:
 
 
 async def _apply_mute(bot, chat_id: int, user_id: int | None, seconds: int,
-                      trigger_text: str, message_id: int | None = None) -> bool:
+                      trigger_text: str, message_id: int | None = None,
+                      album_message_ids: list[int] | None = None) -> bool:
     """
     Выдаёт мут, решённый моделью, и уведомляет владельцев.
 
@@ -190,8 +213,13 @@ async def _apply_mute(bot, chat_id: int, user_id: int | None, seconds: int,
     флуде и ссылках); путь «мут решила модель» их не звал вовсе, и грубость
     оставалась висеть в чате при замолчавшем авторе.
 
-    Возвращает True, если сообщение удалено, — вызывающий по этому признаку
-    отправляет реплику БЕЗ Reply: ссылаться на удалённое незачем.
+    ⚠️ АЛЬБОМ УДАЛЯЕТСЯ ЦЕЛИКОМ (2026-08-27, решение Максима при утверждении
+    правки про альбомы). album_message_ids — все кадры отправления; без них
+    сносился бы один кадр из шести, а остальные пять висели бы в чате при
+    замолчавшем авторе — то же самое, что чинили 11.08, только в профиль.
+
+    Возвращает True, если сообщение-триггер удалено, — вызывающий по этому
+    признаку отправляет реплику БЕЗ Reply: ссылаться на удалённое незачем.
     Удаление тихое: нет прав или сообщение уже стёрли — мут всё равно выдан.
     """
     if not user_id:
@@ -208,15 +236,26 @@ async def _apply_mute(bot, chat_id: int, user_id: int | None, seconds: int,
     logger.info("🤖 Чат %s: бот сам выдал мут %s на %d сек", chat_id, user_id, seconds)
     await notify_owners_ai_mute(bot, chat_id, user_id, str(user_id), seconds, trigger_text)
 
+    # Сносим все кадры отправления. Порядок важен только для возвращаемого
+    # признака: он про сообщение-триггер, на которое иначе пошёл бы Reply.
+    to_delete = list(album_message_ids or [])
+    if message_id and message_id not in to_delete:
+        to_delete.insert(0, message_id)
+
     deleted = False
-    if message_id:
+    done = 0
+    for _mid in to_delete:
         try:
-            await bot.delete_message(chat_id=chat_id, message_id=message_id)
-            deleted = True
-            logger.info("🤖 Чат %s: сообщение %s, за которое выдан мут, удалено", chat_id, message_id)
+            await bot.delete_message(chat_id=chat_id, message_id=_mid)
+            done += 1
+            if _mid == message_id:
+                deleted = True
         except Exception as e:
             logger.warning("🤖 Чат %s: мут выдан, но сообщение %s удалить не вышло: %s",
-                           chat_id, message_id, e)
+                           chat_id, _mid, e)
+    if done:
+        logger.info("🤖 Чат %s: за мут удалено сообщений: %d из %d",
+                    chat_id, done, len(to_delete))
     return deleted
 
 
@@ -243,6 +282,74 @@ def forget_conversations() -> None:
     _msgs_since_check.clear()
 
 
+def _album_open(chat_id: int, album_id: str, file_id: str | None, message_id: int) -> None:
+    """
+    Открыть копилку под альбом, кадр-триггер кладём в неё первым.
+
+    Зовётся из consider_message РЯДОМ с защёлкой `_in_flight` и по тем же
+    правилам: между открытием копилки и запуском задачи не должно быть await.
+    """
+    _albums[chat_id] = {
+        "id": album_id,
+        "file_ids": [file_id] if file_id else [],
+        "message_ids": [message_id],
+        "last_add": time.monotonic(),
+    }
+
+
+def _album_add(chat_id: int, message) -> bool:
+    """
+    Положить кадр в копилку, если он из ТОГО ЖЕ альбома, что собирается сейчас.
+
+    Возвращает True, если кадр принят, — тогда consider_message не отсеивает
+    его как «в полёте»: кадр не потерян, он уедет модели вместе с остальными.
+
+    ⚠️ ВИДЕО ИЗ СМЕШАННОГО АЛЬБОМА В КОПИЛКУ НЕ ИДЁТ (решение при утверждении
+    плана 27.08.2026): у роликов свой потолок размера и своя цена разбора,
+    городить оба правила внутри копилки Максим не просил. Само сообщение при
+    этом всё равно считается принятым — заводить по нему отдельную проверку
+    нельзя, чат уже занят.
+    """
+    album = _albums.get(chat_id)
+    if not album or album["id"] != (message.media_group_id or ""):
+        return False
+    if message.photo and len(album["file_ids"]) < PROACTIVE_ALBUM_MAX_PHOTOS:
+        album["file_ids"].append(message.photo[-1].file_id)
+    album["message_ids"].append(message.message_id)
+    album["last_add"] = time.monotonic()
+    return True
+
+
+async def _collect_album(chat_id: int, album_id: str) -> tuple[list[str], list[int]]:
+    """
+    Дождаться остальных кадров альбома и забрать копилку целиком.
+
+    Ждём PROACTIVE_ALBUM_WAIT_SEC ТИШИНЫ — то есть отсчёт идёт от ПОСЛЕДНЕГО
+    приехавшего кадра, а не от первого: Telegram растягивает доставку альбома,
+    и отсчёт от первого обрезал бы хвост. Сверху всё ограничено
+    PROACTIVE_ALBUM_MAX_WAIT_SEC: защёлка `_in_flight` взведена, и подвисшая
+    доставка иначе держала бы чат «занятым» сколько угодно долго.
+
+    Возвращает (file_id кадров, id сообщений альбома). Пустые списки —
+    значит копилки нет, и проверка работает по одному кадру, как раньше.
+    """
+    started = time.monotonic()
+    while True:
+        album = _albums.get(chat_id)
+        if not album or album["id"] != album_id:
+            return [], []          # копилки нет — работаем по одному кадру
+        if time.monotonic() - album["last_add"] >= PROACTIVE_ALBUM_WAIT_SEC:
+            break
+        if time.monotonic() - started >= PROACTIVE_ALBUM_MAX_WAIT_SEC:
+            logger.info("🤖 Чат %s: альбом собирается дольше %.0f с — "
+                        "берём то, что успело приехать",
+                        chat_id, PROACTIVE_ALBUM_MAX_WAIT_SEC)
+            break
+        await asyncio.sleep(0.25)
+    album = _albums.pop(chat_id, None) or {}
+    return list(album.get("file_ids") or []), list(album.get("message_ids") or [])
+
+
 def consider_message(update, context) -> None:
     """
     Точка входа: зовётся в конце collect_group_message на КАЖДОЕ сообщение
@@ -258,6 +365,17 @@ def consider_message(update, context) -> None:
         if not message or not chat or not user:
             return
         chat_id = chat.id
+
+        # ── Кадр альбома, который уже собирается? (2026-08-27) ──
+        # Стоит ВЫШЕ счётчика и всех фильтров намеренно. Выше фильтров —
+        # потому что кадр не отсеивается, а едет модели вместе с первым.
+        # Выше счётчика — потому что альбом это ОДНО отправление: считать
+        # шесть кадров за шесть сообщений значило бы приближать следующую
+        # проверку вшестеро быстрее (так же на альбом смотрит и антиспам,
+        # см. services/antispam.py::check_and_mute).
+        if message.media_group_id and _album_add(chat_id, message):
+            logger.info("🤖 Чат %s: кадр альбома добавлен в идущую проверку", chat_id)
+            return
 
         # Каждое сообщение чата приближает следующую проверку — в том числе
         # команды и обращения к боту (это тоже живость беседы).
@@ -316,14 +434,22 @@ def consider_message(update, context) -> None:
         (has_photo, photo_file_id, has_voice, voice_file_id,
          has_video, video_file_id, video_mime) = _media_args(message, chat_id)
 
+        # Первый кадр альбома открывает копилку — остальные лягут в неё веткой
+        # в начале этой же функции, а проверка их дождётся (_collect_album).
+        # Одиночному сообщению копилка не заводится вовсе: ждать нечего.
+        album_id = message.media_group_id or ""
+        if album_id:
+            _album_open(chat_id, album_id, photo_file_id, message.message_id)
+
         try:
             context.application.create_task(
                 _run_proactive(context.bot, chat_id, message.message_id, text,
                                user.id, has_photo, photo_file_id, has_voice, voice_file_id,
-                               has_video, video_file_id, video_mime)
+                               has_video, video_file_id, video_mime, album_id)
             )
         except Exception:
             _in_flight.discard(chat_id)
+            _albums.pop(chat_id, None)
             raise
     except Exception as e:
         logger.debug("🤖 Ошибка проактивной проверки: %s", e)
@@ -332,8 +458,12 @@ def consider_message(update, context) -> None:
 def _media_args(message, chat_id: int) -> tuple:
     """
     Что за вложение пришло и какие file_id отдавать проверке.
-    Вынесено из consider_message 2026-08-11 — тем же кодом пользуется очередь
-    пропущенных сообщений (_pending), иначе сбор пришлось бы дублировать.
+
+    Вынесено из consider_message 2026-08-11 ради очереди пропущенных сообщений
+    (_pending). Очередь в тот же день убрали (см. предупреждение в
+    consider_message), и с тех пор зовущий здесь ОДИН — сама consider_message.
+    Строку про второго читателя правил 27.08.2026: она пережила удаление
+    очереди и с тех пор врала.
     """
     has_photo = bool(message.photo)
     has_voice = bool(message.voice or message.audio)
@@ -372,7 +502,7 @@ async def _run_proactive(bot, chat_id: int, trigger_message_id: int, trigger_tex
                          has_photo: bool = False, photo_file_id: str | None = None,
                          has_voice: bool = False, voice_file_id: str | None = None,
                          has_video: bool = False, video_file_id: str | None = None,
-                         video_mime: str = "video/mp4"):
+                         video_mime: str = "video/mp4", album_id: str = ""):
     """
     Фоновая часть: активная думающая модель И решает «вступать или молчать»,
     И пишет реплику (одношаговая схема). Статус «печатает…» НЕ включается
@@ -386,6 +516,11 @@ async def _run_proactive(bot, chat_id: int, trigger_message_id: int, trigger_tex
     Так бот «видит» и «слышит» контекст перед решением — как в личке.
     Ветки взаимоисключающие (elif): в одном сообщении Telegram может быть
     только одно вложение, а два разбора подряд — лишний расход впустую.
+
+    album_id непустой — триггер оказался первым кадром альбома: проверка ждёт
+    остальные кадры (_collect_album) и дальше идёт по ПАЧКЕ картинок. Разбор
+    для стенограммы при этом всё равно ОДИН на весь альбом, и запрос за
+    репликой тоже один — просто в обоих лежит несколько изображений.
 
     Каждый исход пишется в журнал проверок (`proactive_log`, 2026-07-31) —
     вступил бот или промолчал, сколько думала модель, что было триггером.
@@ -427,12 +562,32 @@ async def _run_proactive(bot, chat_id: int, trigger_message_id: int, trigger_tex
     try:
         loop = asyncio.get_running_loop()
 
+        # ── Сборка альбома (2026-08-27) ──
+        # Триггер оказался первым кадром альбома — ждём остальные. Одиночному
+        # сообщению эта ветка не стоит ничего: album_id пуст, ожидания нет.
+        album_photo_ids: list[str] = []
+        album_message_ids: list[int] = []
+        if album_id:
+            album_photo_ids, album_message_ids = await _collect_album(chat_id, album_id)
+            if len(album_photo_ids) > 1:
+                logger.info("🤖 Чат %s: альбом собран — %d фото в одной проверке",
+                            chat_id, len(album_photo_ids))
+            # ⚠️ ОТСЧЁТ ВРЕМЕНИ ПРОВЕРКИ НАЧИНАЕМ ЗАНОВО: в журнал (proactive_log)
+            # уходит «сколько думала модель», и секунды ожидания альбома там были
+            # бы прямым враньём — панель промптов показывает это число средним.
+            # `_note` объявлен выше, но читает переменную, а не её старое
+            # значение, поэтому присваивание здесь до него доходит.
+            started = time.monotonic()
+
         # ── Анализ медиа-триггера (фото / голосовое) ──
         enriched_text = trigger_text
         # Файл держим под рукой: с 2026-08-11 на медиа отвечает та же
         # модель, что его смотрит (ask_group_proactive_media), и ей нужен
         # сам файл, а не пересказ. Пусто — значит скачать не вышло.
         media_b64 = media_mime = media_kind = ""
+        # Второй и дальше кадры альбома. Заводится ЗДЕСЬ, а не в ветке фото:
+        # ниже список читается безусловно, а ветка могла и не сработать.
+        album_images_extra: list[str] = []
         if has_photo and photo_file_id:
             try:
                 import base64 as _b64
@@ -441,12 +596,40 @@ async def _run_proactive(bot, chat_id: int, trigger_message_id: int, trigger_tex
                 # активную модель НЕ проверяет — фото описывается ВСЕГДА, какая
                 # бы модель ни стояла. Читать лог по этой строке было нельзя.
                 logger.info("🤖 Чат %s: триггер — фото → описание через Gemini", chat_id)
-                photo_file = await bot.get_file(photo_file_id)
-                file_bytes = await photo_file.download_as_bytearray()
-                image_base64 = _b64.b64encode(file_bytes).decode('utf-8')
-                media_b64, media_mime, media_kind = image_base64, "image/jpeg", "фото"
+                # Кадры альбома, если он был; иначе одна картинка триггера.
+                # Потолок стоит уже в копилке (PROACTIVE_ALBUM_MAX_PHOTOS) —
+                # второй раз здесь не режем, чтобы два правила не разъехались.
+                photo_ids = album_photo_ids or [photo_file_id]
+                images_b64: list[str] = []
+                total_bytes = 0
+                for _fid in photo_ids:
+                    # Каждый кадр — со своей страховкой: сорвавшаяся закачка
+                    # ОДНОГО кадра не должна отменять разбор всего альбома.
+                    # Без этого один сетевой сбой на пятой картинке возвращал
+                    # бы нас ровно туда, откуда уходили: модель не видит ничего.
+                    try:
+                        _file = await bot.get_file(_fid)
+                        _bytes = await _file.download_as_bytearray()
+                    except Exception as e:
+                        logger.warning("🤖 Чат %s: кадр альбома не скачался, идём дальше: %s",
+                                       chat_id, e)
+                        continue
+                    total_bytes += len(_bytes)
+                    images_b64.append(_b64.b64encode(_bytes).decode('utf-8'))
+                if not images_b64:
+                    raise RuntimeError("ни один кадр не скачался")
+                # ⚠️ media_kind ОБЯЗАН остаться словом «фото»: по нему
+                # ask_group_proactive_media проверяет, умеет ли модель цепочки
+                # смотреть картинки (_supports_vision), и выбирает таймаут.
+                # Напишешь сюда «альбом» — проверка перестанет срабатывать, и
+                # запрос уйдёт модели, которая картинок не видит.
+                media_b64, media_mime, media_kind = images_b64[0], "image/jpeg", "фото"
+                album_images_extra = images_b64[1:]
+                # Разбор для стенограммы ОДИН на весь альбом (а не по разбору
+                # на кадр): в стенограмме одно отправление — одна строка, да и
+                # платить за шесть отдельных запросов не за что.
                 description = await loop.run_in_executor(
-                    None, _describe_image, image_base64,
+                    None, _describe_image, images_b64[0], 0, images_b64[1:],
                 )
                 if description:
                     # ⚠️ ТЕКСТА РАЗБОРА В ЛОГЕ НЕТ — решение Максима 2026-08-11
@@ -456,11 +639,15 @@ async def _run_proactive(bot, chat_id: int, trigger_message_id: int, trigger_tex
                     # ловили 10.08. Сам разбор не пропадает — он оседает в
                     # стенограмме группы (save_group_message ниже), там его и
                     # смотреть. Не возвращать текст в лог без просьбы Максима.
-                    logger.info("🤖 Чат %s: фото проанализировано (%d символов)",
-                                chat_id, len(description))
+                    logger.info("🤖 Чат %s: фото проанализировано (%d шт, %d символов)",
+                                chat_id, len(images_b64), len(description))
                     # Сам текст разбора — в лог разговора (в общий по-прежнему
-                    # не пишем, см. предупреждение выше).
-                    chat_log.note_media("фото", len(file_bytes), description)
+                    # не пишем, см. предупреждение выше). В подписи говорим,
+                    # сколько кадров ушло: иначе по логу не отличить альбом,
+                    # собранный целиком, от альбома, у которого взяли первый кадр.
+                    chat_log.note_media(
+                        f"альбом из {len(images_b64)} фото" if len(images_b64) > 1 else "фото",
+                        total_bytes, description)
                     # ⚠️ ОПИСАНИЕ ОБЁРНУТО В КВАДРАТНЫЕ СКОБКИ — 2026-08-10,
                     # разбор жалобы Максима «бот шутит про ИИ, людей это бесит».
                     # ⚠️ Внутри скобок ТОЛЬКО текст модели, без приписки «на
@@ -572,9 +759,12 @@ async def _run_proactive(bot, chat_id: int, trigger_message_id: int, trigger_tex
         # онемеет из-за отказа Google.
         answer = None
         if media_b64:
+            # Остальные кадры альбома (если он был) идут тем же запросом —
+            # модель смотрит все картинки разом, а не первую из шести.
+            extra_media = [(b64, "image/jpeg") for b64 in album_images_extra]
             answer = await loop.run_in_executor(
                 None, ask_group_proactive_media, chat_id, bot.id, enriched_text,
-                trigger_user_id, media_b64, media_mime, media_kind,
+                trigger_user_id, media_b64, media_mime, media_kind, extra_media,
             )
         if answer is None:
             answer = await loop.run_in_executor(
@@ -599,7 +789,7 @@ async def _run_proactive(bot, chat_id: int, trigger_message_id: int, trigger_tex
             logger.info("🤖 Чат %s: реплика пустая после разбора пометки", chat_id)
             if mute_sec:
                 await _apply_mute(bot, chat_id, trigger_user_id, mute_sec,
-                                  trigger_text, trigger_message_id)
+                                  trigger_text, trigger_message_id, album_message_ids)
             _note("empty")
             return
 
@@ -608,7 +798,7 @@ async def _run_proactive(bot, chat_id: int, trigger_message_id: int, trigger_tex
         deleted = False
         if mute_sec:
             deleted = await _apply_mute(bot, chat_id, trigger_user_id, mute_sec,
-                                        trigger_text, trigger_message_id)
+                                        trigger_text, trigger_message_id, album_message_ids)
 
         # Ответ приходит с блоком <thought> (в чате он станет свёрнутыми
         # «Мыслями»); паузу и лог считаем по ВИДИМОЙ части реплики.
@@ -641,3 +831,6 @@ async def _run_proactive(bot, chat_id: int, trigger_message_id: int, trigger_tex
         _note("error")
     finally:
         _in_flight.discard(chat_id)
+        # Копилку закрываем в любом случае: сорвалась проверка на полпути —
+        # брошенные кадры не должны подмешаться в следующую.
+        _albums.pop(chat_id, None)

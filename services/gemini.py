@@ -393,7 +393,8 @@ def _media_chain(chain_limit: int = 0) -> list:
     return live[:chain_limit] if chain_limit else live
 
 
-def _describe_image(image_base64: str, chain_limit: int = 0) -> str:
+def _describe_image(image_base64: str, chain_limit: int = 0,
+                    extra_images: list[str] | None = None) -> str:
     """
     Описывает фото: нестриминговый запрос к Gemini ПО ЦЕПОЧКЕ
     `PROACTIVE_MEDIA_CHAIN` — первая ответившая модель и выигрывает.
@@ -409,12 +410,24 @@ def _describe_image(image_base64: str, chain_limit: int = 0) -> str:
     Поэтому в имени и в логах больше нет слова «proactive» — оно врало бы
     половину времени. chain_limit — см. _media_chain.
 
+    extra_images — остальные кадры АЛЬБОМА (2026-08-27): все картинки одного
+    отправления уходят ОДНИМ запросом и получают ОДИН общий разбор. Отдельный
+    разбор на каждый кадр стоил бы вшестеро дороже, а в стенограмме всё равно
+    склеился бы в одну строку — там одно отправление это одна строка.
+    ⚠️ Слова «опиши все картинки» здесь по-прежнему НЕТ: правило «к медиа бот
+    от себя ничего не добавляет» держится с 10.08. Если окажется, что модель
+    описывает только первый кадр, лечится подсказкой — но это отдельное
+    решение Максима, а не тихая правка.
+
     Возвращает описание или пустую строку, если НИ ОДНА модель цепочки не
     ответила. Провал разбора не ломает ни того, ни другого вызывающего:
     у проактивного триггером останется подпись, у поиска — тоже.
     """
     content = [{"type": "image_url",
                 "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}}]
+    for _extra in (extra_images or []):
+        content.append({"type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{_extra}"}})
 
     failures = []          # [(модель, причина)] — для уведомления владельцу
     for model_name in _media_chain(chain_limit):
@@ -2239,7 +2252,8 @@ def _build_proactive_parts(chat_id: int, bot_id: int, trigger_text: str,
 
 def ask_group_proactive_media(chat_id: int, bot_id: int, trigger_text: str,
                               trigger_user_id: int | None,
-                              media_b64: str, mime_type: str, kind: str) -> str | None:
+                              media_b64: str, mime_type: str, kind: str,
+                              extra_media: list[tuple] | None = None) -> str | None:
     """
     ⚡ ПРОАКТИВНЫЙ ОТВЕТ НА МЕДИА — отвечает та же модель, что СМОТРИТ файл
     (2026-08-11, решение Максима: «чтобы отвечала модель-разбиратель, а не
@@ -2290,10 +2304,16 @@ def ask_group_proactive_media(chat_id: int, bot_id: int, trigger_text: str,
     # решением, что и у текстового пути, чтобы два пути не разъезжались.
     # Зашитого задания «вступить или ПРОПУСК» здесь больше нет: оно дословно
     # повторяло конец инструкции участия, которую владелец правит сам.
-    parts = [
-        {"inlineData": {"mimeType": mime_type, "data": media_b64}},
-        {"text": transcript},
-    ]
+    #
+    # extra_media — остальные кадры АЛЬБОМА (2026-08-27): все картинки одного
+    # отправления идут ОДНИМ запросом, впереди стенограммы и в том порядке,
+    # в каком их прислали. До этой правки модель видела первый кадр из шести
+    # (живой случай 27.08) и молчала — по одной картинке из серии сказать
+    # обычно нечего.
+    parts = [{"inlineData": {"mimeType": mime_type, "data": media_b64}}]
+    for _b64, _mime in (extra_media or []):
+        parts.append({"inlineData": {"mimeType": _mime, "data": _b64}})
+    parts.append({"text": transcript})
     base = {"contents": [{"role": "user", "parts": parts}]}
     # Пустую системную часть (все промпты стёрты) не отправляем вовсе.
     if any(system_parts):
@@ -2305,7 +2325,11 @@ def ask_group_proactive_media(chat_id: int, bot_id: int, trigger_text: str,
     # Запрос пишем ОДИН раз до перебора цепочки: он у всех моделей один и тот
     # же, а на три неудачные попытки легли бы три одинаковые простыни.
     from services import chat_log
-    chat_log.note_request(f"{kind} + цепочка {', '.join(PROACTIVE_MEDIA_CHAIN)}",
+    # В подписи говорим, сколько файлов ушло: иначе по логу не отличить альбом,
+    # собранный целиком, от альбома, у которого взяли один кадр.
+    _n = 1 + len(extra_media or [])
+    _label = f"{kind} ×{_n}" if _n > 1 else kind
+    chat_log.note_request(f"{_label} + цепочка {', '.join(PROACTIVE_MEDIA_CHAIN)}",
                           "\n\n".join(log_parts))
 
     for model_name in PROACTIVE_MEDIA_CHAIN:
