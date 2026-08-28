@@ -205,7 +205,10 @@ def _build_panel(context):
     # есть, иначе она врала бы про несуществующий набор.
     seed = quiz_bank.seed_stats()
     if seed["questions"]:
-        rows.append([InlineKeyboardButton(f"📥 Загрузить мои вопросы ({seed['questions']})",
+        # Слово «в черновики» в подписи намеренно: кнопка меняла назначение
+        # 28.08.2026, и без него пришлось бы каждый раз вспоминать, куда она
+        # грузит — сразу людям или на проверку.
+        rows.append([InlineKeyboardButton(f"📥 Мои вопросы в черновики ({seed['questions']})",
                                           callback_data="quiz:seed")])
     if counts["approved"] or counts["drafts"]:
         rows.append([InlineKeyboardButton("🗑 Стереть ВСЕ вопросы", callback_data="quiz:nuke")])
@@ -320,7 +323,7 @@ async def _handle_quiz_callback(query, context, data: str, chat_id: int, user_id
       quiz:back:<id>          — вернуть игровой вопрос в черновики
       quiz:del:<режим>:<id>   — удалить вопрос совсем
       quiz:wipe / quiz:wipe_yes — очистить ВСЕ черновики (с подтверждением)
-      quiz:seed               — загрузить вопросы из файла репозитория
+      quiz:seed               — загрузить вопросы из файла репозитория В ЧЕРНОВИКИ
       quiz:nuke / quiz:nuke_yes — стереть ВЕСЬ банк, включая игровые
       quiz:zero / quiz:zero_yes — обнулить статистику викторины У ВСЕХ ИГРОКОВ
       quiz:noop               — заглушка счётчика листания
@@ -426,12 +429,19 @@ async def _handle_quiz_callback(query, context, data: str, chat_id: int, user_id
             await _popup(query, context, chat_id,
                          "⚠️ Файла с вопросами нет — он приезжает вместе с обновлением кода.")
             return
-        result = quiz_bank.load_seed()
+        # ⚠️ В ЧЕРНОВИКИ, А НЕ СРАЗУ В ИГРУ (28.08.2026, решение Максима).
+        # До этого грузили сразу в игру — тогда заезжала пачка из 219 вопросов,
+        # выверенных вручную, и одобрять их по одному было работой ради работы.
+        # Теперь набор пополняется по 2–3 вопроса на новую статью, и Максим
+        # хочет смотреть их перед тем, как они попадут людям.
+        result = quiz_bank.load_seed(approved=False)
         _audit(user_id, "quiz_seed", 0,
-               f"добавлено {result['added']}, дублей {result['skipped']}")
-        logger.info("🎮 Админ %s загрузил эталонные вопросы: добавлено %d, дублей %d, негодных %d",
+               f"добавлено в черновики {result['added']}, дублей {result['skipped']}")
+        logger.info("🎮 Админ %s загрузил эталонные вопросы В ЧЕРНОВИКИ: добавлено %d, дублей %d, негодных %d",
                     user_id, result["added"], result["skipped"], result["bad"])
-        text = f"📥 Загружено вопросов: {result['added']} (в игру, сразу)."
+        text = f"📥 Загружено вопросов: {result['added']} — в ЧЕРНОВИКИ, на одобрение."
+        if result["added"]:
+            text += "\nОткрой «📝 Черновики» и одобри те, что годятся."
         if result["skipped"]:
             text += f"\nУже были в банке: {result['skipped']}."
         if result["bad"]:
