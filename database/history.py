@@ -1867,28 +1867,20 @@ def get_last_stats_snapshot() -> dict | None:
     }
 
 
-def get_prev_stats_snapshot() -> dict | None:
-    """ПРЕДпоследний снимок — начало последних закрытых суток. Нужен кнопке
-    «📊 Отчёт за вчера»: пара «предпоследний → последний» и есть вчерашний
-    период. None, если снимков меньше двух."""
-    with _lock:
-        conn = _get_connection()
-        rows = conn.execute(
-            "SELECT taken_at_utc, kyiv_label, data FROM stats_snapshots "
-            "ORDER BY taken_at_utc DESC, id DESC LIMIT 2"
-        ).fetchall()
-    if len(rows) < 2:
-        return None
-    row = rows[1]
-    try:
-        data = json.loads(row["data"])
-    except (TypeError, ValueError):
-        return None
-    return {
-        "taken_at_utc": row["taken_at_utc"],
-        "kyiv_label": row["kyiv_label"],
-        "data": data if isinstance(data, dict) else {},
-    }
+# ⚠️ ПРЕДПОСЛЕДНЕГО СНИМКА ЗДЕСЬ БОЛЬШЕ НЕТ (удалён 28.08.2026).
+# Была функция get_prev_stats_snapshot, и её докстринг уверял, что пара
+# «предпоследний → последний» нужна кнопке «📊 Отчёт за вчера». Читателей у неё
+# не было НИ ОДНОГО, а описание сбивало с толку — карта рисков полгода носила
+# подозрение «а верные ли цифры в отчёте за вчера».
+#
+# Как на самом деле (проверено на боевых данных 28.08.2026, сошлось до знака):
+#   • суточный период считается «ПОСЛЕДНИЙ снимок → сейчас», а новый снимок
+#     ставится сразу после сборки текста (services/daily_report.midnight_report);
+#   • кнопка «Отчёт за вчера» ничего не пересчитывает — показывает СОХРАНЁННЫЙ
+#     ночью текст (settings 'daily_report_last_text'). Пересборка была бы
+#     враньём: первого числа месяца вызовы обнуляются, и исходных данных за
+#     прошлые сутки в базе уже нет.
+# Значит второй снимок не нужен ни для чего.
 
 
 def count_api_calls_between(start_utc: str, end_utc: str | None = None) -> list:

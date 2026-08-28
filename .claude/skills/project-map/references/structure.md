@@ -31,7 +31,7 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 | `utils_format.py` | 313 | 8 | `strip_thoughts`, `thoughts_enabled`, `build_text_and_entities`, `send_formatted`, `convert_md`, `fits_caption`, `reply_md` |
 | `logging_setup.py` | 248 | 3 | `archive_old_logs`, `setup_logging` |
 | `preflight.py` | 592 | 0 | `check_imports`, `check_models`, `check_providers`, `check_tables`, `check_ranks`, `check_callbacks`, `check_panels`, `check_handlers`, `main` |
-| `selftest.py` | 1266 | 0 | проверки ПОВЕДЕНИЯ (28.08.2026), 12 групп: `check_money`, `check_price_list`, `check_mute_tag`, `check_permissions`, `check_thoughts`, `check_long_answers`, `check_wait_budgets`, `check_album_not_flood`, `check_album_collect`, `check_time_keys`, `check_rag_pick`, `check_quiz_ranks`, `main`. Отвечает на «правильно ли считает», тогда как `preflight.py` — на «запустится ли». Зовётся из `deploy.sh` и CI, красный откатывает выкатку |
+| `selftest.py` | 1402 | 0 | проверки ПОВЕДЕНИЯ (28.08.2026), 13 групп: `check_money`, `check_price_list`, `check_mute_tag`, `check_permissions`, `check_thoughts`, `check_long_answers`, `check_wait_budgets`, `check_album_not_flood`, `check_album_collect`, `check_time_keys`, `check_rag_pick`, `check_quiz_ranks`, `check_daily_report`, `main`. Отвечает на «правильно ли считает», тогда как `preflight.py` — на «запустится ли». Зовётся из `deploy.sh` и CI, красный откатывает выкатку |
 | `reset_db.py` | 81 | 0 | `main` |
 | `watchdog_local.py` | 297 | 0 | `main` |
 
@@ -40,7 +40,7 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 | файл | строк | тянут | публичные имена |
 |---|---:|---:|---|
 | `database/__init__.py` | 2 | 0 | — |
-| `database/history.py` | 2772 | 35 | **111 функций**. Ключевые группы: соединение и схема (`init_db`, `close_db`, `backup_to`), переписка (`get_history`, `add_messages`, `clear_history`), настройки (`get_setting`, `set_setting`, `delete_setting`), деньги и счётчики (`add_provider_cost`, `register_api_call`, `get_bot_stats`, `save_stats_snapshot`), модерация (`log_moderation_action`, `save_mute_evidence`, `get_dossier`), персонал и права (`get_all_staff`, `set_staff_perm`, `log_staff_action`), викторина (`add_quiz_question`, `get_random_quiz_question`, `set_quiz_question_approved`), группы (`save_group_message`, `get_recent_group_messages`), новости (`is_news_already_sent`, `mark_news_as_sent`, `count_sent_news_between`), журналы (`add_kb_action`, `log_proactive_check`, `log_join`) |
+| `database/history.py` | 2764 | 35 | **110 функций**. Ключевые группы: соединение и схема (`init_db`, `close_db`, `backup_to`), переписка (`get_history`, `add_messages`, `clear_history`), настройки (`get_setting`, `set_setting`, `delete_setting`), деньги и счётчики (`add_provider_cost`, `register_api_call`, `get_bot_stats`, `save_stats_snapshot`), модерация (`log_moderation_action`, `save_mute_evidence`, `get_dossier`), персонал и права (`get_all_staff`, `set_staff_perm`, `log_staff_action`), викторина (`add_quiz_question`, `get_random_quiz_question`, `set_quiz_question_approved`), группы (`save_group_message`, `get_recent_group_messages`), новости (`is_news_already_sent`, `mark_news_as_sent`, `count_sent_news_between`), журналы (`add_kb_action`, `log_proactive_check`, `log_join`) |
 
 Полный список — `python -c "import ast;print([n.name for n in ast.parse(open('database/history.py',encoding='utf-8').read()).body if hasattr(n,'name')])"`.
 

@@ -1197,6 +1197,141 @@ def check_quiz_ranks():
     return problems, f"{done} проверок: лестница без дыр, границы званий"
 
 
+# ───────────────────────────────────────────────
+#  12. СУТОЧНЫЙ ОТЧЁТ: РАСХОД ЗА ПЕРИОД
+# ─────────────────────────────────────────────
+
+def check_daily_report():
+    """
+    Расход за период = (текущее + отложенное) − снимок.
+
+    ⚠️ Ошибка здесь всплывает только НА СЛЕДУЮЩИЙ ДЕНЬ и выглядит как «бот
+    вдруг стал дорого стоить» — либо, что хуже, как «расход почти нулевой»,
+    и тогда о перерасходе узнаешь по пустому счёту у провайдера.
+
+    ⚠️ «Отложенное» — не выдумка: первого числа месяца бот обнуляет вызовы и
+    копилки Qwen и картинок, часть которых относится к ТЕКУЩИМ, ещё не
+    отчитанным суткам. Уничтожаемую часть откладывают в settings, и отчёт
+    обязан её прибавить, иначе отчёт за 1-е число покажет только то, что
+    накапало после обнуления.
+    """
+    from services import daily_report as dr
+
+    problems = []
+    done = 0
+
+    def expect_spent(title, current, base, carried, want_value, want_manual):
+        nonlocal done
+        done += 1
+        value, manual = dr._spent(current, base, carried)
+        if not _same_money(value, want_value):
+            problems.append(f"{title}: расход ожидался {want_value}, вышло {value}")
+        done += 1
+        if manual != want_manual:
+            problems.append(
+                f"{title}: признак «счётчик правили руками» ожидался "
+                f"{want_manual}, вышло {manual}")
+
+    # Обычные сутки: копилка выросла с 0.212128 до 0.280422
+    expect_spent("обычный расход", 0.280422, 0.212128, 0.0, 0.068294, False)
+    # Ничего не тратили
+    expect_spent("нулевой период", 5.0, 5.0, 0.0, 0.0, False)
+    # После месячного обнуления: копилку обнулили, накапало 0.5, отложено 2.0
+    expect_spent("с переносом после обнуления", 0.5, 0.0, 2.0, 2.5, False)
+    # ⚠️ Счётчик правили руками: разница ушла в минус. Отчёт обязан показать
+    # НОЛЬ и поднять признак, а не отрицательные деньги.
+    expect_spent("счётчик уменьшили вручную", 1.0, 5.0, 0.0, 0.0, True)
+
+    done += 1
+    value, _ = dr._spent(1.0, 5.0, 0.0)
+    if value < 0:
+        problems.append(f"отрицательный расход {value} — в отчёте появятся "
+                        f"деньги со знаком минус")
+
+    # ── Раскладка вызовов по провайдерам ──
+    from config import AVAILABLE_MODELS, AVAILABLE_IMAGE_MODELS, PROVIDERS
+
+    some_gemini = next(m for m, v in AVAILABLE_MODELS.items() if v["provider"] == "gemini")
+    some_qwen = next(m for m, v in AVAILABLE_MODELS.items() if v["provider"] == "qwen")
+    some_image = next(iter(AVAILABLE_IMAGE_MODELS))
+
+    calls = {some_gemini: 7, some_qwen: 3, some_image: 2, "модель-которой-нет": 5}
+    groups = dr._calls_by_group(calls)
+
+    done += 1
+    if dict(groups.get("gemini") or {}).get(some_gemini) != 7:
+        problems.append(f"вызовы {some_gemini} не попали в блок Gemini")
+    done += 1
+    if dict(groups.get("qwen") or {}).get(some_qwen) != 3:
+        problems.append(f"вызовы {some_qwen} не попали в блок Qwen")
+    done += 1
+    if dict(groups.get("image") or {}).get(some_image) != 2:
+        problems.append(f"вызовы {some_image} не попали в блок картинок")
+
+    # ⚠️ Модель, удалённую из настроек, но с вызовами за период, терять нельзя:
+    # иначе «Всего вызовов» разойдётся с суммой строк, и понять почему —
+    # невозможно.
+    done += 1
+    other = dict(groups.get("other") or {})
+    if other.get("модель-которой-нет") != 5:
+        problems.append("вызовы удалённой из настроек модели потерялись — "
+                        "итог отчёта разойдётся с суммой строк")
+
+    # Модель без вызовов остаётся в списке с нулём (её видно в отчёте)
+    done += 1
+    if not any(name == some_gemini for name, _ in (groups.get("gemini") or [])):
+        problems.append("модель пропала из своего блока")
+
+    # Порядок внутри блока — по числу вызовов, больше сверху
+    done += 1
+    gem = groups.get("gemini") or []
+    if gem and gem != sorted(gem, key=lambda p: (-p[1], p[0])):
+        problems.append("порядок моделей в блоке не по числу вызовов")
+
+    # ── Недельная копилка ──
+    # ⚠️ Работает на ВРЕМЕННОЙ базе (main увёл DB_PATH), боевую не трогаем.
+    from database import history as hist
+
+    try:
+        dr._week_clear()
+        dr.week_add_day("2026-08-25 21:00:00", "2026-08-26 21:00:00",
+                        {"calls": {some_qwen: 4}, "burned": {some_qwen: 1000}})
+        dr.week_add_day("2026-08-26 21:00:00", "2026-08-27 21:00:00",
+                        {"calls": {some_qwen: 6}, "burned": {some_qwen: 2000}})
+        acc = dr._week_read()
+
+        done += 1
+        if int(acc.get("days") or 0) != 2:
+            problems.append(f"в недельной копилке {acc.get('days')} суток вместо 2")
+        done += 1
+        if (acc.get("calls") or {}).get(some_qwen) != 10:
+            problems.append(f"вызовы за неделю сложились неверно: "
+                            f"{(acc.get('calls') or {}).get(some_qwen)} вместо 10")
+        done += 1
+        if (acc.get("burned") or {}).get(some_qwen) != 3000:
+            problems.append(f"сожжённые токены за неделю сложились неверно: "
+                            f"{(acc.get('burned') or {}).get(some_qwen)} вместо 3000")
+
+        # ⚠️ Сутки, в которые квоту ЗАВЕЛИ ЗАНОВО (остаток вырос, разница
+        # отрицательная), в сумму идти не должны — иначе недельная строка
+        # соврёт. Такие модели помечаются, и отчёт честно скажет «≥».
+        dr.week_add_day("2026-08-27 21:00:00", "2026-08-28 21:00:00",
+                        {"calls": {}, "burned": {some_qwen: -5000}})
+        acc = dr._week_read()
+        done += 1
+        if (acc.get("burned") or {}).get(some_qwen) != 3000:
+            problems.append("заведение новой квоты испортило недельную сумму "
+                            "сожжённых токенов")
+        done += 1
+        if some_qwen not in (acc.get("qwen_reset") or []):
+            problems.append("сутки с заведением квоты не помечены — "
+                            "недельный отчёт покажет точное число вместо «≥»")
+    finally:
+        dr._week_clear()
+
+    return problems, f"{done} проверок: расход, перенос, раскладка, копилка недели"
+
+
 CHECKS = (
     ("деньги — расчёт стоимости запросов", check_money),
     ("деньги — сам прайс не менялся", check_price_list),
@@ -1210,6 +1345,7 @@ CHECKS = (
     ("метки суток, сроков и недель", check_time_keys),
     ("база знаний — пик против полки", check_rag_pick),
     ("звания викторины — лестница без дыр", check_quiz_ranks),
+    ("суточный отчёт — расход за период", check_daily_report),
 )
 
 
