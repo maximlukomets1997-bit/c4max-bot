@@ -101,11 +101,23 @@ async def send_news_to_chat(bot, chat_id: int, text: str, image_url: str, url: s
     # тот же приём, которым помечается машинный разбор медиа (services/proactive.py).
     # На то, что видят люди, это не влияет: в чат ушёл текст выше, это только
     # запись для памяти бота.
-    archive_text = f"[новость с сайта, ты разослал её в чат] {text}\n\nСсылка: {url}"
+    #
+    # ⚠️ У ГРУППЫ И ЛИЧКИ ПОМЕТКА РАЗНАЯ, И ЭТО НЕ КРАСОТА — ЭТО ПОЧИНЕННЫЙ БАГ
+    # (2026-08-28). В группе строки стенограммы подписаны именами, свои бот
+    # видит как «Ты: …», и слово «ты» внутри пометки читается правильно — про
+    # себя. В личке подписей нет вовсе: сводка уходит модели просто как ЕЁ
+    # СОБСТВЕННАЯ реплика, а в собственной реплике «ты» всегда означает
+    # собеседника. Пометку завели 16.08 для групп, 20.08 переиспользовали для
+    # лички — и она перевернулась значением: бот прочитал свою же записку как
+    # «новость прислал человек». Живой случай 28.08: Максим написал «привет»,
+    # бот ответил «вижу, ты скинул свежую новость, хочешь сделаю из неё пост».
+    # Не сводить обратно к одной строке.
+    archive_group = f"[новость с сайта, ты разослал её в чат] {text}\n\nСсылка: {url}"
+    archive_private = f"[это моя автоматическая рассылка новости с сайта] {text}\n\nСсылка: {url}"
     if chat_id < 0:
         try:
             save_group_message(chat_id, bot.id, bot.username or "", bot.first_name or "",
-                               archive_text, False)
+                               archive_group, False)
         except Exception as e:
             logger.debug("📰 Не удалось записать новость в архив групп %s: %s", chat_id, e)
     else:
@@ -118,7 +130,7 @@ async def send_news_to_chat(bot, chat_id: int, text: str, image_url: str, url: s
         # В личном чате chat_id и есть user_id.
         try:
             from database.history import add_bot_message
-            add_bot_message(chat_id, chat_id, archive_text)
+            add_bot_message(chat_id, chat_id, archive_private)
         except Exception as e:
             logger.debug("📰 Не удалось записать новость в личную память %s: %s", chat_id, e)
 
