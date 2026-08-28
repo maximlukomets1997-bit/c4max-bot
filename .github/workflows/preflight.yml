@@ -51,3 +51,10 @@ jobs:
 
       - name: preflight.py
         run: python preflight.py
+
+      # Проверки поведения (2026-08-28). Стоят рядом с preflight по той же
+      # причине, по какой стоят в deploy.sh: сервер забирает main САМ, и
+      # сломанный расчёт денег или дыра в правах доедут до людей раньше,
+      # чем их кто-нибудь заметит. Сети и ключей не требуют, как и preflight.
+      - name: selftest.py
+        run: python selftest.py

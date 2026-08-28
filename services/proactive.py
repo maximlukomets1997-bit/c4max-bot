@@ -62,6 +62,7 @@ from config import (
     PROACTIVE_HANDS_DEFAULT,
     PROACTIVE_MUTE_MAX_SEC,
     PROACTIVE_MUTE_PATTERN,
+    PROACTIVE_MUTE_CLEANUP_PATTERN,
     PROACTIVE_VIDEO_MAX_BYTES,
 )
 from database.history import get_setting, log_proactive_check, save_group_message
@@ -179,10 +180,16 @@ def _extract_mute(answer: str) -> tuple[str, int | None]:
     модель может упомянуть пометку как пример — это не команда. А вот вырезаем
     из ВСЕГО текста: если пометка всё же затесалась в мысли, показывать её
     в чате всё равно незачем.
+
+    ⚠️ ИЩЕМ И ВЫРЕЗАЕМ РАЗНЫМИ ШАБЛОНАМИ (28.08.2026, нашли проверки
+    поведения). Распознавание строгое — мут это наказание живого человека,
+    по мусору его выдавать нельзя. Вырезание широкое — служебную пометку
+    участники не должны видеть НИКОГДА, даже когда разобрать срок не удалось.
+    Раньше шаблон был один, и всё, что он не разобрал, уезжало в чат целиком.
     """
     visible = strip_thoughts(answer)
     m = re.search(PROACTIVE_MUTE_PATTERN, visible, re.IGNORECASE)
-    cleaned = re.sub(PROACTIVE_MUTE_PATTERN, "", answer, flags=re.IGNORECASE).strip()
+    cleaned = re.sub(PROACTIVE_MUTE_CLEANUP_PATTERN, "", answer, flags=re.IGNORECASE).strip()
     if not m:
         return cleaned, None
     try:

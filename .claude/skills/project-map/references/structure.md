@@ -1,7 +1,7 @@
 # Структура: файл → что в нём объявлено
 
-Снимок от 2026-08-20 по коду версии v4.56 (последний коммит): таблица
-пересобрана скриптом и сверена с кодом. Пересобрать:
+Снимок от 2026-08-28 по коду версии v4.74: таблица пересобрана скриптом и
+сверена с кодом. Пересобрать:
 
 ```
 python .claude/skills/project-map/scripts/map.py
@@ -14,7 +14,11 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 наружу. Имена с подчёркиванием тоже иногда зовут снаружи — проверяй
 скриптом `impact.py`, а не этим списком.
 
-Всего файлов с кодом: **57**. Тестовых файлов: **0**.
+Всего файлов с кодом: **58**. Отдельных тестовых файлов (`test_*.py`,
+`pytest`) по-прежнему **0** — но с 28.08.2026 у проекта есть `selftest.py`:
+проверки поведения в том же стиле, что `preflight.py`, без сторонних
+библиотек. Он не заменяет ручной прогон (проверяет функции по отдельности,
+а не бота целиком), но впервые отвечает на вопрос «правильно ли считает».
 
 ## Корень
 
@@ -22,11 +26,12 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 |---|---:|---:|---|
 | `bot.py` | 11 | 0 | — (только вызывает `main.main`) |
 | `main.py` | 580 | 1 | `post_init`, `post_stop`, `post_shutdown`, `main` |
-| `config.py` | 1168 | 34 | `read_build_mark` + 109 констант верхнего уровня (заводские тексты всех пяти промптов — пустые строки) |
+| `config.py` | 1189 | 34 | `read_build_mark` + 109 констант верхнего уровня (заводские тексты всех пяти промптов — пустые строки) |
 | `utils.py` | 181 | 19 | `should_respond_in_group`, `clean_mention`, `keep_chat_action`, `delete_user_message_safe`, `mention`, `schedule_delete`, `register_and_clean_bot_message` |
 | `utils_format.py` | 313 | 8 | `strip_thoughts`, `thoughts_enabled`, `build_text_and_entities`, `send_formatted`, `convert_md`, `fits_caption`, `reply_md` |
 | `logging_setup.py` | 248 | 3 | `archive_old_logs`, `setup_logging` |
 | `preflight.py` | 592 | 0 | `check_imports`, `check_models`, `check_providers`, `check_tables`, `check_ranks`, `check_callbacks`, `check_panels`, `check_handlers`, `main` |
+| `selftest.py` | 524 | 0 | проверки ПОВЕДЕНИЯ (28.08.2026): `check_money`, `check_price_list`, `check_mute_tag`, `check_permissions`, `main`. Отвечает на «правильно ли считает», тогда как `preflight.py` — на «запустится ли». Зовётся из `deploy.sh` и CI, красный откатывает выкатку |
 | `reset_db.py` | 81 | 0 | `main` |
 | `watchdog_local.py` | 297 | 0 | `main` |
 
@@ -75,7 +80,7 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 | `services/antispam.py` | 861 | 7 | `is_enabled`, `get_thresholds`, `get_thresholds_for`, `trust_info`, `check_and_mute`, `unmute`, `mute_user`, `kick_user`, `ban_user`, `unban_user`, `notify_owners_ai_mute`, `is_linkfilter_enabled`, `check_and_delete_links`, `get_mute_stats`, `get_recent_actions`, `get_evidence` |
 | `services/daily_report.py` | 781 | 8 | `kyiv_now`, `kyiv_label`, `collect_counters`, `period_totals`, `render`, `midnight_report`, `today_so_far`, `weekly_report`, `week_so_far`, `last_report_text`, `last_weekly_text` и др. |
 | `services/rag.py` | 795 | 5 | `cosine_similarity`, `RagQuotaError`, `get_embedding`, `parse_article_file`, `is_active`, `sync_knowledge_base`, `index_lag`, `rebuild_knowledge_base`, `normalize_query`, `retrieve_relevant_context`, `test_search` |
-| `services/proactive.py` | 837 | 2 | `skip_counts`, `is_enabled`, `hands_enabled`, `note_bot_group_reply`, `forget_conversations`, `consider_message` |
+| `services/proactive.py` | 844 | 2 | `skip_counts`, `is_enabled`, `hands_enabled`, `note_bot_group_reply`, `forget_conversations`, `consider_message` |
 | `services/tech_card.py` | 514 | 2 | `index`, `find_local`, `suggest`, `by_kind`, `by_title`, `token`, `by_token`, `load`, `render_card`, `render_section`, `render_candidates`, `kinds_summary`, `section_label`, `is_specs`, `short_title`, `kind_icon` |
 | `services/quiz_daily.py` | 233 | 3 | `is_enabled`, `set_enabled`, `day_key`, `hours_label`, `due_now`, `note_sent`, `active`, `remember`, `forget`, `restore`, `next_run_label` (вопрос дня: расписание, тумблер, память о разосланных опросах) |
 | `services/quiz_bank.py` | 486 | 2 | `articles_without_questions`, `generate_for_article`, `generate_batch`, `retry_failed`, `stats`, `seed_stats`, `load_seed` |
