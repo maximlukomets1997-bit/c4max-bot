@@ -31,7 +31,7 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 | `utils_format.py` | 313 | 8 | `strip_thoughts`, `thoughts_enabled`, `build_text_and_entities`, `send_formatted`, `convert_md`, `fits_caption`, `reply_md` |
 | `logging_setup.py` | 248 | 3 | `archive_old_logs`, `setup_logging` |
 | `preflight.py` | 592 | 0 | `check_imports`, `check_models`, `check_providers`, `check_tables`, `check_ranks`, `check_callbacks`, `check_panels`, `check_handlers`, `main` |
-| `selftest.py` | 875 | 0 | проверки ПОВЕДЕНИЯ (28.08.2026): `check_money`, `check_price_list`, `check_mute_tag`, `check_permissions`, `check_thoughts`, `check_long_answers`, `check_wait_budgets`, `main`. Отвечает на «правильно ли считает», тогда как `preflight.py` — на «запустится ли». Зовётся из `deploy.sh` и CI, красный откатывает выкатку |
+| `selftest.py` | 1266 | 0 | проверки ПОВЕДЕНИЯ (28.08.2026), 12 групп: `check_money`, `check_price_list`, `check_mute_tag`, `check_permissions`, `check_thoughts`, `check_long_answers`, `check_wait_budgets`, `check_album_not_flood`, `check_album_collect`, `check_time_keys`, `check_rag_pick`, `check_quiz_ranks`, `main`. Отвечает на «правильно ли считает», тогда как `preflight.py` — на «запустится ли». Зовётся из `deploy.sh` и CI, красный откатывает выкатку |
 | `reset_db.py` | 81 | 0 | `main` |
 | `watchdog_local.py` | 297 | 0 | `main` |
 

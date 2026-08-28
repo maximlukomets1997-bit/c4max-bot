@@ -811,6 +811,392 @@ def check_wait_budgets():
     return problems, f"{done} проверок: личка, группа, первая попытка не урезана"
 
 
+# ───────────────────────────────────────────────
+#  7. АЛЬБОМ НЕ СЧИТАЕТСЯ ФЛУДОМ
+# ─────────────────────────────────────────────
+
+def check_album_not_flood():
+    """
+    Альбом фотографий — ОДНО отправление, а не пять.
+
+    ⚠️ ЭТО УЖЕ ЛОМАЛОСЬ И БИЛО ПО ЖИВЫМ ЛЮДЯМ (19.07.2026): Telegram шлёт
+    альбом несколькими сообщениями с общим media_group_id, и без поправки
+    альбом из пяти фото мгновенно выбирал порог «5 сообщений за окно» —
+    человек получал мут ни за что. Поэтому проверка не про красоту кода,
+    а про то, чтобы бот не наказывал за обычную отправку фотографий.
+    """
+    from services import antispam as asp
+
+    problems = []
+    done = 0
+
+    def rec(album_id="", msg_id=1):
+        """Запись всплеска в том же порядке, что кладёт _register_and_check."""
+        return (0.0, -100, msg_id, "", False, album_id)
+
+    def expect_count(title, records, want):
+        nonlocal done
+        done += 1
+        got = asp._count_messages(records)
+        if got != want:
+            problems.append(f"{title}: ожидалось {want} отправлений, насчитано {got}")
+
+    # Пять кадров ОДНОГО альбома — одно отправление
+    expect_count("альбом из 5 кадров", [rec("aaa", i) for i in range(5)], 1)
+    # Десять кадров одного альбома — по-прежнему одно
+    expect_count("альбом из 10 кадров", [rec("aaa", i) for i in range(10)], 1)
+    # Два РАЗНЫХ альбома — два отправления (залп альбомами ловится)
+    expect_count("два разных альбома",
+                 [rec("aaa", 1), rec("aaa", 2), rec("bbb", 3), rec("bbb", 4)], 2)
+    # Обычные сообщения считаются поштучно
+    expect_count("пять обычных сообщений", [rec("", i) for i in range(5)], 5)
+    # Смесь: три обычных + альбом
+    expect_count("три обычных и альбом",
+                 [rec("", 1), rec("", 2), rec("", 3), rec("ccc", 4), rec("ccc", 5)], 4)
+    expect_count("пусто", [], 0)
+
+    # ── Порог на живом счётчике ──
+    # ⚠️ Счётчик общий на процесс; свой user_id и уборка за собой обязательны.
+    UID = -777001
+    try:
+        asp._reset_user(UID)
+        done += 1
+        fired = False
+        for i in range(6):
+            fired = asp._register_and_check(UID, -100, i, msg_count=5, window_sec=60,
+                                            media_group_id="album-1")
+        if fired:
+            problems.append("шесть кадров ОДНОГО альбома подняли тревогу флуда — "
+                            "человек получит мут за обычную отправку фотографий")
+
+        asp._reset_user(UID)
+        done += 1
+        fired = False
+        for i in range(5):
+            fired = asp._register_and_check(UID, -100, 100 + i, text=f"сообщение {i}",
+                                            msg_count=5, window_sec=60)
+        if not fired:
+            problems.append("пять обычных сообщений подряд НЕ подняли тревогу — "
+                            "антифлуд не сработает вовсе")
+
+        # Окно: старое сообщение выпадает и порог не добирается
+        asp._reset_user(UID)
+        done += 1
+        fired = asp._register_and_check(UID, -100, 200, text="одно",
+                                        msg_count=5, window_sec=0)
+        if fired:
+            problems.append("при нулевом окне одно сообщение подняло тревогу — "
+                            "старые записи не выбрасываются")
+    finally:
+        asp._reset_user(UID)
+
+    return problems, f"{done} проверок: альбом как одно отправление, порог, окно"
+
+
+# ───────────────────────────────────────────────
+#  8. КОПИЛКА АЛЬБОМА В ПРОАКТИВНОМ РЕЖИМЕ
+# ─────────────────────────────────────────────
+
+def check_album_collect():
+    """
+    Копилка кадров альбома (27.08.2026): все фото одного отправления уходят
+    модели ОДНИМ запросом, а не первым кадром из шести.
+
+    ⚠️ Ключ альбома хранится не для красоты: без него кадры СЛЕДУЮЩЕГО
+    отправления подмешались бы в идущую проверку.
+    """
+    from config import PROACTIVE_ALBUM_MAX_PHOTOS
+    from services import proactive as pro
+
+    problems = []
+    done = 0
+
+    class FakePhoto:
+        def __init__(self, fid): self.file_id = fid
+
+    class FakeMsg:
+        def __init__(self, album_id, msg_id, photo=True):
+            self.media_group_id = album_id
+            self.message_id = msg_id
+            self.photo = [FakePhoto(f"file{msg_id}")] if photo else None
+
+    CHAT = -777002
+    saved = dict(pro._albums)
+    try:
+        pro._albums.pop(CHAT, None)
+
+        # Копилки нет — кадр не принимается (иначе он потерялся бы молча)
+        done += 1
+        if pro._album_add(CHAT, FakeMsg("aaa", 1)):
+            problems.append("кадр принят в копилку, которой не существует")
+
+        # Открыли копилку первым кадром, докладываем остальные
+        pro._album_open(CHAT, "aaa", "file1", 1)
+        for i in range(2, 5):
+            done += 1
+            if not pro._album_add(CHAT, FakeMsg("aaa", i)):
+                problems.append(f"кадр {i} того же альбома не принят в копилку")
+
+        done += 1
+        album = pro._albums.get(CHAT) or {}
+        if len(album.get("file_ids") or []) != 4:
+            problems.append(f"в копилке {len(album.get('file_ids') or [])} кадров "
+                            f"вместо 4 — модель увидит не всё отправление")
+
+        # Кадр ЧУЖОГО альбома не принимается
+        done += 1
+        if pro._album_add(CHAT, FakeMsg("bbb", 99)):
+            problems.append("кадр ДРУГОГО альбома подмешался в идущую проверку")
+
+        # Потолок числа кадров
+        pro._albums.pop(CHAT, None)
+        pro._album_open(CHAT, "ccc", "file0", 0)
+        for i in range(1, PROACTIVE_ALBUM_MAX_PHOTOS + 6):
+            pro._album_add(CHAT, FakeMsg("ccc", i))
+        done += 1
+        got = len((pro._albums.get(CHAT) or {}).get("file_ids") or [])
+        if got > PROACTIVE_ALBUM_MAX_PHOTOS:
+            problems.append(f"в копилке {got} кадров при потолке "
+                            f"{PROACTIVE_ALBUM_MAX_PHOTOS} — запрос к модели раздуется")
+
+        # Сообщения альбома считаются ВСЕ, даже сверх потолка кадров:
+        # по ним потом удаляются сообщения при муте.
+        done += 1
+        ids = (pro._albums.get(CHAT) or {}).get("message_ids") or []
+        if len(ids) < PROACTIVE_ALBUM_MAX_PHOTOS:
+            problems.append(f"запомнено {len(ids)} сообщений альбома — при муте "
+                            f"часть кадров останется висеть в чате")
+    finally:
+        pro._albums.clear()
+        pro._albums.update(saved)
+
+    return problems, f"{done} проверок: сбор кадров, чужой альбом, потолок"
+
+
+# ───────────────────────────────────────────────
+#  9. КЛЮЧИ СУТОК, СРОКОВ И НЕДЕЛЬ
+# ─────────────────────────────────────────────
+
+def check_time_keys():
+    """
+    Метки «эти сутки», «этот срок», «эта неделя» — по ним бот решает,
+    рассылал ли он уже вопрос дня и недельный дайджест.
+
+    ⚠️ Ошибка здесь не роняет бота: он просто молча шлёт дважды или не шлёт
+    вовсе. Считаются метки по КИЕВСКОМУ времени, поэтому даты подставляем
+    с явным часовым поясом, а не «наивные».
+    """
+    from datetime import datetime, timedelta, timezone
+    from services import quiz_daily as qd
+    from services import group_digest as gd
+
+    problems = []
+    done = 0
+    kyiv = timezone(timedelta(hours=3))
+
+    def at(y, m, d, hh=12, mm=0):
+        return datetime(y, m, d, hh, mm, tzinfo=kyiv)
+
+    def expect(title, got, want):
+        nonlocal done
+        done += 1
+        if got != want:
+            problems.append(f"{title}: ожидалось «{want}», вышло «{got}»")
+
+    # ── Сутки ──
+    expect("обычный день", qd.day_key(at(2026, 8, 28)), "2026-08-28")
+    expect("первая минута суток", qd.day_key(at(2026, 8, 28, 0, 0)), "2026-08-28")
+    expect("последняя минута суток", qd.day_key(at(2026, 8, 28, 23, 59)), "2026-08-28")
+    expect("смена месяца", qd.day_key(at(2026, 9, 1, 0, 1)), "2026-09-01")
+    expect("смена года", qd.day_key(at(2027, 1, 1, 0, 1)), "2027-01-01")
+
+    # Соседние сутки обязаны различаться, иначе рассылка пропустит день
+    done += 1
+    if qd.day_key(at(2026, 8, 28, 23, 59)) == qd.day_key(at(2026, 8, 29, 0, 1)):
+        problems.append("метки суток по разные стороны полуночи совпали — "
+                        "вопрос дня не отправится на следующий день")
+
+    # ── Срок внутри суток ──
+    expect("срок 12:00", qd._slot_key(at(2026, 8, 28), 12), "2026-08-28#12")
+    expect("срок 18:00", qd._slot_key(at(2026, 8, 28), 18), "2026-08-28#18")
+    done += 1
+    if qd._slot_key(at(2026, 8, 28), 12) == qd._slot_key(at(2026, 8, 28), 18):
+        problems.append("метки двух сроков одних суток совпали — "
+                        "второй вопрос дня не отправится")
+
+    # ── Неделя ──
+    expect("неделя середины года", gd.week_key(at(2026, 8, 28)), "2026-W35")
+    done += 1
+    if gd.week_key(at(2026, 8, 24)) != gd.week_key(at(2026, 8, 30)):
+        problems.append("понедельник и воскресенье одной недели дали РАЗНЫЕ метки — "
+                        "дайджест уйдёт дважды за неделю")
+    done += 1
+    if gd.week_key(at(2026, 8, 30)) == gd.week_key(at(2026, 8, 31)):
+        problems.append("воскресенье и понедельник СОСЕДНИХ недель дали одну метку — "
+                        "дайджест пропустит неделю")
+
+    return problems, f"{done} проверок: сутки, сроки, недели, границы"
+
+
+# ───────────────────────────────────────────────
+#  10. ОТБОР СТАТЕЙ БАЗЫ ЗНАНИЙ
+# ─────────────────────────────────────────────
+
+def check_rag_pick():
+    """
+    Правило «пик против полки»: статья идёт модели, только если её балл
+    заметно отрывается от остальных.
+
+    ⚠️ Смысл правила: у настоящего вопроса про технику одна статья ближе
+    прочих (пик), у болтовни все статьи одинаково средне похожи (полка).
+    Сломается — бот начнёт подмешивать случайные статьи в ответ на «привет»
+    либо перестанет находить нужные вовсе.
+    """
+    from config import RAG_STRONG_SIM, RAG_MIN_SIMILARITY
+    from services import rag
+
+    problems = []
+    done = 0
+
+    def expect(title, score, baseline, floor, margin, want_ok, want_why):
+        nonlocal done
+        done += 1
+        ok, why = rag._chunk_passes(score, baseline, floor, margin)
+        if ok != want_ok or why != want_why:
+            problems.append(
+                f"{title}: ожидалось ({'взять' if want_ok else 'отсеять'}, "
+                f"«{want_why}»), вышло ({'взять' if ok else 'отсеять'}, «{why}»)")
+
+    floor, margin = RAG_MIN_SIMILARITY, 0.14
+
+    expect("балл ниже порога", floor - 0.01, 0.30, floor, margin, False, "ниже порога")
+    expect("сильное совпадение", RAG_STRONG_SIM + 0.01, 0.69, floor, margin,
+           True, "сильное совпадение")
+    expect("пик над полкой", floor + 0.05, floor + 0.05 - margin, floor, margin,
+           True, "пик над полкой")
+    expect("полка без пика", floor + 0.05, floor + 0.04, floor, margin,
+           False, "полка (нет пика)")
+    # Ровно на пороге — берём (порог «не ниже», а не «строго выше»)
+    expect("ровно на пороге силы", RAG_STRONG_SIM, 0.10, floor, margin,
+           True, "сильное совпадение")
+    # Ровно на границе отрыва — тоже берём
+    expect("отрыв ровно на запас", floor + 0.05, floor + 0.05 - margin, floor, margin,
+           True, "пик над полкой")
+
+    # ── Нормализация запроса: от неё зависит попадание в кэш ──
+    def expect_norm(title, raw, want):
+        nonlocal done
+        done += 1
+        got = rag.normalize_query(raw)
+        if got != want:
+            problems.append(f"{title}: ожидалось {want!r}, вышло {got!r}")
+
+    expect_norm("регистр и знаки", "Какая броня у Merkava?!", "какая броня у merkava")
+    expect_norm("лишние пробелы", "  танк   умка  ", "танк умка")
+    expect_norm("дефис сохраняется", "T-72 броня", "t-72 броня")
+    expect_norm("пустая строка", "   ", "")
+
+    # ── Мера близости ──
+    done += 1
+    same = rag.cosine_similarity([1.0, 0.0], [1.0, 0.0])
+    if abs(same - 1.0) > 1e-9:
+        problems.append(f"одинаковые векторы дали близость {same}, а не 1.0")
+    done += 1
+    orth = rag.cosine_similarity([1.0, 0.0], [0.0, 1.0])
+    if abs(orth) > 1e-9:
+        problems.append(f"перпендикулярные векторы дали близость {orth}, а не 0")
+
+    return problems, f"{done} проверок: пик против полки, нормализация, близость"
+
+
+# ───────────────────────────────────────────────
+#  11. ЗВАНИЯ ВИКТОРИНЫ
+# ─────────────────────────────────────────────
+
+def check_quiz_ranks():
+    """
+    Лестница званий: без дыр, без перекрытий, покрывает любое число ответов.
+
+    ⚠️ Дыра в лестнице не роняет бота — человек просто «застревает» на
+    прежнем звании и не понимает почему. Проверка целостности здесь дешевле
+    любого разбирательства постфактум.
+    """
+    from config import QUIZ_RANKS
+    from database import history as hist
+
+    problems = []
+    done = 0
+
+    done += 1
+    if not QUIZ_RANKS:
+        return ["список званий пуст"], "0 проверок"
+
+    done += 1
+    if QUIZ_RANKS[0]["min"] != 0:
+        problems.append(f"лестница начинается не с нуля: первое звание с "
+                        f"{QUIZ_RANKS[0]['min']} верных ответов — новичок останется без звания")
+
+    prev = None
+    for r in QUIZ_RANKS:
+        done += 1
+        if r["min"] > r["max"]:
+            problems.append(f"звание «{r['name']}»: нижняя граница {r['min']} "
+                            f"больше верхней {r['max']}")
+        for field in ("name", "icon", "desc"):
+            done += 1
+            if not str(r.get(field) or "").strip():
+                problems.append(f"звание «{r.get('name')}»: пустое поле «{field}»")
+        if prev is not None:
+            done += 1
+            if r["min"] != prev["max"] + 1:
+                problems.append(
+                    f"разрыв в лестнице между «{prev['name']}» (до {prev['max']}) "
+                    f"и «{r['name']}» (с {r['min']}): значения между ними "
+                    f"не покрыты ни одним званием")
+        prev = r
+
+    done += 1
+    if QUIZ_RANKS[-1]["max"] < 9999:
+        problems.append(f"последнее звание кончается на {QUIZ_RANKS[-1]['max']} — "
+                        f"самый упорный игрок останется без звания")
+
+    # ── Расчёт звания по числу ответов (на границах) ──
+    UID = -777003
+    try:
+        for correct, want_name in ((0, QUIZ_RANKS[0]["name"]),
+                                   (QUIZ_RANKS[0]["max"], QUIZ_RANKS[0]["name"]),
+                                   (QUIZ_RANKS[1]["min"], QUIZ_RANKS[1]["name"]),
+                                   (QUIZ_RANKS[-1]["min"], QUIZ_RANKS[-1]["name"])):
+            # Пишем прямо в таблицу временной базы: отдельной функции
+            # «поставить счёт» в проекте нет, а гонять настоящие ответы на
+            # опросы ради четырёх границ — дороже и менее наглядно.
+            with hist._lock:
+                conn = hist._get_connection()
+                conn.execute("DELETE FROM quiz_stats WHERE user_id=?", (UID,))
+                conn.execute(
+                    "INSERT INTO quiz_stats (user_id, username, correct_answers, total_attempts) "
+                    "VALUES (?, ?, ?, ?)", (UID, "проверка", correct, max(correct, 1)))
+                conn.commit()
+            done += 1
+            got = hist.get_user_stats(UID)["rank"]
+            if got != want_name:
+                problems.append(f"при {correct} верных ответах ожидалось звание "
+                                f"«{want_name}», выдано «{got}»")
+
+        # Последнее звание: следующей ступени нет
+        done += 1
+        if hist.get_user_stats(UID)["next_rank_needed"] != -1:
+            problems.append("у высшего звания указана следующая ступень — "
+                            "в личном деле появится прогресс к несуществующему званию")
+    finally:
+        with hist._lock:
+            conn = hist._get_connection()
+            conn.execute("DELETE FROM quiz_stats WHERE user_id=?", (UID,))
+            conn.commit()
+
+    return problems, f"{done} проверок: лестница без дыр, границы званий"
+
+
 CHECKS = (
     ("деньги — расчёт стоимости запросов", check_money),
     ("деньги — сам прайс не менялся", check_price_list),
@@ -819,6 +1205,11 @@ CHECKS = (
     ("размышления модели не утекают в чат", check_thoughts),
     ("длинные ответы — разметка не разъезжается", check_long_answers),
     ("потолки ожидания — перебор моделей", check_wait_budgets),
+    ("антиспам — альбом не считается флудом", check_album_not_flood),
+    ("копилка альбома — все кадры уходят модели", check_album_collect),
+    ("метки суток, сроков и недель", check_time_keys),
+    ("база знаний — пик против полки", check_rag_pick),
+    ("звания викторины — лестница без дыр", check_quiz_ranks),
 )
 
 
