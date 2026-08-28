@@ -250,6 +250,64 @@ def _supports_minimal_thinking(model_name: str) -> bool:
     return bool(AVAILABLE_MODELS.get(model_name, {}).get("minimal_thinking", True))
 
 
+# ─── общий потолок на ВЕСЬ перебор цепочки разбора (28.08.2026) ──────
+#
+#  ⚠️ ПОТОЛКИ ОТДЕЛЬНЫХ ПОПЫТОК СКЛАДЫВАЮТСЯ, и об этом забыли дважды. В
+#  проактивном режиме цепочка перебирается целиком (chain_limit=0), поэтому
+#  «90 секунд на модель» означало ШЕСТЬ МИНУТ на четыре модели. Всё это время
+#  чат для бота «занят» защёлкой `_in_flight`: он не видит ни одного нового
+#  сообщения. Считали 28.08 по коду, худшие случаи ДО этой правки:
+#
+#      голосовое        4 × 30 = 2 минуты
+#      одно фото        4 × 30 = 2 минуты
+#      альбом из 10     4 × 90 = 6 минут   ← принесено правкой альбомов 27.08
+#      видео            4 × 90 = 6 минут
+#
+#  Теперь весь перебор укладывается в этот потолок, сколько бы моделей в
+#  цепочке ни осталось.
+#
+#  ⚠️ ПЕРВОЙ МОДЕЛИ ПОТОЛОК НЕ УРЕЗАЕТСЯ НИКОГДА (в _chain_attempt_timeout это
+#  выходит само: на первой попытке потрачено ноль). Иначе она уходила бы в
+#  запрос с заведомо недостаточным временем — хуже, чем не пробовать вовсе.
+#
+#  ⚠️ На ЛИЧКЕ (chain_limit=1) не значит ничего: попытка там одна.
+_MEDIA_CHAIN_BUDGET_SEC = 120
+
+#  Начинать новую попытку, когда осталось меньше этого, бессмысленно: разбор
+#  не успеет, а человек прождёт лишнее. Лучше честно вернуть «не смогли».
+_MEDIA_MIN_ATTEMPT_SEC = 15
+
+#  Потолок ОДНОЙ попытки расшифровать голосовое. Поднят с 30 до 60 секунд
+#  28.08.2026 (выбор Максима из трёх вариантов) — после живого теста, где
+#  расшифровка не уложилась в 30 секунд, поиск по базе знаний не состоялся, и
+#  бот ответил на голосовой вопрос про технику, не заглянув в базу.
+#  ⚠️ ЦЕНА названа вслух и принята: на личке попытка ОДНА (chain_limit=1), и
+#  когда модель тормозит, человек ждёт эту минуту прежде, чем начнётся ответ.
+_AUDIO_DESCRIBE_TIMEOUT = 60
+
+#  Зачем звали разбор — попадает В УВЕДОМЛЕНИЕ ВЛАДЕЛЬЦУ при полном провале
+#  цепочки, и больше никуда. Раньше там всегда стояло «для стенограммы», хотя
+#  у разбора два зовущих с 16.08: проактивный режим (стенограмма) и поиск по
+#  базе знаний в личке (никакой стенограммы там нет вовсе). Максим получил
+#  такое письмо на живом тесте 28.08 и справедливо не понял, при чём тут она.
+_PURPOSE_TRANSCRIPT = "для стенограммы"
+_PURPOSE_SEARCH = "для поиска по базе"
+
+
+def _chain_attempt_timeout(chain_started: float, base: int) -> int | None:
+    """
+    Сколько секунд дать СЛЕДУЮЩЕЙ модели цепочки — или None, если пора
+    остановиться: общего времени осталось меньше `_MEDIA_MIN_ATTEMPT_SEC`.
+
+    chain_started — момент начала ВСЕГО перебора (time.monotonic), а не
+    текущей попытки. base — потолок одной попытки для этого вида вложения.
+    """
+    left = _MEDIA_CHAIN_BUDGET_SEC - (time.monotonic() - chain_started)
+    if left < _MEDIA_MIN_ATTEMPT_SEC:
+        return None
+    return int(min(base, left))
+
+
 def _describe_timeout(pictures: int) -> int:
     """
     Сколько ждать разбор картинок — по их числу (28.08.2026).
@@ -452,17 +510,24 @@ def _media_chain(chain_limit: int = 0) -> list:
 
     chain_limit > 0 — взять только первые N живых. Так ходит РАЗБОР РАДИ
     ПОИСКА по базе знаний (16.08.2026): там человек ждёт ответа на своё
-    сообщение, и перебор всей цепочки по таймауту стоил бы ему минут — у
-    видео таймаут 90 секунд на модель, четыре звена дают до шести минут.
-    Проактивному режиму ограничение не нужно: он работает фоном, и там
-    ценность полного перебора выше цены ожидания — поэтому 0 по умолчанию.
+    сообщение, и перебор всей цепочки стоил бы ему минут.
+
+    ⚠️ ЭТО НЕ ЕДИНСТВЕННЫЙ ОГРАНИЧИТЕЛЬ С 28.08.2026: у полного перебора
+    появился ещё и общий потолок по времени (`_MEDIA_CHAIN_BUDGET_SEC`, две
+    минуты). Раньше потолки попыток просто складывались — четыре звена по 90
+    секунд давали до шести минут занятого чата. chain_limit режет цепочку ПО
+    ЧИСЛУ моделей, потолок — ПО ВРЕМЕНИ; они не заменяют друг друга.
+
+    Проактивному режиму ограничение по числу не нужно: он работает фоном, и
+    там ценность полного перебора выше цены ожидания — поэтому 0 по умолчанию.
     """
     live = [m for m in PROACTIVE_MEDIA_CHAIN if not _quota_blocked_now(m)]
     return live[:chain_limit] if chain_limit else live
 
 
 def _describe_image(image_base64: str, chain_limit: int = 0,
-                    extra_images: list[str] | None = None) -> str:
+                    extra_images: list[str] | None = None,
+                    purpose: str = _PURPOSE_TRANSCRIPT) -> str:
     """
     Описывает фото: нестриминговый запрос к Gemini ПО ЦЕПОЧКЕ
     `PROACTIVE_MEDIA_CHAIN` — первая ответившая модель и выигрывает.
@@ -498,7 +563,14 @@ def _describe_image(image_base64: str, chain_limit: int = 0,
                         "image_url": {"url": f"data:image/jpeg;base64,{_extra}"}})
 
     failures = []          # [(модель, причина)] — для уведомления владельцу
+    chain_started = time.monotonic()
     for model_name in _media_chain(chain_limit):
+        attempt_timeout = _chain_attempt_timeout(chain_started,
+                                                 _describe_timeout(len(content)))
+        if attempt_timeout is None:
+            logger.info("🤖 Разбор фото прекращён: перебор занял общий потолок "
+                        "%d с, оставшихся моделей не пробуем", _MEDIA_CHAIN_BUDGET_SEC)
+            break
         try:
             payload = {
                 "model": model_name,
@@ -513,7 +585,7 @@ def _describe_image(image_base64: str, chain_limit: int = 0,
                 GEMINI_API_URL,
                 json=payload,
                 headers={"Authorization": f"Bearer {GEMINI_API_KEY}"},
-                timeout=_describe_timeout(len(content)),
+                timeout=attempt_timeout,
             )
             response.raise_for_status()
             data = response.json()
@@ -542,11 +614,12 @@ def _describe_image(image_base64: str, chain_limit: int = 0,
                 # убрать из логов 11.08: тут не ответ, а причина отказа.
                 logger.warning("🤖 %s не описала фото: %s %s", model_name, e, _err_body(e))
     logger.error("⚠️ 🤖 Фото не описала НИ ОДНА модель цепочки")
-    _notify_chain_dead("Фото (разбор для стенограммы)", failures)
+    _notify_chain_dead(f"Фото (разбор {purpose})", failures)
     return ""
 
 
-def _transcribe_audio(audio_base64: str, chain_limit: int = 0) -> str:
+def _transcribe_audio(audio_base64: str, chain_limit: int = 0,
+                      purpose: str = _PURPOSE_TRANSCRIPT) -> str:
     """
     Расшифровывает голосовое: лёгкий запрос к native Gemini generateContent.
     Без истории и системного промпта — модели уходит только сам файл, без
@@ -567,7 +640,13 @@ def _transcribe_audio(audio_base64: str, chain_limit: int = 0) -> str:
     parts = [{"inlineData": {"mimeType": "audio/ogg", "data": audio_base64}}]
 
     failures = []          # [(модель, причина)] — для уведомления владельцу
+    chain_started = time.monotonic()
     for model_name in _media_chain(chain_limit):
+        attempt_timeout = _chain_attempt_timeout(chain_started, _AUDIO_DESCRIBE_TIMEOUT)
+        if attempt_timeout is None:
+            logger.info("🤖 Расшифровка голосового прекращена: перебор занял общий "
+                        "потолок %d с, оставшихся моделей не пробуем", _MEDIA_CHAIN_BUDGET_SEC)
+            break
         try:
             payload = {
                 # Уровень мышления — по модели (28.08.2026): голосовые просят
@@ -584,7 +663,7 @@ def _transcribe_audio(audio_base64: str, chain_limit: int = 0) -> str:
                 url,
                 json=payload,
                 headers={"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY},
-                timeout=30,
+                timeout=attempt_timeout,
             )
             response.raise_for_status()
             data = response.json()
@@ -603,12 +682,13 @@ def _transcribe_audio(audio_base64: str, chain_limit: int = 0) -> str:
                 logger.warning("🤖 %s не расшифровала голосовое: %s %s",
                                model_name, e, _err_body(e))
     logger.error("⚠️ 🤖 Голосовое не расшифровала НИ ОДНА модель цепочки")
-    _notify_chain_dead("Голосовое (расшифровка для стенограммы)", failures)
+    _notify_chain_dead(f"Голосовое (расшифровка {purpose})", failures)
     return ""
 
 
 def _describe_video(video_base64: str, mime_type: str = "video/mp4",
-                    chain_limit: int = 0) -> str:
+                    chain_limit: int = 0,
+                    purpose: str = _PURPOSE_TRANSCRIPT) -> str:
     """
     Описывает ВИДЕО (2026-07-24) — устроено как _describe_image/_transcribe_audio:
     лёгкий запрос к первой модели цепочки, без истории и системного промпта.
@@ -628,17 +708,23 @@ def _describe_video(video_base64: str, mime_type: str = "video/mp4",
     сбой не ломает ни проактивную проверку, ни поиск по базе.
 
     ⚠️ ХУДШИЙ СЛУЧАЙ ПО ВРЕМЕНИ ЗДЕСЬ САМЫЙ ДОЛГИЙ: таймаут 90 секунд на
-    модель, в цепочке их четыре — при полном отказе Google перебор займёт до
-    шести минут. Проактивной проверке это не страшно (фоновая задача), а вот
-    ПРЯМОМУ ответу страшно: там ждёт живой человек. Поэтому ask_gemini_video
-    зовёт этот разбор с chain_limit=1 — одна живая модель, не больше полутора
-    минут сверху. Резать сам таймаут по-прежнему нельзя: 90 секунд ролику
-    нужны честно.
+    модель, а в цепочке их четыре. До 28.08.2026 они складывались, и полный
+    отказ Google стоил ШЕСТИ МИНУТ занятого чата; теперь весь перебор
+    ограничен `_MEDIA_CHAIN_BUDGET_SEC` (две минуты), см. _chain_attempt_timeout.
+    ПРЯМОМУ ответу и этого много: там ждёт живой человек — поэтому
+    ask_gemini_video зовёт разбор с chain_limit=1, одна живая модель. Резать
+    сам таймаут по-прежнему нельзя: 90 секунд ролику нужны честно.
     """
     parts = [{"inlineData": {"mimeType": mime_type, "data": video_base64}}]
 
     failures = []          # [(модель, причина)] — для уведомления владельцу
+    chain_started = time.monotonic()
     for model_name in _media_chain(chain_limit):
+        attempt_timeout = _chain_attempt_timeout(chain_started, 90)
+        if attempt_timeout is None:
+            logger.info("🤖 Разбор видео прекращён: перебор занял общий потолок "
+                        "%d с, оставшихся моделей не пробуем", _MEDIA_CHAIN_BUDGET_SEC)
+            break
         try:
             payload = {
                 "contents": [{"role": "user", "parts": parts}],
@@ -651,7 +737,7 @@ def _describe_video(video_base64: str, mime_type: str = "video/mp4",
                 url,
                 json=payload,
                 headers={"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY},
-                timeout=90,
+                timeout=attempt_timeout,
             )
             response.raise_for_status()
             data = response.json()
@@ -669,7 +755,7 @@ def _describe_video(video_base64: str, mime_type: str = "video/mp4",
                 # Причина отказа в логе — см. пояснение у разбора фото выше.
                 logger.warning("🤖 %s не описала видео: %s %s", model_name, e, _err_body(e))
     logger.error("⚠️ 🤖 Видео не описала НИ ОДНА модель цепочки")
-    _notify_chain_dead("Видео (разбор для стенограммы)", failures)
+    _notify_chain_dead(f"Видео (разбор {purpose})", failures)
     return ""
 
 
@@ -1352,12 +1438,19 @@ def _media_search_text(caption: str = "", *, image_base64: str = "",
         logger.error("⚠️ Не удалось проверить состояние базы знаний: %s", e)
         return caption
 
+    # ⚠️ purpose — ТОЛЬКО для текста уведомления владельцу при полном провале
+    # (28.08.2026). До этого оно всегда говорило «для стенограммы», хотя ЗДЕСЬ
+    # никакой стенограммы нет: это личка, разбор нужен поисковому запросу.
+    # Максим получил такое письмо на живом тесте и справедливо не понял его.
     if image_base64:
-        kind, described = "фото", _describe_image(image_base64, chain_limit=1)
+        kind, described = "фото", _describe_image(image_base64, chain_limit=1,
+                                                  purpose=_PURPOSE_SEARCH)
     elif audio_base64:
-        kind, described = "голосовое", _transcribe_audio(audio_base64, chain_limit=1)
+        kind, described = "голосовое", _transcribe_audio(audio_base64, chain_limit=1,
+                                                         purpose=_PURPOSE_SEARCH)
     elif video_base64:
-        kind, described = "видео", _describe_video(video_base64, video_mime, chain_limit=1)
+        kind, described = "видео", _describe_video(video_base64, video_mime, chain_limit=1,
+                                                   purpose=_PURPOSE_SEARCH)
     else:
         return caption
 
