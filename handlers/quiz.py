@@ -192,11 +192,13 @@ async def send_quiz_question(chat_id: int, context: ContextTypes.DEFAULT_TYPE,
             pass
 
 
-async def cmd_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await delete_user_message_safe(update.message)
-    chat_id = update.effective_chat.id
-    logger.info("🎮 Запущена викторина (чат %s)", chat_id)
-    await send_quiz_question(chat_id, context)
+# ⚠️ КОМАНДЫ /quiz ЗДЕСЬ БОЛЬШЕ НЕТ (удалена 28.08.2026, решение Максима).
+# Она была написана, но в `setup_handlers` не регистрировалась НИ РАЗУ —
+# то есть в Телеграме не работала никогда. Викторину запускает кнопка
+# «🎮 Викторина» (callback `quiz_start`), и решение «второго входа в викторину
+# заводить незачем» записано ещё в handlers/commands.py. Удаление лишь
+# довершает его: мёртвый код, который выглядит рабочим, однажды заставит
+# кого-то искать, «почему команда не отвечает».
 
 
 async def cmd_rank(update: Update, context: ContextTypes.DEFAULT_TYPE):
