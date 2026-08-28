@@ -467,11 +467,358 @@ def check_price_list():
     return problems, f"{done} цен сверено с прайсами провайдеров"
 
 
+# ───────────────────────────────────────────────
+#  4. РАЗМЫШЛЕНИЯ МОДЕЛИ НЕ УТЕКАЮТ В ЧАТ
+# ─────────────────────────────────────────────
+
+def _utf16_len(text: str) -> int:
+    """
+    Длина строки в кодовых единицах UTF-16 — так её меряет Telegram.
+
+    ⚠️ Считаем СВОИМ способом, а не через utf16_len из telegramify: проверка
+    смещений должна быть независима от библиотеки, которая эти смещения
+    и расставляет. Иначе общая ошибка в мерке осталась бы незамеченной.
+    """
+    return len(text.encode("utf-16-le")) // 2
+
+
+def check_thoughts():
+    """
+    Служебные блоки <thought>…</thought> не должны доезжать до чата.
+
+    ⚠️ Это правило уже нарушалось (28.08.2026, найдено аудитом): в аварийной
+    ветке send_formatted стояло `or raw_answer`, и если ответ состоял из одних
+    размышлений, в чат уходил СЫРОЙ текст вместе с тегами. Здесь проверяются
+    все пути сразу, включая аварийный.
+    """
+    import utils_format as uf
+
+    problems = []
+    done = 0
+
+    def no_raw_tags(title, text):
+        nonlocal done
+        done += 1
+        low = (text or "").lower()
+        if "<thought" in low or "</thought" in low:
+            problems.append(f"{title}: в готовый текст попал служебный тег: {text[:80]!r}")
+
+    # ── Вырезание как таковое ──
+    done += 1
+    if uf.strip_thoughts("<thought>раз</thought>Ответ.") != "Ответ.":
+        problems.append("strip_thoughts не вырезал одиночный блок размышлений")
+
+    done += 1
+    many = uf.strip_thoughts("<thought>раз</thought>А<thought>два</thought>Б")
+    if "раз" in many or "два" in many:
+        problems.append(f"strip_thoughts оставил текст размышлений: {many!r}")
+
+    done += 1
+    body, th = uf._extract_thoughts("<thought>размышляю</thought>Готовый ответ.")
+    if body != "Готовый ответ." or "размышляю" not in th:
+        problems.append(f"_extract_thoughts разделил неверно: тело={body!r}, мысли={th!r}")
+
+    # ── Сборка сообщения: тумблер ВКЛЮЧЁН (умолчание) ──
+    raw = "<thought>я подумал вот так</thought>Короткий ответ."
+    text, ents = uf.build_text_and_entities(raw)
+    no_raw_tags("мысли включены", text)
+    done += 1
+    if "Короткий ответ." not in text:
+        problems.append(f"мысли включены: тело ответа потерялось: {text!r}")
+    done += 1
+    if "я подумал вот так" not in text:
+        problems.append("мысли включены: сама цитата с размышлениями не собралась")
+    done += 1
+    if not any(e.type == "expandable_blockquote" for e in ents):
+        problems.append("мысли включены: цитата не помечена как сворачиваемая — "
+                        "размышления развернутся на весь экран")
+
+    # ── Сборка сообщения: тумблер ВЫКЛЮЧЕН ──
+    saved = uf.thoughts_enabled
+    uf.thoughts_enabled = lambda: False
+    try:
+        text, _ = uf.build_text_and_entities(raw)
+        no_raw_tags("мысли выключены", text)
+        done += 1
+        if "я подумал вот так" in text:
+            problems.append("мысли выключены тумблером, но всё равно попали в сообщение")
+        done += 1
+        if "Короткий ответ." not in text:
+            problems.append(f"мысли выключены: тело ответа потерялось: {text!r}")
+
+        # ⚠️ Исключение из правила: видимой части НЕТ вовсе. Тогда мысли
+        # показываем, иначе вышло бы пустое сообщение — Telegram такие не
+        # принимает, и человек остался бы вообще без ответа.
+        text, _ = uf.build_text_and_entities("<thought>только размышления</thought>")
+        no_raw_tags("только мысли, тумблер выключен", text)
+        done += 1
+        if not text.strip():
+            problems.append("ответ из одних размышлений при выключенном тумблере дал "
+                            "ПУСТОЕ сообщение — Telegram его не примет")
+    finally:
+        uf.thoughts_enabled = saved
+
+    # ── Аварийная ветка: форматирование сорвалось ──
+    # ⚠️ Ровно то место, где 28.08.2026 в чат уходили сырые теги.
+    import asyncio
+
+    class FakeBot:
+        def __init__(self): self.sent = []
+
+        async def send_message(self, chat_id=None, text=None, **kw):
+            self.sent.append(text)
+            return None
+
+    def send_with_broken_formatting(raw_answer):
+        bot = FakeBot()
+        broken = uf.build_text_and_entities
+        uf.build_text_and_entities = lambda *_a, **_k: (_ for _ in ()).throw(
+            RuntimeError("нарочно сломанное форматирование"))
+        try:
+            asyncio.run(uf.send_formatted(bot, 1, raw_answer))
+        finally:
+            uf.build_text_and_entities = broken
+        return bot.sent
+
+    sent = send_with_broken_formatting("<thought>мысли</thought>Обычный ответ.")
+    done += 1
+    if not sent:
+        problems.append("аварийная отправка: в чат не ушло НИЧЕГО")
+    for part in sent:
+        no_raw_tags("аварийная отправка", part)
+    done += 1
+    if sent and "мысли" in " ".join(sent):
+        problems.append("аварийная отправка: текст размышлений попал в чат")
+
+    # Ответ ТОЛЬКО из размышлений + сорвавшееся форматирование
+    sent = send_with_broken_formatting("<thought>одни лишь мысли</thought>")
+    for part in sent:
+        no_raw_tags("аварийная отправка, ответ из одних мыслей", part)
+    done += 1
+    if not sent or not (sent[0] or "").strip():
+        problems.append("аварийная отправка при ответе из одних размышлений: "
+                        "в чат ушла пустота — Telegram такое сообщение отвергнет")
+    done += 1
+    if sent and "одни лишь мысли" in sent[0]:
+        problems.append("аварийная отправка: показали человеку сами размышления")
+
+    return problems, f"{done} проверок: вырезание, тумблер, аварийная отправка"
+
+
+# ───────────────────────────────────────────────
+#  5. РАЗМЕТКА ДЛИННЫХ ОТВЕТОВ НЕ РАЗЪЕЗЖАЕТСЯ
+# ─────────────────────────────────────────────
+
+def check_long_answers():
+    """
+    Длинный ответ режется на части, и разметка не съезжает.
+
+    ⚠️ Telegram меряет смещения в UTF-16, а не в символах: эмодзи 🧠 — это
+    ДВЕ единицы, а не одна. Ошибка в мерке не роняет бота — она сдвигает
+    выделения, и жирным оказывается кусок соседнего слова. Поэтому длины
+    здесь считаются своим `_utf16_len`, независимо от библиотеки.
+    """
+    import asyncio
+    import utils_format as uf
+
+    problems = []
+    done = 0
+
+    def entities_fit(title, text, entities):
+        """Каждое выделение обязано лежать ВНУТРИ своего текста."""
+        nonlocal done
+        limit = _utf16_len(text)
+        for e in entities:
+            done += 1
+            if e.offset < 0 or e.length < 0:
+                problems.append(f"{title}: выделение с отрицательными числами "
+                                f"(offset={e.offset}, length={e.length})")
+            elif e.offset + e.length > limit:
+                problems.append(
+                    f"{title}: выделение вылезло за конец текста — "
+                    f"{e.offset}+{e.length} > {limit}. В чате жирным окажется "
+                    f"не то, что задумано, либо Telegram отвергнет сообщение")
+
+    # ── Обычный ответ с разметкой и эмодзи ──
+    raw = "🧠 **Жирно** и `код` в одной строке."
+    text, ents = uf.build_text_and_entities(raw)
+    entities_fit("ответ с эмодзи и разметкой", text, ents)
+
+    # ── Ответ с мыслями: смещения цитаты считаются отдельно и складываются ──
+    raw = "<thought>эмодзи 🧠 внутри мыслей</thought>**Жирный** ответ с 🎯 эмодзи."
+    text, ents = uf.build_text_and_entities(raw)
+    entities_fit("ответ с мыслями и эмодзи", text, ents)
+    done += 1
+    if not ents:
+        problems.append("ответ с мыслями: разметка потерялась целиком")
+
+    # ── Длинный ответ: режется и влезает в лимит ──
+    class FakeBot:
+        def __init__(self): self.sent = []
+
+        async def send_message(self, chat_id=None, text=None, entities=None, **kw):
+            self.sent.append((text, entities or []))
+            return None
+
+    # Текст заведомо длиннее одного сообщения, с разметкой и эмодзи
+    block = "Строка с **жирным** словом и эмодзи 🎯 для счёта в UTF-16.\n"
+    long_raw = block * 120
+    bot = FakeBot()
+    asyncio.run(uf.send_formatted(bot, 1, long_raw))
+
+    done += 1
+    if len(bot.sent) < 2:
+        problems.append(f"длинный ответ ({_utf16_len(long_raw)} единиц UTF-16) "
+                        f"не разрезан: частей {len(bot.sent)}")
+
+    for i, (part_text, part_ents) in enumerate(bot.sent, 1):
+        done += 1
+        size = _utf16_len(part_text or "")
+        if size > uf.MAX_UTF16:
+            problems.append(f"часть {i}: {size} единиц UTF-16 при лимите "
+                            f"{uf.MAX_UTF16} — Telegram её не примет")
+        entities_fit(f"часть {i}", part_text or "", part_ents)
+
+    # ── Ничего не потерялось при нарезке ──
+    done += 1
+    joined = "".join(t for t, _ in bot.sent)
+    if "🎯" not in joined:
+        problems.append("после нарезки эмодзи пропали из текста")
+    done += 1
+    # Слов в исходнике и в склейке частей должно быть поровну
+    want_words = long_raw.count("жирным")
+    got_words = joined.count("жирным")
+    if got_words != want_words:
+        problems.append(f"при нарезке потерялся текст: слово «жирным» было "
+                        f"{want_words} раз, стало {got_words}")
+
+    # ── Разметка не должна пропадать во ВТОРОЙ части ──
+    # ⚠️ Жалоба Максима 11.08.2026: «первая часть с разметкой приходит,
+    # а вторая без». Тогда доказать было нечем — теперь проверяется.
+    done += 1
+    if len(bot.sent) > 1 and not bot.sent[1][1]:
+        problems.append("во второй части сообщения нет НИ ОДНОГО выделения, "
+                        "хотя разметка в тексте есть — она теряется при нарезке")
+
+    return problems, f"{done} проверок: смещения UTF-16, нарезка, потери текста"
+
+
+# ───────────────────────────────────────────────
+#  6. ПОТОЛКИ ОЖИДАНИЯ
+# ─────────────────────────────────────────────
+
+def check_wait_budgets():
+    """
+    Перебор моделей укладывается в общий потолок.
+
+    ⚠️ Проверяется ПОДДЕЛЬНЫМИ ЧАСАМИ: настоящие ждать нельзя (проверка на
+    каждой выкатке), а без подмены времени потолок ни разу не сработает и
+    проверка окажется декоративной. Сеть тоже подставная — каждая «зависшая»
+    модель двигает часы ровно на свой таймаут и бросает таймаут.
+
+    ⚠️ Проверяется и то, что первой попытке время НЕ урезается: иначе она
+    уходила бы в запрос с заведомо недостаточным сроком — хуже, чем не
+    пробовать вовсе.
+    """
+    import requests
+    import config as c
+    from services import gemini as g
+
+    problems = []
+    done = 0
+    calls = []
+
+    class Clock:
+        def __init__(self): self.t = 1000.0
+        def monotonic(self): return self.t
+        def perf_counter(self): return self.t
+        def sleep(self, s): self.t += s
+        def time(self): return 1700000000.0
+
+    clock = Clock()
+
+    class FakeHttp:
+        def post(self, url, json=None, headers=None, timeout=None, **kw):
+            calls.append(timeout)
+            clock.t += timeout                 # модель провисела весь таймаут
+            raise requests.exceptions.ReadTimeout(f"timeout={timeout}")
+
+    saved_time, saved_http = g.time, g._http
+    saved_notify = g._notify_chain_dead
+    saved_blocked = dict(g._quota_blocked)
+    g.time = clock
+    g._http = lambda: FakeHttp()
+    g._notify_chain_dead = lambda *a, **kw: None    # письма владельцу глушим
+    g._quota_blocked.clear()
+
+    try:
+        def run(title, fn, budget, base, chain_len):
+            nonlocal done
+            calls.clear()
+            g._quota_blocked.clear()
+            t0 = clock.t
+            result = fn()
+            spent = clock.t - t0
+
+            done += 1
+            if spent > budget + 2:
+                problems.append(f"{title}: перебор занял {spent:.0f} с при потолке "
+                                f"{budget} с — человек ждёт лишнее")
+            done += 1
+            if calls and calls[0] != base:
+                problems.append(f"{title}: ПЕРВОЙ попытке урезали время — "
+                                f"{calls[0]} с вместо {base} с")
+            done += 1
+            if len(calls) >= chain_len and chain_len > 1:
+                problems.append(f"{title}: потолок не сработал, перебрана вся "
+                                f"цепочка из {chain_len} моделей")
+            return result
+
+        n_audio = len(c.AUDIO_FALLBACK_CHAIN)
+        n_video = len([m for m in c.VIDEO_FALLBACK_CHAIN
+                       if c.AVAILABLE_MODELS.get(m, {}).get("video")])
+        n_media = len(c.PROACTIVE_MEDIA_CHAIN)
+
+        # Личка: человек ждёт ответа
+        answer = run("голосовое в личке", lambda: g.ask_gemini_audio(1, 1, "QQ"),
+                     g._DIRECT_AUDIO_BUDGET_SEC, c.GEMINI_TIMEOUT, n_audio)
+        done += 1
+        if not answer:
+            problems.append("голосовое в личке: человек не получил вообще ничего — "
+                            "должна уйти заглушка, а не пустота")
+
+        answer = run("видео в личке", lambda: g.ask_gemini_video(1, 1, "QQ"),
+                     g._DIRECT_VIDEO_BUDGET_SEC, c.VIDEO_TIMEOUT, n_video)
+        done += 1
+        if not answer:
+            problems.append("видео в личке: человек не получил вообще ничего")
+
+        # Группа: бот работает фоном, потолок жёстче
+        run("альбом из 10 фото в группе",
+            lambda: g._describe_image("QQ", 0, ["QQ"] * 9),
+            g._MEDIA_CHAIN_BUDGET_SEC, g._describe_timeout(10), n_media)
+        run("голосовое в группе", lambda: g._transcribe_audio("QQ"),
+            g._MEDIA_CHAIN_BUDGET_SEC, g._AUDIO_DESCRIBE_TIMEOUT, n_media)
+        run("видео в группе", lambda: g._describe_video("QQ"),
+            g._MEDIA_CHAIN_BUDGET_SEC, 90, n_media)
+
+    finally:
+        g.time, g._http = saved_time, saved_http
+        g._notify_chain_dead = saved_notify
+        g._quota_blocked.clear()
+        g._quota_blocked.update(saved_blocked)
+
+    return problems, f"{done} проверок: личка, группа, первая попытка не урезана"
+
+
 CHECKS = (
     ("деньги — расчёт стоимости запросов", check_money),
     ("деньги — сам прайс не менялся", check_price_list),
     ("пометка мута — разбор ответа модели", check_mute_tag),
     ("права доступа — кнопки и иерархия", check_permissions),
+    ("размышления модели не утекают в чат", check_thoughts),
+    ("длинные ответы — разметка не разъезжается", check_long_answers),
+    ("потолки ожидания — перебор моделей", check_wait_budgets),
 )
 
 
@@ -484,6 +831,10 @@ def main() -> int:
     tmp_dir = tempfile.mkdtemp(prefix="c4max-selftest-")
     from database import history as hist
     hist.DB_PATH = os.path.join(tmp_dir, "selftest.db")
+    # Схему создаём сразу: проверки потолков зовут настоящие ask_gemini_*,
+    # а те по дороге читают историю переписки и настройки. Без таблиц они
+    # падают на «no such table», и проверка краснеет не по делу.
+    hist.init_db()
 
     import logging
     logging.disable(logging.CRITICAL)
