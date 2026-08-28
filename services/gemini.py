@@ -236,6 +236,57 @@ def _supports_video(model_name: str) -> bool:
     return bool(AVAILABLE_MODELS.get(model_name, {}).get("video", False))
 
 
+def _supports_minimal_thinking(model_name: str) -> bool:
+    """
+    True, если модель принимает НУЛЕВОЙ уровень мышления (28.08.2026).
+
+    ⚠️ ПО УМОЛЧАНИЮ True — в отличие от соседей выше, где отсутствие поля
+    означает «не умеет». Здесь наоборот намеренно: нулевой уровень принимают
+    почти все, и помечать нужно исключения, а не правило. Так добавление новой
+    модели не меняет её поведение молча — а если она окажется исключением,
+    Google скажет об этом прямым отказом, и он теперь виден в логе целиком
+    (см. _describe_image).
+    """
+    return bool(AVAILABLE_MODELS.get(model_name, {}).get("minimal_thinking", True))
+
+
+def _describe_timeout(pictures: int) -> int:
+    """
+    Сколько ждать разбор картинок — по их числу (28.08.2026).
+
+    ⚠️ ЗАВЕДЕНО ПОСЛЕ ЖИВОГО ТЕСТА АЛЬБОМОВ. Потолок был зашит в 30 секунд и
+    ставился, когда картинка всегда была ОДНА. С альбомами (27.08) в один
+    запрос уходит до десяти, и уже на ТРЁХ разбор занял 24.2 секунды — почти
+    впритык. На шести-десяти он бы не уложился, и вышло бы худшее из
+    возможного: каждая модель цепочки ждёт свои 30 секунд и сдаётся, все
+    четыре по очереди — до двух минут впустую и НИ ОДНОГО разбора. Бот при
+    этом не падает, а молча отвечает вслепую или молчит — то есть поломка
+    выглядела бы как «модель ничего не поняла».
+
+    Одна картинка — прежние 30 секунд, дальше +15 на каждую, потолок 90:
+    выше поднимать нельзя без нужды, столько же ждёт ОТВЕТ бота на медиа, а
+    пока идёт проверка, чат для бота «занят» защёлкой `_in_flight`.
+    """
+    return min(90, 30 + 15 * max(0, pictures - 1))
+
+
+def _media_level_for(model_name: str) -> str:
+    """
+    Уровень мышления для РАЗБОРА вложения у конкретной модели.
+
+    Разбору мышление не нужно (решение Максима 11.08: описать картинку — не о
+    чем думать), поэтому по умолчанию нулевой. Модели, которая его не
+    принимает, даём ближайшую ступень вверх — иначе она не отвечает вовсе.
+
+    ⚠️ Касается ТОЛЬКО разбора (фото и голосовые). У видео свой уровень, у
+    ОТВЕТА бота на медиа — верхняя ступень; там 3.7-flash работает, и трогать
+    их этой правкой не просили.
+    """
+    if _supports_minimal_thinking(model_name):
+        return _MEDIA_THINKING_LEVEL
+    return _MEDIA_FALLBACK_THINKING_LEVEL
+
+
 # ── Лёгкие хелперы для проактивного режима (без истории, без RAG) ──
 #
 #  ⚠️ ВМЕСТЕ С МЕДИА МОДЕЛИ НЕ УХОДИТ НИ ОДНОГО СЛОВА — только сам файл.
@@ -287,6 +338,17 @@ def _native_text_only(data: dict) -> str:
 #  (`ask_group_proactive_media`) при этом не трогаем — там оно по делу.
 _MEDIA_THINKING_LEVEL = "minimal"
 
+# ⚠️ ЗАПАСНОЙ УРОВЕНЬ ДЛЯ ТЕХ, КТО НЕ ПРИНИМАЕТ НУЛЕВОЙ (28.08.2026).
+# Не всякая модель умеет «не думать»: gemini-3.7-flash на нулевой уровень
+# отвечает жёстким отказом «Thinking level MINIMAL is not supported for this
+# model» — и падала на КАЖДОМ фото, 7 попыток из 7, полторы недели подряд.
+# Снаружи было не видно: разбор подхватывала следующая модель цепочки, а в
+# логе стояло голое «400 Bad Request» без причины.
+# «low» — ближайшая ступень вверх, то есть минимум мыслей из возможных для
+# такой модели. Кому она полагается — решает пометка `minimal_thinking` в
+# config.AVAILABLE_MODELS, см. _media_level_for.
+_MEDIA_FALLBACK_THINKING_LEVEL = "low"
+
 # ⚠️ У ВИДЕО СВОЙ УРОВЕНЬ — «medium» (2026-08-11, решение Максима). Ролик это
 # не картинка: там важна последовательность событий — кто кого подбил, чем
 # кончился бой, — а на «minimal» разбор выходит поверхностным («игрок едет по
@@ -335,10 +397,16 @@ def _media_answer_thinking() -> dict:
     return {"thinkingConfig": {"includeThoughts": True, "thinkingLevel": "high"}}
 
 
-def _media_thinking_openai() -> dict:
-    """То же для OpenAI-совместимого пути (фото): формат у Google другой."""
+def _media_thinking_openai(model_name: str) -> dict:
+    """
+    То же для OpenAI-совместимого пути (фото): формат у Google другой.
+
+    ⚠️ Принимает ИМЯ МОДЕЛИ (28.08.2026): уровень выбирается по ней, а не один
+    на всех — см. _media_level_for. Зашитый на всех нулевой уровень и был
+    причиной, по которой gemini-3.7-flash не описала ни одного фото.
+    """
     return {"google": {"thinking_config": {"include_thoughts": False,
-                                           "thinking_level": _MEDIA_THINKING_LEVEL}}}
+                                           "thinking_level": _media_level_for(model_name)}}}
 
 
 # ── Модель, исчерпавшая квоту, уходит на скамейку ────────────────────────
@@ -436,15 +504,16 @@ def _describe_image(image_base64: str, chain_limit: int = 0,
                 "model": model_name,
                 "messages": [{"role": "user", "content": content}],
                 "stream": False,
-                "extra_body": _media_thinking_openai(),
+                "extra_body": _media_thinking_openai(model_name),
             }
-            logger.info("🤖 Запрос к модели %s (описание фото)", model_name)
+            logger.info("🤖 Запрос к модели %s (описание фото%s)",
+                        model_name, f", картинок {len(content)}" if len(content) > 1 else "")
             start = time.perf_counter()
             response = _http().post(
                 GEMINI_API_URL,
                 json=payload,
                 headers={"Authorization": f"Bearer {GEMINI_API_KEY}"},
-                timeout=30,
+                timeout=_describe_timeout(len(content)),
             )
             response.raise_for_status()
             data = response.json()
@@ -463,7 +532,15 @@ def _describe_image(image_base64: str, chain_limit: int = 0,
             # выглядит как «бот проигнорировал сообщение» и не находится в логе.
             failures.append((model_name, _err_code(e)))
             if not _note_quota_error(model_name, e):
-                logger.warning("🤖 %s не описала фото: %s", model_name, e)
+                # ⚠️ ТЕЛО ОТВЕТА В ЛОГЕ ОБЯЗАТЕЛЬНО (28.08.2026). Полторы недели
+                # здесь стояло голое «400 Client Error» — и всё это время
+                # gemini-3.7-flash не описала НИ ОДНОГО фото, а причину («нулевой
+                # уровень мышления не поддерживается») пришлось выяснять живыми
+                # запросами к Google. Помощник `_err_body` завели ещё 19.07 ровно
+                # на такой случай, в этой ветке его просто забыли позвать.
+                # Это НЕ «полный текст ответа моделей», который Максим просил
+                # убрать из логов 11.08: тут не ответ, а причина отказа.
+                logger.warning("🤖 %s не описала фото: %s %s", model_name, e, _err_body(e))
     logger.error("⚠️ 🤖 Фото не описала НИ ОДНА модель цепочки")
     _notify_chain_dead("Фото (разбор для стенограммы)", failures)
     return ""
@@ -493,8 +570,12 @@ def _transcribe_audio(audio_base64: str, chain_limit: int = 0) -> str:
     for model_name in _media_chain(chain_limit):
         try:
             payload = {
+                # Уровень мышления — по модели (28.08.2026): голосовые просят
+                # тот же нулевой уровень, что и фото, и на gemini-3.7-flash
+                # отваливались бы точно так же. Живьём этого не видели только
+                # потому, что голосовых в логах не было ни одного.
                 "contents": [{"role": "user", "parts": parts}],
-                "generationConfig": _media_thinking_native(),
+                "generationConfig": _media_thinking_native(_media_level_for(model_name)),
             }
             logger.info("🤖 Запрос к модели %s (расшифровка аудио)", model_name)
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
@@ -518,7 +599,9 @@ def _transcribe_audio(audio_base64: str, chain_limit: int = 0) -> str:
         except Exception as e:
             failures.append((model_name, _err_code(e)))
             if not _note_quota_error(model_name, e):
-                logger.warning("🤖 %s не расшифровала голосовое: %s", model_name, e)
+                # Причина отказа в логе — см. пояснение у разбора фото выше.
+                logger.warning("🤖 %s не расшифровала голосовое: %s %s",
+                               model_name, e, _err_body(e))
     logger.error("⚠️ 🤖 Голосовое не расшифровала НИ ОДНА модель цепочки")
     _notify_chain_dead("Голосовое (расшифровка для стенограммы)", failures)
     return ""
@@ -583,7 +666,8 @@ def _describe_video(video_base64: str, mime_type: str = "video/mp4",
         except Exception as e:
             failures.append((model_name, _err_code(e)))
             if not _note_quota_error(model_name, e):
-                logger.warning("🤖 %s не описала видео: %s", model_name, e)
+                # Причина отказа в логе — см. пояснение у разбора фото выше.
+                logger.warning("🤖 %s не описала видео: %s %s", model_name, e, _err_body(e))
     logger.error("⚠️ 🤖 Видео не описала НИ ОДНА модель цепочки")
     _notify_chain_dead("Видео (разбор для стенограммы)", failures)
     return ""
@@ -2378,8 +2462,9 @@ def ask_group_proactive_media(chat_id: int, bot_id: int, trigger_text: str,
             return answer
         except Exception as e:
             if not _note_quota_error(model_name, e):
-                logger.warning("🤖 %s не ответила на %s в проактивной проверке: %s",
-                               model_name, kind, e)
+                # Причина отказа в логе — см. пояснение у разбора фото.
+                logger.warning("🤖 %s не ответила на %s в проактивной проверке: %s %s",
+                               model_name, kind, e, _err_body(e))
     logger.error("⚠️ 🤖 Проактивный ответ на %s не дала НИ ОДНА модель цепочки — "
                  "уходим на активную модель по стенограмме", kind)
     chat_log.note_answer("—", 0,
