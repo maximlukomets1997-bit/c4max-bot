@@ -285,6 +285,34 @@ _MEDIA_MIN_ATTEMPT_SEC = 15
 #  когда модель тормозит, человек ждёт эту минуту прежде, чем начнётся ответ.
 _AUDIO_DESCRIBE_TIMEOUT = 60
 
+#  ─── Потолки перебора для ПРЯМЫХ путей лички (28.08.2026, аудит) ──────
+#
+#  ⚠️ ТУ ЖЕ ЛОВУШКУ, ЧТО ВЫШЕ, ЗАБЫЛИ ЗАКРЫТЬ ВТОРОЙ РАЗ. Потолок перебора
+#  завели только разбору медиа; ask_gemini_audio и ask_gemini_video —
+#  голосовое и видео, присланные боту НАПРЯМУЮ, — остались без него, и их
+#  попытки складывались точно так же. Посчитано по коду 28.08, худшие случаи
+#  ДО этой правки (все модели молчат до своего таймаута):
+#
+#      голосовое в личке   4 × 60  = 4.1 минуты
+#      видео в личке       4 × 180 = 12.1 минуты   ← человек ждёт всё это время
+#
+#  Числа выбраны Максимом из трёх вариантов, посчитанных по коду. Что выходит
+#  теперь (в скобках — сколько моделей успеет подстраховать из четырёх):
+#
+#      голосовое   150 с → ждать не дольше 2.5 минуты (3 модели)
+#      видео       240 с → ждать не дольше 4 минут    (2 модели)
+#
+#  ⚠️ ПОЧЕМУ БОЛЬШЕ, ЧЕМ У ГРУППЫ (120 с), хотя в личке человек ЖДЁТ, а группа
+#  обрабатывается фоном: у разбора медиа попытка — это короткое описание
+#  вложения, а здесь модель сразу пишет ПОЛНЫЙ ответ человеку, и одна попытка
+#  честно дольше (60 и 180 секунд против 30–90). Потолок в 120 секунд оставил
+#  бы видео вообще без подстраховки: первая же попытка съедала бы его целиком.
+#
+#  ⚠️ НЕ ПУТАТЬ с оговоркой «на личке попытка одна» выше: она про РАЗБОР медиа
+#  ради поиска по базе (chain_limit=1). Здесь путь другой — цепочка полная.
+_DIRECT_AUDIO_BUDGET_SEC = 150
+_DIRECT_VIDEO_BUDGET_SEC = 240
+
 #  Зачем звали разбор — попадает В УВЕДОМЛЕНИЕ ВЛАДЕЛЬЦУ при полном провале
 #  цепочки, и больше никуда. Раньше там всегда стояло «для стенограммы», хотя
 #  у разбора два зовущих с 16.08: проактивный режим (стенограмма) и поиск по
@@ -294,15 +322,22 @@ _PURPOSE_TRANSCRIPT = "для стенограммы"
 _PURPOSE_SEARCH = "для поиска по базе"
 
 
-def _chain_attempt_timeout(chain_started: float, base: int) -> int | None:
+def _chain_attempt_timeout(chain_started: float, base: int,
+                           budget: int = _MEDIA_CHAIN_BUDGET_SEC) -> int | None:
     """
     Сколько секунд дать СЛЕДУЮЩЕЙ модели цепочки — или None, если пора
     остановиться: общего времени осталось меньше `_MEDIA_MIN_ATTEMPT_SEC`.
 
     chain_started — момент начала ВСЕГО перебора (time.monotonic), а не
     текущей попытки. base — потолок одной попытки для этого вида вложения.
+
+    budget — общий потолок ВСЕГО перебора. По умолчанию — потолок разбора
+    медиа (`_MEDIA_CHAIN_BUDGET_SEC`, две минуты). Прямые пути лички передают
+    свой, побольше: там модель не описывает вложение для стенограммы, а сразу
+    отвечает человеку, и одна попытка сама по себе дольше (см.
+    `_DIRECT_AUDIO_BUDGET_SEC` / `_DIRECT_VIDEO_BUDGET_SEC`).
     """
-    left = _MEDIA_CHAIN_BUDGET_SEC - (time.monotonic() - chain_started)
+    left = budget - (time.monotonic() - chain_started)
     if left < _MEDIA_MIN_ATTEMPT_SEC:
         return None
     return int(min(base, left))
@@ -532,7 +567,8 @@ def _describe_image(image_base64: str, chain_limit: int = 0,
     Описывает фото: нестриминговый запрос к Gemini ПО ЦЕПОЧКЕ
     `PROACTIVE_MEDIA_CHAIN` — первая ответившая модель и выигрывает.
     Без истории, системного промпта и RAG — только описание картинки.
-    Мышление на максимуме, мысли в ответ не запрашиваются (см. шапку блока).
+    Мышление МИНИМАЛЬНОЕ, мысли в ответ не запрашиваются (см. шапку блока:
+    разбор не рассуждает, он описывает, что видит).
 
     Модели уходит ГОЛЫЙ файл, без единого слова — что с ним делать, она решает
     сама (см. шапку блока: слов к медиа бот от себя не добавляет).
@@ -625,8 +661,9 @@ def _transcribe_audio(audio_base64: str, chain_limit: int = 0,
     Без истории и системного промпта — модели уходит только сам файл, без
     единого слова от бота.
 
-    Идёт ПО ЦЕПОЧКЕ `PROACTIVE_MEDIA_CHAIN`, мышление на максимуме, мысли в
-    ответ не запрашиваются и на всякий случай отбрасываются (`_native_text_only`).
+    Идёт ПО ЦЕПОЧКЕ `PROACTIVE_MEDIA_CHAIN`, мышление МИНИМАЛЬНОЕ (см. шапку
+    блока), мысли в ответ не запрашиваются и на всякий случай отбрасываются
+    (`_native_text_only`).
 
     Зовут её двое (с 16.08.2026): режим «Сам в разговор» и поиск по базе
     знаний в ask_gemini_audio — там расшифровка идёт ТОЛЬКО в поисковый
@@ -697,8 +734,8 @@ def _describe_video(video_base64: str, mime_type: str = "video/mp4",
     описывать, она решает сама. Таймаут больше, чем у фото и аудио: разбор
     видео дольше.
 
-    Идёт ПО ЦЕПОЧКЕ `PROACTIVE_MEDIA_CHAIN`, мышление на максимуме, мысли не
-    показываются и отбрасываются (`_native_text_only`).
+    Идёт ПО ЦЕПОЧКЕ `PROACTIVE_MEDIA_CHAIN`, мышление МИНИМАЛЬНОЕ (см. шапку
+    блока), мысли не показываются и отбрасываются (`_native_text_only`).
 
     Зовут её двое (с 16.08.2026): режим «Сам в разговор» и поиск по базе
     знаний в ask_gemini_video — там описание идёт ТОЛЬКО в поисковый запрос,
@@ -1565,7 +1602,7 @@ def ask_gemini_audio(chat_id: int, user_id: int, audio_base64: str) -> str:
 
     audio_failures = []    # [(модель, причина)] — для уведомления владельцу
 
-    def _try_audio(model_name: str, attempts: int = 2):
+    def _try_audio(model_name: str, attempts: int = 2, timeout: int = GEMINI_TIMEOUT):
         last_error = None
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
         # Просьба о размышлениях зависит от МОДЕЛИ, а payload общий на всю
@@ -1576,7 +1613,7 @@ def ask_gemini_audio(chat_id: int, user_id: int, audio_base64: str) -> str:
             req["generationConfig"] = thinking
         for attempt in range(attempts):
             try:
-                response = _http().post(url, json=req, headers=headers, timeout=GEMINI_TIMEOUT)
+                response = _http().post(url, json=req, headers=headers, timeout=timeout)
                 response.raise_for_status()
                 return response.json()
             except Exception as e:
@@ -1612,8 +1649,17 @@ def ask_gemini_audio(chat_id: int, user_id: int, audio_base64: str) -> str:
     used_model = active_model
     elapsed = 0.0
     start = time.perf_counter()
+    # Общий потолок перебора (28.08.2026): без него потолки моделей
+    # складывались и человек ждал до 4 минут — см. _DIRECT_AUDIO_BUDGET_SEC.
+    chain_started = time.monotonic()
     for i, model_name in enumerate(chain):
-        data = _try_audio(model_name, attempts=1)
+        attempt_timeout = _chain_attempt_timeout(chain_started, GEMINI_TIMEOUT,
+                                                 _DIRECT_AUDIO_BUDGET_SEC)
+        if attempt_timeout is None:
+            logger.warning("⚠️ Перебор аудио-моделей прекращён: занял общий потолок %d с, "
+                           "оставшиеся модели не пробуем", _DIRECT_AUDIO_BUDGET_SEC)
+            break
+        data = _try_audio(model_name, attempts=1, timeout=attempt_timeout)
         if data is not None:
             used_model = model_name
             elapsed = time.perf_counter() - start
@@ -1742,7 +1788,7 @@ def ask_gemini_video(chat_id: int, user_id: int, video_base64: str,
 
     video_failures = []    # [(модель, причина)] — для уведомления владельцу
 
-    def _try_video(model_name: str, attempts: int = 1):
+    def _try_video(model_name: str, attempts: int = 1, timeout: int = VIDEO_TIMEOUT):
         last_error = None
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
         # Конфиг размышлений — свой на каждое звено цепочки (см. _try_audio).
@@ -1752,7 +1798,7 @@ def ask_gemini_video(chat_id: int, user_id: int, video_base64: str,
             req["generationConfig"] = thinking
         for attempt in range(attempts):
             try:
-                response = _http().post(url, json=req, headers=headers, timeout=VIDEO_TIMEOUT)
+                response = _http().post(url, json=req, headers=headers, timeout=timeout)
                 response.raise_for_status()
                 return response.json()
             except Exception as e:
@@ -1788,8 +1834,17 @@ def ask_gemini_video(chat_id: int, user_id: int, video_base64: str,
     used_model = active_model
     elapsed = 0.0
     start = time.perf_counter()
+    # Общий потолок перебора (28.08.2026): без него потолки моделей
+    # складывались и человек ждал до 12 минут — см. _DIRECT_VIDEO_BUDGET_SEC.
+    chain_started = time.monotonic()
     for i, model_name in enumerate(chain):
-        data = _try_video(model_name, attempts=1)
+        attempt_timeout = _chain_attempt_timeout(chain_started, VIDEO_TIMEOUT,
+                                                 _DIRECT_VIDEO_BUDGET_SEC)
+        if attempt_timeout is None:
+            logger.warning("⚠️ Перебор видео-моделей прекращён: занял общий потолок %d с, "
+                           "оставшиеся модели не пробуем", _DIRECT_VIDEO_BUDGET_SEC)
+            break
+        data = _try_video(model_name, attempts=1, timeout=attempt_timeout)
         if data is not None:
             used_model = model_name
             elapsed = time.perf_counter() - start

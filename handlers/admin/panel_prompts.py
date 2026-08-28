@@ -11,7 +11,6 @@ import time
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
-from config import ADMIN_IDS
 from config import PROACTIVE_ENABLED_DEFAULT, PROACTIVE_MIN_MSGS, PROACTIVE_CONTEXT_MSGS
 from config import PROACTIVE_HANDS_DEFAULT, PROACTIVE_MUTE_MAX_SEC
 from config import PROACTIVE_OFF_ANNOUNCE, PROACTIVE_OFF_MSGS_KEY

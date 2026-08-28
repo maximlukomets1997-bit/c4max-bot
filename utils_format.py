@@ -226,7 +226,16 @@ async def send_formatted(bot, chat_id, raw_answer, reply_to=None, disable_previe
             logger.info("✂️ Ответ разрезан на %d части: %s", len(chunks), parts)
     except Exception as e:
         logger.warning("⚠️ Не удалось отформатировать ответ: %s — отправляю без разметки", e)
-        plain = THOUGHT_RE.sub("", raw_answer).strip() or raw_answer
+        plain = THOUGHT_RE.sub("", raw_answer).strip()
+        if not plain:
+            # Весь ответ был размышлением, и вдобавок сорвалось форматирование.
+            # ⚠️ РАНЬШЕ ЗДЕСЬ СТОЯЛО `or raw_answer` — и в чат уходил СЫРОЙ текст
+            # вместе со служебными тегами <thought>. Случай редчайший (нужны обе
+            # беды сразу), но показывать людям служебную разметку нельзя ни при
+            # каких условиях — это то самое правило, ради которого существует
+            # strip_thoughts. Лучше честная строка, чем машинный мусор.
+            logger.warning("⚠️ Ответ состоял из одних размышлений — отправляю заглушку")
+            plain = "📡 Ответ не получился — повтори запрос, пожалуйста."
         await _send_plain(bot, chat_id, plain, reply_to, disable_preview)
         return
 

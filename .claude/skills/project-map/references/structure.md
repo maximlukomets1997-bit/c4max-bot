@@ -22,9 +22,9 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 |---|---:|---:|---|
 | `bot.py` | 11 | 0 | — (только вызывает `main.main`) |
 | `main.py` | 580 | 1 | `post_init`, `post_stop`, `post_shutdown`, `main` |
-| `config.py` | 1169 | 34 | `read_build_mark` + 110 констант верхнего уровня (заводские тексты всех пяти промптов — пустые строки) |
+| `config.py` | 1168 | 34 | `read_build_mark` + 109 констант верхнего уровня (заводские тексты всех пяти промптов — пустые строки) |
 | `utils.py` | 181 | 19 | `should_respond_in_group`, `clean_mention`, `keep_chat_action`, `delete_user_message_safe`, `mention`, `schedule_delete`, `register_and_clean_bot_message` |
-| `utils_format.py` | 304 | 8 | `strip_thoughts`, `thoughts_enabled`, `build_text_and_entities`, `send_formatted`, `convert_md`, `fits_caption`, `reply_md` |
+| `utils_format.py` | 313 | 8 | `strip_thoughts`, `thoughts_enabled`, `build_text_and_entities`, `send_formatted`, `convert_md`, `fits_caption`, `reply_md` |
 | `logging_setup.py` | 248 | 3 | `archive_old_logs`, `setup_logging` |
 | `preflight.py` | 592 | 0 | `check_imports`, `check_models`, `check_providers`, `check_tables`, `check_ranks`, `check_callbacks`, `check_panels`, `check_handlers`, `main` |
 | `reset_db.py` | 81 | 0 | `main` |
@@ -58,10 +58,10 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 | `handlers/admin/common.py` | 490 | 13 | публичных нет — всё через имена с подчёркиванием (`_onoff`, `_require`, `_send_panel_message`, `_adm_back_row` и др.), но тянут его 13 модулей |
 | `handlers/admin/router.py` | 707 | 1 | `handle_callback_query` — единственный роутер всех кнопок |
 | `handlers/admin/panel_main.py` | 445 | 4 | `send_stats_panel`, `send_api_panel`, `send_daily_report_panel`, `send_weekly_report_panel`, `cmd_stats`, `build_adm_keyboard`, `send_adm_panel`, `cmd_adm` |
-| `handlers/admin/panel_prompts.py` | 1330 | 3 | `send_prompt_files`, `send_prompts_panel`, `handle_prompt_reset`, `cmd_prompt_set/add/reset`, `cmd_news_prompt_set/reset`, `cmd_rag_prompt_set/reset`, `cmd_author_prompt_set/reset`, `cmd_proactive_prompt_set/reset` |
+| `handlers/admin/panel_prompts.py` | 1329 | 3 | `send_prompt_files`, `send_prompts_panel`, `handle_prompt_reset`, `cmd_prompt_set/add/reset`, `cmd_news_prompt_set/reset`, `cmd_rag_prompt_set/reset`, `cmd_author_prompt_set/reset`, `cmd_proactive_prompt_set/reset` |
 | `handlers/admin/panel_users.py` | 1346 | 3 | `send_users_panel`, `send_user_card`, `cmd_users` |
 | `handlers/admin/panel_rag.py` | 1000 | 6 | `send_rag_panel`, `cmd_rag`, `handle_kb_document`, `handle_kb_test_query` (панель из трёх экранов: разделы → список раздела → настройки поиска) |
-| `handlers/admin/panel_mod.py` | 589 | 3 | `send_mod_panel`, `cmd_mod`, `cmd_unmute` |
+| `handlers/admin/panel_mod.py` | 588 | 3 | `send_mod_panel`, `cmd_mod`, `cmd_unmute` |
 | `handlers/admin/panel_quiz.py` | 584 | 3 | `send_quiz_panel`, `cmd_quiz_admin` |
 | `handlers/admin/panel_balance.py` | 442 | 3 | `send_balance_panel`, `handle_balance_input` |
 | `handlers/admin/panel_updates.py` | 181 | 3 | `send_updates_panel` |
@@ -71,7 +71,7 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 
 | файл | строк | тянут | публичные имена |
 |---|---:|---:|---|
-| `services/gemini.py` | 2761 | 7 | `compress_newlines`, `ask_gemini`, `ask_gemini_audio`, `ask_gemini_video`, `format_news_as_colonel`, `author_brief`, `ask_group_proactive`, `ask_group_proactive_media`, `generate_image` |
+| `services/gemini.py` | 2816 | 7 | `compress_newlines`, `ask_gemini`, `ask_gemini_audio`, `ask_gemini_video`, `format_news_as_colonel`, `author_brief`, `ask_group_proactive`, `ask_group_proactive_media`, `generate_image` |
 | `services/antispam.py` | 861 | 7 | `is_enabled`, `get_thresholds`, `get_thresholds_for`, `trust_info`, `check_and_mute`, `unmute`, `mute_user`, `kick_user`, `ban_user`, `unban_user`, `notify_owners_ai_mute`, `is_linkfilter_enabled`, `check_and_delete_links`, `get_mute_stats`, `get_recent_actions`, `get_evidence` |
 | `services/daily_report.py` | 781 | 8 | `kyiv_now`, `kyiv_label`, `collect_counters`, `period_totals`, `render`, `midnight_report`, `today_so_far`, `weekly_report`, `week_so_far`, `last_report_text`, `last_weekly_text` и др. |
 | `services/rag.py` | 795 | 5 | `cosine_similarity`, `RagQuotaError`, `get_embedding`, `parse_article_file`, `is_active`, `sync_knowledge_base`, `index_lag`, `rebuild_knowledge_base`, `normalize_query`, `retrieve_relevant_context`, `test_search` |
