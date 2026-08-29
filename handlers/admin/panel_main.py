@@ -8,7 +8,8 @@ import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
-from config import AVAILABLE_MODELS, AVAILABLE_IMAGE_MODELS, GEMINI_MODEL, PROVIDERS, BOT_VERSION_HTML, AUTO_UPDATE_ENABLED_DEFAULT
+from config import (AVAILABLE_MODELS, AVAILABLE_IMAGE_MODELS, GEMINI_MODEL, PROVIDERS,
+                    BOT_VERSION_HTML, AUTO_UPDATE_ENABLED_DEFAULT, THINKING_LEVELS)
 from database.history import get_setting, get_bot_stats, get_qwen_tokens
 from utils import register_and_clean_bot_message, delete_user_message_safe
 
@@ -90,11 +91,50 @@ _REPORT_BUTTON_ROW = [
 ]
 
 
+def _thinking_rows():
+    """
+    Ряды кнопок «🤔 <провайдер>: <глубина>» — по одной на провайдера
+    (29.08.2026, решение Максима «по кнопке на джемини, квен, дипсик и мимо»).
+
+    ⚠️ ПОЧЕМУ НЕ ОДНА ОБЩАЯ КНОПКА. Провайдеры умеют разное, замерено живыми
+    запросами: у Gemini четыре ступени, у DeepSeek свои три (low/high/max),
+    у Qwen ступеней нет вовсе — есть точный потолок мыслей в токенах, а у MiMo
+    нет и потолка, только «думает / не думает». Общая кнопка на четыре
+    положения обещала бы четыре, а выполняла бы два на MiMo. Подробности и
+    числа — config.THINKING_LEVELS.
+
+    Порядок провайдеров и набор положений берутся ИЗ РЕЕСТРА (config), имена и
+    значки — из PROVIDERS: второго списка ни того, ни другого здесь нет, иначе
+    добавление провайдера пришлось бы помнить в двух местах.
+
+    Значок 🤔 общий у всех четырёх и намеренно НЕ 🧠: под 🧠 в этой же панели
+    живёт тумблер показа мыслей, а он про совсем другое — прячет цитату,
+    а не меняет глубину.
+    """
+    from services.gemini import thinking_label
+
+    rows, pair = [], []
+    for provider in THINKING_LEVELS:
+        meta = PROVIDERS.get(provider, {})
+        title = meta.get("title", provider)
+        pair.append(InlineKeyboardButton(
+            f"🤔 {title}: {thinking_label(provider)}",
+            callback_data=f"think:{provider}"))
+        if len(pair) == 2:
+            rows.append(pair)
+            pair = []
+    if pair:
+        rows.append(pair)
+    return rows
+
+
 def _build_api_keyboard(user_id):
     """
-    Клавиатура панели «📡 Настройки API»: кнопки выбора моделей + отчёты
-    о расходах + вход на экран «💰 Счета и квоты» + возврат в /adm.
-    Вызывается при открытии панели и при обновлении клавиатуры после смены модели.
+    Клавиатура панели «📡 Настройки API»: кнопки выбора моделей + глубина
+    раздумий по провайдерам + отчёты о расходах + вход на экран
+    «💰 Счета и квоты» + возврат в /adm.
+    Вызывается при открытии панели и при обновлении клавиатуры после смены
+    модели или глубины.
     """
     active_model = get_setting("active_model", GEMINI_MODEL)
     active_image_model = get_setting("active_image_model", "gemini-3.1-flash-image")
@@ -114,7 +154,7 @@ def _build_api_keyboard(user_id):
         callback_data="toggle_thoughts")]
     # inline_keyboard у собранной клавиатуры — кортеж (tuple), складывать его
     # со списком нельзя — приводим всё к спискам.
-    rows = list(model_markup.inline_keyboard) + [
+    rows = list(model_markup.inline_keyboard) + _thinking_rows() + [
         thoughts_row,
         list(_REPORT_BUTTON_ROW),
         [InlineKeyboardButton("💰 СЧЕТА И КВОТЫ", callback_data="bal:panel")],

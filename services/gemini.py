@@ -65,6 +65,10 @@ from config import (
     PROVIDER_ICONS,
     PROVIDER_ICON_FALLBACK,
     RAG_ICON,
+    THINKING_LEVELS,
+    THINKING_DEFAULT,
+    THINKING_SETTING_PREFIX,
+    QWEN_THINKING_BUDGET,
 )
 import database.history as hist
 # Соединения к моделям и сайтам переиспользуются (2026-07-27): «рукопожатие»
@@ -245,18 +249,88 @@ def _icon_of(model_name: str) -> str:
     return PROVIDER_ICONS.get(info.get("provider"), PROVIDER_ICON_FALLBACK)
 
 
+def thinking_level(provider: str) -> str:
+    """
+    Глубина раздумий провайдера — та, что выбрана кнопкой «🤔 …» в панели
+    «📡 Настройки API» (29.08.2026). Возвращает КОД уровня из
+    config.THINKING_LEVELS: "off" / "low" / "medium" / "high" / "max" / "on".
+
+    Читается при КАЖДОМ запросе, а не при запуске: кнопка должна работать на
+    лету, без перезапуска бота. Чтение стоит тысячные доли миллисекунды —
+    настройка лежит в общем открытом соединении с базой.
+
+    ⚠️ settings хранит только строки, и в базе может оказаться что угодно
+    (правка руками, откат кода, чужая версия). Незнакомое значение молча
+    заменяется начальным — бот не должен падать из-за строки в настройке.
+    """
+    levels = THINKING_LEVELS.get(provider) or ()
+    if not levels:
+        # Провайдера нет в таблице (новый, ещё не описан) — ведём себя как
+        # до появления кнопок: думает как умеет, ничего не навязываем.
+        return "high"
+    codes = [code for code, _ in levels]
+    default = THINKING_DEFAULT.get(provider, codes[-1])
+    value = hist.get_setting(THINKING_SETTING_PREFIX + provider, default)
+    return value if value in codes else default
+
+
+def thinking_label(provider: str) -> str:
+    """Надпись выбранного уровня для кнопки («Полно», «Высокая», «Думает»)."""
+    code = thinking_level(provider)
+    for c, label in THINKING_LEVELS.get(provider) or ():
+        if c == code:
+            return label
+    return code
+
+
+def _gemini_answer_level(model_name: str, override: bool | None = None) -> str:
+    """
+    Уровень мышления Gemini для ОТВЕТА бота — в терминах самого Google
+    ("minimal" / "low" / "medium" / "high").
+
+    ⚠️ ПОЧЕМУ УРОВЕНЬ ПОСЫЛАЕТСЯ ВСЕГДА, ДАЖЕ НУЛЕВОЙ. У Gemini 3 мышление
+    включено ПО УМОЛЧАНИЮ: не послать настройку — значит согласиться думать.
+    Поэтому «Выкл» — это явный "minimal", а не отсутствие параметра.
+
+    ⚠️ ПОДМЕНА ДЛЯ ТЕХ, КТО НЕ ПРИНИМАЕТ НУЛЕВОЙ. gemini-3.7-flash отвечает на
+    "minimal" прямым отказом («Thinking level MINIMAL is not supported for this
+    model») — проверено живым запросом 28.08. Ей нулевой уровень молча
+    поднимается до ближайшего сверху. Кому подмена полагается, решает пометка
+    `minimal_thinking` в config.AVAILABLE_MODELS — тот же механизм, что у
+    разбора вложений (_media_level_for).
+
+    override — старый рычаг «думать/не думать» мимо кнопки (см. _is_thinking).
+    """
+    if override is False:
+        code = "off"
+    else:
+        code = thinking_level("gemini")
+        if override is True and code == "off":
+            code = THINKING_DEFAULT["gemini"]
+    level = "minimal" if code == "off" else code
+    if level == "minimal" and not _supports_minimal_thinking(model_name):
+        return _MEDIA_FALLBACK_THINKING_LEVEL
+    return level
+
+
 def _is_thinking(model_name: str, override: bool | None = None) -> bool:
     """
     True, если модель должна отдавать цепочку рассуждений.
 
-    override=None — как записано в AVAILABLE_MODELS (обычное поведение).
-    override=False — размышления ПРИНУДИТЕЛЬНО выключены.
+    override=None — смотрим на модель и на кнопку глубины её провайдера.
+    override=False — размышления ПРИНУДИТЕЛЬНО выключены (рычаг мимо кнопки).
     ⚠️ У моделей с native_thinking (Gemma) параметр не помогает — они шлют
     <thought> сами.
+
+    ⚠️ С 29.08.2026 учитывает КНОПКУ: положение «Выкл» гасит размышления так
+    же, как это делал override=False. Модель, которая думать не умеет вовсе
+    (поля "thinking" нет), кнопкой не включается — сначала спрашиваем её.
     """
     if override is not None:
         return override
-    return bool(AVAILABLE_MODELS.get(model_name, {}).get("thinking", False))
+    if not AVAILABLE_MODELS.get(model_name, {}).get("thinking", False):
+        return False
+    return thinking_level(_provider_of(model_name)) != "off"
 
 
 def _supports_vision(model_name: str) -> bool:
@@ -501,20 +575,26 @@ def _media_thinking_native(level: str = _MEDIA_THINKING_LEVEL) -> dict:
     return {"thinkingConfig": {"includeThoughts": False, "thinkingLevel": level}}
 
 
-def _media_answer_thinking() -> dict:
+def _media_answer_thinking(model_name: str) -> dict:
     """
-    Мышление для ОТВЕТА на медиа в группе — верхняя ступень (2026-08-11,
-    решение Максима). Здесь модель не описывает картинку, а решает, вступать
-    ли в чужой разговор, и пишет реплику от лица бота: думать есть о чём.
+    Мышление для ОТВЕТА на медиа в группе. Здесь модель не описывает картинку,
+    а решает, вступать ли в чужой разговор, и пишет реплику от лица бота:
+    думать есть о чём.
 
-    ⚠️ Отдельно от `_native_thinking_config`, которой пользуются обычные ответы
-    на аудио и видео: там до сих пор `thinkingBudget: -1` — параметр 2.5-й
-    серии, означающий «думай сколько сочтёшь нужным». Здесь явный
-    `thinkingLevel: "high"` — по живому замеру 11.08 это ~855 токенов мыслей
-    против ~672 у динамического (gemini-3.6-flash, 3 прогона).
+    ⚠️ С 29.08.2026 уровень БЕРЁТСЯ ИЗ КНОПКИ «🤔 Gemini», как у всех прочих
+    ОТВЕТОВ бота. До этого здесь была зашита верхняя ступень (решение Максима
+    11.08: по замеру ~855 токенов мыслей против ~672 у динамического режима).
+    Начальное положение кнопки — «Полно», то есть та же верхняя ступень:
+    поведение не изменилось, но теперь оно управляемо.
+
+    ⚠️ РАЗБОР вложений кнопке НЕ подчиняется и остаётся зашитым
+    (_media_thinking_native / _media_thinking_openai): там нулевой уровень
+    выбран не ради скорости вообще, а потому что лишние 9 секунд на каждую
+    картинку заставляли бота пропускать сообщения чата.
 
     ⚠️ Мысли ЗАПРАШИВАЮТСЯ (в отличие от разбора): реплика уходит человеку
-    через send_formatted, который показывает их свёрнутой цитатой.
+    через send_formatted, который показывает их свёрнутой цитатой. На нулевом
+    уровне мыслей нет вовсе — не просим и сводку.
 
     ⚠️ ЦЕНА: ответ думает дольше, а пока идёт проверка, сообщения чата
     отсеиваются защёлкой `_in_flight` — они не пропадают (счётчик растёт, и
@@ -522,7 +602,9 @@ def _media_answer_thinking() -> dict:
     Догоняющую проверку под это заводили 2026-08-11 и в тот же день убрали по
     решению Максима — заново не заводить без его просьбы.
     """
-    return {"thinkingConfig": {"includeThoughts": True, "thinkingLevel": "high"}}
+    level = _gemini_answer_level(model_name)
+    return {"thinkingConfig": {"includeThoughts": level != "minimal",
+                               "thinkingLevel": level}}
 
 
 def _media_thinking_openai(model_name: str) -> dict:
@@ -934,10 +1016,23 @@ def _openai_stream_request(model_name: str, messages: list, api_url: str,
 
 def _qwen_chat_request(model_name: str, messages: list, thinking_override: bool | None = None):
     """Запрос к Qwen (Alibaba Cloud Model Studio).
-    enable_thinking — нестандартный параметр Qwen: включает цепочку рассуждений."""
+    enable_thinking — нестандартный параметр Qwen: включает цепочку рассуждений.
+
+    ⚠️ СТУПЕНЕЙ У QWEN НЕТ, ЕСТЬ ПОТОЛОК (29.08.2026). thinking_budget —
+    предел размышлений в токенах, и он ТОЧНЫЙ: замер 28.08 — просишь 100,
+    получаешь ровно 100 у всех трёх моделей. Управилась раньше — потратит
+    меньше (потолок 500 дал 145 токенов у qwen3.8-max). Поэтому ступени кнопки
+    собраны из потолков (config.QWEN_THINKING_BUDGET), а верхняя ступень —
+    это ОТСУТСТВИЕ потолка, а не большое число.
+    """
+    on = _is_thinking(model_name, thinking_override)
+    extra = {"enable_thinking": on}
+    if on:
+        budget = QWEN_THINKING_BUDGET.get(thinking_level("qwen"))
+        if budget:
+            extra["thinking_budget"] = budget
     return _openai_stream_request(
-        model_name, messages, QWEN_API_URL, QWEN_API_KEY,
-        {"enable_thinking": _is_thinking(model_name, thinking_override)},
+        model_name, messages, QWEN_API_URL, QWEN_API_KEY, extra,
     )
 
 
@@ -945,26 +1040,36 @@ def _deepseek_chat_request(model_name: str, messages: list, thinking_override: b
     """Запрос к DeepSeek. Рассуждения включаются параметром thinking
     ({"type": "enabled"/"disabled", "reasoning_effort": "max"} — формат DeepSeek V4).
 
-    ⚠️ reasoning_effort="max" — ВЕРХНЯЯ ступень (2026-08-10, решение Максима
-    «менять для обеих моделей»). До этого здесь стоял "xhigh" с подписью
-    «экстремальная глубина», и это оказалось неправдой: у DeepSeek V4 шкала
-    low / high / max, а "xhigh" — устаревшее значение, которое приводится к
-    "high", то есть к уровню ПО УМОЛЧАНИЮ. Бот честно думал средне, а комментарий
-    обещал максимум. Скорее всего, когда это писалось, "xhigh" и был верхом —
-    шкалу DeepSeek с тех пор переделали (у них и цены дважды менялись за месяц).
+    ⚠️⚠️ ПАРАМЕТР УРОВНЯ ЛЕЖАЛ НЕ ТАМ — ПОЧИНЕНО 29.08.2026. До этой даты
+    reasoning_effort вкладывался ВНУТРЬ объекта thinking, а по документации
+    DeepSeek это ОТДЕЛЬНЫЙ параметр верхнего уровня. Вложенный провайдер не
+    видел вовсе: «max», записанный тут как решение Максима от 10.08, не
+    применялся НИ РАЗУ — работала ступень по умолчанию ("high").
+    Доказательство не из бумаги, а из живого запроса: заведомо неверное
+    значение вложенным проходит МОЛЧА, а верхним уровнем возвращает 400.
+    Не «причёсывать» обратно внутрь объекта: разница невидима глазом и
+    ошибка вернётся тихо.
 
-    ⚠️ Значение применяется к ОБЕИМ моделям (v4-flash и v4-pro) — ветка тут
-    одна. У v4-pro на 2026-08-10 работают только "high" и "max" ("low" тоже
-    подтягивается до "high"); три полноценные ступени обещаны в начале августа.
+    ⚠️ ШКАЛА: low / high / max (три ступени, введены у DeepSeek 13.08.2026).
+    Замер 29.08 на задаче в несколько шагов, 5 прогонов, токенов мыслей:
+        v4-pro    выкл 0 · низкая 1488 · высокая 2276 · максимум 5597
+        v4-flash  выкл 0 · низкая 2462 · высокая 1207 · максимум 4864
+    У v4-flash «низкая» стабильно ВЫШЕ «высокой» (так во всех пяти прогонах) —
+    похоже, на низкой ступени модель дольше нащупывает решение. Это не наша
+    ошибка и не повод переставлять ступени местами.
 
-    ⚠️ ЦЕНА: рассуждения тарифицируются как обычный ответ, а он у DeepSeek с
-    2026-08-16 стоит по-разному в пик и вне пика (v4-pro $3.96 / $1.98, v4-flash
-    $1.32 / $0.66 за млн токенов) — на "max" размышлений заметно больше, и
-    ответы дольше. Точные числа и окна пика — config.DEEPSEEK_PRICES и
-    config.DEEPSEEK_PEAK_UTC; сверять при правках цен там.
+    ⚠️ ЦЕНА И ВРЕМЯ: рассуждения тарифицируются как обычный ответ, а он у
+    DeepSeek с 2026-08-16 стоит по-разному в пик и вне пика (v4-pro
+    $3.96 / $1.98, v4-flash $1.32 / $0.66 за млн токенов). «Максимум» у v4-pro
+    занял 92 секунды против 35 на «высокой» — ступень выбирает Максим кнопкой,
+    в коде верхняя не зашивается. Точные числа и окна пика —
+    config.DEEPSEEK_PRICES и config.DEEPSEEK_PEAK_UTC; сверять при правках там.
     """
     if _is_thinking(model_name, thinking_override):
-        extra = {"thinking": {"type": "enabled", "reasoning_effort": "max"}}
+        extra = {"thinking": {"type": "enabled"}}
+        level = thinking_level("deepseek")
+        if level != "off":
+            extra["reasoning_effort"] = level
     else:
         extra = {"thinking": {"type": "disabled"}}
     return _openai_stream_request(
@@ -973,22 +1078,26 @@ def _deepseek_chat_request(model_name: str, messages: list, thinking_override: b
 
 
 def _xiaomi_chat_request(model_name: str, messages: list, thinking_override: bool | None = None):
-    """Запрос к Xiaomi MiMo (2026-07-25). Формат управления рассуждениями —
-    ТОТ ЖЕ, что у DeepSeek: {"thinking": {"type": "enabled"/"disabled"}}.
-    Проверено живыми запросами: с "disabled" размышлений ноль, с
-    reasoning_effort="xhigh" их вдвое больше (решение Максима о глубине).
+    """Запрос к Xiaomi MiMo (2026-07-25). Управление рассуждениями —
+    {"thinking": {"type": "enabled"/"disabled"}}, и это ЕДИНСТВЕННЫЙ рычаг.
 
-    ⚠️ ЗДЕСЬ "xhigh" ОСТАВЛЕН НАМЕРЕННО и «как у DeepSeek» больше НЕ читать:
-    2026-08-10 у DeepSeek перешли на "max", потому что там "xhigh" оказался
-    устаревшим синонимом уровня по умолчанию. У Xiaomi шкала СВОЯ и в их
-    документации не описана — "xhigh" выбран не по бумаге, а по живому замеру
-    (размышлений вдвое больше). Менять на "max" вслепую нельзя: неизвестное
-    значение MiMo может молча проглотить и думать как обычно. Нужен такой же
-    живой замер — сравнить длину reasoning_content на "xhigh" и "max"."""
-    if _is_thinking(model_name, thinking_override):
-        extra = {"thinking": {"type": "enabled", "reasoning_effort": "xhigh"}}
-    else:
-        extra = {"thinking": {"type": "disabled"}}
+    ⚠️⚠️ СТУПЕНЕЙ У MiMo НЕТ — ПРОВЕРЕНО И ПО БУМАГЕ, И ЖИВЬЁМ (29.08.2026).
+    Официальная документация Xiaomi (mimo.mi.com, совместимость с OpenAI API)
+    знает ровно один параметр — thinking.type. Alibaba, где MiMo раздаётся
+    тоже, пишет прямо: mimo-v2.5-pro НЕ поддерживает reasoning_effort и
+    thinking_budget. Живой замер (6 прогонов на ступень) это подтвердил:
+    у mimo-v2.5-pro любая ступень даёт 109–128 токенов мыслей, у mimo-v2.5 —
+    чистый шум без порядка.
+
+    ⚠️ ОТСЮДА УБРАН reasoning_effort="xhigh" (стоял с 25.07 с подписью
+    «проверено живым замером — размышлений вдвое больше»; замер 29.08 этого не
+    подтверждает). Значение не просто бесполезно, оно НЕДОПУСТИМО: посланное
+    по документации, верхним уровнем, оно возвращает 400 «Invalid request
+    parameters». Пока оно лежало ВНУТРИ thinking, MiMo его молча выбрасывал —
+    поэтому вреда и не было видно. Не возвращать ни в каком виде.
+    """
+    on = _is_thinking(model_name, thinking_override)
+    extra = {"thinking": {"type": "enabled" if on else "disabled"}}
     return _openai_stream_request(
         model_name, messages, XIAOMI_API_URL, XIAOMI_API_KEY, extra,
     )
@@ -1130,12 +1239,21 @@ def _native_thinking_config(model_name: str) -> dict:
     Из-за этого различия аудио и видео до 2026-07-27 отвечали БЕЗ мыслей:
     настройку туда просто не передавали.
 
-    thinkingBudget: -1 — динамический максимум, как в текстовых запросах.
+    ⚠️ ИМЕНА ПОЛЕЙ ЗДЕСЬ В camelCase (thinkingConfig / includeThoughts /
+    thinkingLevel), а на текстовом пути — в snake_case. Это не небрежность, так
+    устроены два разных API Google; перепутаешь — параметр молча выбросят.
+
+    ⚠️ Уровень берётся из кнопки «🤔 Gemini» (29.08.2026) и шлётся ВСЕГДА,
+    включая нулевой: мышление у Gemini 3 включено по умолчанию, и промолчать
+    значит согласиться думать. Прежний thinkingBudget: -1 — параметр 2.5-й
+    серии, «думай сколько сочтёшь нужным», разброс от 576 до 1243 токенов.
     Гемма шлёт <thought> сама (native_thinking) — её не просим.
     """
     info = AVAILABLE_MODELS.get(model_name, {})
-    if _is_thinking(model_name) and not info.get("native_thinking"):
-        return {"thinkingConfig": {"includeThoughts": True, "thinkingBudget": -1}}
+    if info.get("thinking") and not info.get("native_thinking"):
+        level = _gemini_answer_level(model_name)
+        return {"thinkingConfig": {"includeThoughts": level != "minimal",
+                                   "thinkingLevel": level}}
     return {}
 
 
@@ -1236,11 +1354,26 @@ def _gemini_chat_request(messages: list, kind: str = "текст", has_image: bo
                 # Думающие модели Gemini (кроме Gemma — она шлёт <thought> сама):
                 # просим вернуть сводку рассуждений. Мысли приходят в <thought>…</thought>
                 # прямо в тексте — тот же формат, что у Gemma, разбор НЕ меняется.
-                # thinking_budget: -1 = динамический максимум (думает по сложности задачи).
+                #
+                # ⚠️ УРОВЕНЬ ШЛЁТСЯ ВСЕГДА, ДАЖЕ НУЛЕВОЙ (29.08.2026): у Gemini 3
+                # мышление включено по умолчанию, и «не послать настройку» = «думай».
+                # Поэтому проверяем поле "thinking" самой модели, а не _is_thinking:
+                # та на положении «Выкл» вернула бы False, блок бы не добавился —
+                # и модель на «Выкл» думала бы как ни в чём не бывало.
+                #
+                # ⚠️ Прежний thinking_budget: -1 («думай сколько сочтёшь нужным») —
+                # параметр 2.5-й серии, и он непредсказуем: замер 28.08 дал 1243
+                # токена у 3.5 Flash-Lite (БОЛЬШЕ верхней ступени) и 576 у
+                # 3.5 Flash (МЕНЬШЕ средней). Явный thinkingLevel даёт ровную шкалу:
+                # 0 / 404 / 654 / 864 токена на четырёх положениях кнопки.
                 info = AVAILABLE_MODELS.get(model_name, {})
-                if _is_thinking(model_name, thinking_override) and not info.get("native_thinking"):
+                if info.get("thinking") and not info.get("native_thinking"):
+                    level = _gemini_answer_level(model_name, thinking_override)
                     payload["extra_body"] = {
-                        "google": {"thinking_config": {"include_thoughts": True, "thinking_budget": -1}}
+                        "google": {"thinking_config": {
+                            "include_thoughts": level != "minimal",
+                            "thinking_level": level,
+                        }}
                     }
                 response = _http().post(
                     GEMINI_API_URL,
@@ -2615,7 +2748,7 @@ def ask_group_proactive_media(chat_id: int, bot_id: int, trigger_text: str,
             continue
         try:
             req = dict(base)
-            req["generationConfig"] = _media_answer_thinking()
+            req["generationConfig"] = _media_answer_thinking(model_name)
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
             logger.info("🤖 Запрос к модели %s (проактивный ответ на %s)", model_name, kind)
             start = time.perf_counter()
