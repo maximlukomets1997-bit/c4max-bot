@@ -274,15 +274,6 @@ def thinking_level(provider: str) -> str:
     return value if value in codes else default
 
 
-def thinking_label(provider: str) -> str:
-    """Надпись выбранного уровня для кнопки («Полно», «Высокая», «Думает»)."""
-    code = thinking_level(provider)
-    for c, label in THINKING_LEVELS.get(provider) or ():
-        if c == code:
-            return label
-    return code
-
-
 def _gemini_answer_level(model_name: str, override: bool | None = None) -> str:
     """
     Уровень мышления Gemini для ОТВЕТА бота — в терминах самого Google

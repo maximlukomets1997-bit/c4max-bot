@@ -9,7 +9,8 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LinkPre
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 from config import (AVAILABLE_MODELS, AVAILABLE_IMAGE_MODELS, GEMINI_MODEL, PROVIDERS,
-                    BOT_VERSION_HTML, AUTO_UPDATE_ENABLED_DEFAULT, THINKING_LEVELS)
+                    BOT_VERSION_HTML, AUTO_UPDATE_ENABLED_DEFAULT, THINKING_LEVELS,
+                    THINKING_PHASES)
 from database.history import get_setting, get_bot_stats, get_qwen_tokens
 from utils import register_and_clean_bot_message, delete_user_message_safe
 
@@ -107,18 +108,39 @@ def _thinking_rows():
     значки — из PROVIDERS: второго списка ни того, ни другого здесь нет, иначе
     добавление провайдера пришлось бы помнить в двух местах.
 
-    Значок 🤔 общий у всех четырёх и намеренно НЕ 🧠: под 🧠 в этой же панели
-    живёт тумблер показа мыслей, а он про совсем другое — прячет цитату,
-    а не меняет глубину.
+    ⚠️ ЗНАЧКОВ НА КНОПКЕ ДВА, И У КАЖДОГО СВОЯ РАБОТА (выбор Максима
+    29.08.2026 из трёх раскладок). Первый — значок ПРОВАЙДЕРА из PROVIDERS,
+    тот же, что стоит в строках лога: по нему видно, чья кнопка, и кнопка
+    связывается с «♊️ Ответ от …» в журнале. Второй — фаза ЛУНЫ, шкала
+    заполнения: новолуние «не думает», полнолуние «в полную силу». Так
+    положение всех четырёх читается взглядом, без чтения слов.
+
+    ⚠️ 🧠 здесь не годится, хотя просится: под ним в этой же панели живёт
+    тумблер показа мыслей, а он про совсем другое — прячет цитату, а не
+    меняет глубину. Два разных смысла под одним значком в одной панели —
+    готовая путаница.
     """
-    from services.gemini import thinking_label
+    from services.gemini import thinking_level
 
     rows, pair = [], []
-    for provider in THINKING_LEVELS:
+    for provider, levels in THINKING_LEVELS.items():
         meta = PROVIDERS.get(provider, {})
         title = meta.get("title", provider)
+        icon = meta.get("icon", "")
+        codes = [code for code, _ in levels]
+        cur = thinking_level(provider)
+        pos = codes.index(cur) if cur in codes else 0
+        # Фаза по МЕСТУ в шкале: у провайдеров разное число ступеней и разные
+        # их названия, а полнолуние обязано означать верх у каждого.
+        # Незнакомая длина шкалы (новый провайдер) — не повод падать: тогда
+        # рисуем только края, новолуние и полнолуние.
+        phases = THINKING_PHASES.get(len(codes))
+        if phases:
+            phase = phases[pos]
+        else:
+            phase = "🌑" if pos == 0 else "🌕"
         pair.append(InlineKeyboardButton(
-            f"🤔 {title}: {thinking_label(provider)}",
+            f"{icon} {title} {phase} {dict(levels)[codes[pos]]}",
             callback_data=f"think:{provider}"))
         if len(pair) == 2:
             rows.append(pair)

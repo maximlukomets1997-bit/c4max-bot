@@ -11,7 +11,7 @@ from telegram import Update, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 from config import (AVAILABLE_MODELS, AVAILABLE_IMAGE_MODELS, GEMINI_MODEL,
-                    PROVIDERS, THINKING_LEVELS, THINKING_SETTING_PREFIX)
+                    PROVIDERS, THINKING_LEVELS, THINKING_SETTING_PREFIX, THINKING_PHASES)
 from database.history import set_setting, get_setting
 from utils import register_and_clean_bot_message
 from utils import schedule_delete
@@ -622,10 +622,16 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         new_code = codes[(pos + 1) % len(codes)]
         new_label = dict(levels)[new_code]
         set_setting(THINKING_SETTING_PREFIX + provider, new_code)
-        title = PROVIDERS.get(provider, {}).get("title", provider)
+        meta = PROVIDERS.get(provider, {})
+        title = meta.get("title", provider)
         logger.info("🔧 Админ %s: глубина раздумий %s → %s", user_id, title, new_label)
         _audit(user_id, "thinking", 0, f"глубина {title}: {new_label}")
-        await query.answer(f"🤔 {title}: {new_label}")
+        # Всплывашка повторяет надпись кнопки, включая фазу луны: человек
+        # видит подтверждение в том же виде, в каком оно осталось на кнопке.
+        phases = THINKING_PHASES.get(len(codes))
+        new_pos = codes.index(new_code)
+        phase = phases[new_pos] if phases else ("🌑" if new_pos == 0 else "🌕")
+        await query.answer(f"{meta.get('icon', '')} {title} {phase} {new_label}")
         try:
             await query.edit_message_reply_markup(reply_markup=_build_api_keyboard(user_id))
         except Exception as e:
