@@ -1474,6 +1474,27 @@ def check_settings_spec():
             if prefix != other and other.startswith(prefix):
                 problems.append(f"приставки кнопок пересекаются: «{prefix}» и «{other}»")
 
+    # ─── персональные пределы в карточке = общим ───
+    # ⚠️ У карточки участника свои регуляторы тех же трёх порогов. До
+    # 30.08.2026 границы там стояли отдельной копией с припиской «держим
+    # такими же»; разойдись они — человеку можно было бы выставить порог,
+    # недостижимый для всех остальных, и заметить это было бы нечем.
+    from handlers.admin.panel_users import _USER_LIMITS
+    for code, lim in _USER_LIMITS.items():
+        if code == "img":
+            continue          # у лимита картинок общей настройки нет вовсе
+        key = lim["field"]
+        done += 1
+        if key not in spec.SPEC:
+            problems.append(f"карточка крутит «{key}», а в общем списке его нет")
+            continue
+        item = spec.SPEC[key]
+        for field in ("min", "max", "step"):
+            done += 1
+            if lim[field] != item[field]:
+                problems.append(f"«{key}»: в карточке {field}={lim[field]}, "
+                                f"в общей настройке {item[field]}")
+
     # ─── у каждой настройки есть раздел, и раздел объявлен ───
     known = {code for code, _ in spec.SECTIONS}
     for key, item in spec.SPEC.items():

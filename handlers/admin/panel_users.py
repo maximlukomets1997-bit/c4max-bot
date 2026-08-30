@@ -59,18 +59,40 @@ def _month_ru() -> str:
         return "этот месяц"
 
 
-# Регуляторы ➖/➕ карточки: короткий код кнопки → графа в user_settings, шаг и
-# границы. Короткий код нужен, чтобы callback_data влезала в 64 байта Telegram.
+# Регуляторы ➖/➕ карточки: короткий код кнопки → графа в user_settings.
+# Короткий код нужен, чтобы callback_data влезала в 64 байта Telegram.
 # Ниже минимума значение НЕ упирается, а обнуляется в «общую настройку бота» —
 # это единственный способ вернуть человека на общие правила по одному полю.
-# Границы держим такими же, как у общих настроек в /mod: иначе персональные
-# значения можно было бы завести туда, куда общие завести нельзя.
-_USER_LIMITS = {
-    "count":  {"field": "antispam_msg_count",  "step": 1,  "min": 2,  "max": 50},
-    "window": {"field": "antispam_window_sec", "step": 1,  "min": 2,  "max": 60},
-    "mute":   {"field": "antispam_mute_sec",   "step": 60, "min": 30, "max": 86400},
-    "img":    {"field": "image_limit",         "step": 1,  "min": 0,  "max": 50},
+#
+# ⚠️ ШАГИ И ГРАНИЦЫ ТРЁХ ПЕРВЫХ БЕРУТСЯ ИЗ ОБЩЕЙ НАСТРОЙКИ
+# (services/settings_spec.py), а не пишутся здесь. Иначе персональное значение
+# можно было бы завести туда, куда общее завести нельзя, — а это тихая дыра:
+# человеку выставили бы порог, недостижимый для всех остальных. До 30.08.2026
+# тут стояла своя копия чисел с припиской «держим такими же» — ровно тот
+# случай, когда две копии обязаны совпадать, но ничто этого не проверяет.
+# Теперь совпадение обеспечено устройством, а не памятью.
+_USER_FIELD_BY_CODE = {
+    "count":  "antispam_msg_count",
+    "window": "antispam_window_sec",
+    "mute":   "antispam_mute_sec",
 }
+
+
+def _user_limit(code: str) -> dict:
+    """Шаг и границы регулятора карточки: graфа user_settings, min/max/step."""
+    if code == "img":
+        # У лимита картинок общей настройки в settings нет — он приходит
+        # константой config.IMAGE_DAILY_LIMIT, поэтому границы свои.
+        # 0 = полный запрет картинок, это осмысленное значение, а не «сброс».
+        return {"field": "image_limit", "step": 1, "min": 0, "max": 50}
+    from services.settings_spec import SPEC
+    item = SPEC[_USER_FIELD_BY_CODE[code]]
+    return {"field": _USER_FIELD_BY_CODE[code], "step": item["step"],
+            "min": item["min"], "max": item["max"]}
+
+
+_USER_LIMITS = {code: _user_limit(code)
+                for code in ("count", "window", "mute", "img")}
 
 # Тумблеры карточки: код кнопки → графа в user_settings.
 _USER_TOGGLES = {

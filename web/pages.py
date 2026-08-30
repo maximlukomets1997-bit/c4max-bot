@@ -390,6 +390,334 @@ _CONTROLS_JS = """
 """
 
 
+# ─── люди: список и карточка (этап 3) ───────────────────────────────
+#
+#  ⚠️ Всё, что показывает карточка, читается ТЕМИ ЖЕ функциями, что и карточка
+#  в боте (handlers/admin/panel_users.py). Своих запросов к базе здесь нет:
+#  две карточки, считающие одно и то же по-разному, рано или поздно начнут
+#  показывать разное, и понять, какая права, будет нечем.
+#
+#  ⚠️ Имя, ник и название группы — ЧУЖОЙ ТЕКСТ. Через esc() проходит всё
+#  без исключений: «<» в нике сломал бы страницу так же, как ломал панель.
+
+def _uform(csrf: str, target_id: int, fields: dict, inner: str,
+           cls: str = "ctl") -> str:
+    """Форма действия над участником. Все они шлют POST на /users/<id>."""
+    hidden = f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+    for name, value in fields.items():
+        hidden += f'<input type="hidden" name="{esc(name)}" value="{esc(value)}">'
+    return (f'<form method="post" action="/users/{int(target_id)}" '
+            f'class="{cls}">{hidden}{inner}</form>')
+
+
+def _btn(text: str, kind: str = "") -> str:
+    return f'<button type="submit" class="btn {kind}">{esc(text)}</button>'
+
+
+def page_users(csrf: str = "") -> str:
+    """Список всех, кого знает бот."""
+    from database.history import list_known_users
+    from handlers.admin.panel_users import _display_name, _USERS_LIST_LIMIT
+    from services import roles
+
+    users = list_known_users(_USERS_LIST_LIMIT)
+
+    rows = []
+    for u in users:
+        uid = u["user_id"]
+        role = roles.role_of(uid)
+        badge = {"owner": '<span class="tag owner">👑 владелец</span>',
+                 "moderator": '<span class="tag mod">🛡 модератор</span>'}.get(role, "")
+        marks = [f'сообщений {u.get("msg_count", 0)}']
+        if u.get("mute_count"):
+            marks.append(f'мутов {u["mute_count"]}')
+        if u.get("link_count"):
+            marks.append(f'ссылок {u["link_count"]}')
+        rows.append(
+            f'<a class="urow" href="/users/{uid}">'
+            f'<div class="uname">{esc(_display_name(u))} {badge}</div>'
+            f'<div class="note">id {uid} · {esc(" · ".join(marks))}</div>'
+            f'</a>'
+        )
+
+    head = ("<header><h1>Пользователи</h1>"
+            "<div class=\"ver\"><a href=\"/\">← к сводке</a></div></header>")
+    body = ("<div class=\"wrap\">" + head
+            + f'<div class="note" style="margin-bottom:14px">Бот знает '
+              f'{len(users)} человек. Нажмите на строку — откроется карточка.</div>'
+            + '<div class="ulist">' + "".join(rows) + '</div>'
+            + '<footer><span><a href="/">← к сводке</a></span></footer></div>')
+    return _shell("Пользователи — C4_Max", body)
+
+
+def _user_facts(bot_membership: list, target_id: int) -> str:
+    """Верх карточки: кто это, стаж, нарушения, звание, общение с ботом."""
+    from config import IMAGE_DAILY_LIMIT, MAX_CONTEXT_MESSAGES, ADMIN_IDS, QUIZ_RANKS
+    from database.history import (get_history_length, get_remaining_image_calls,
+                                  get_user_stats, get_user_usage)
+    from services.antispam import trust_info
+    from services.user_settings import honorary_rank
+
+    ti = trust_info(target_id)
+    stats = get_user_stats(target_id)
+    usage = get_user_usage(target_id)
+    ctx_len = get_history_length(target_id)
+    img_left = get_remaining_image_calls(target_id, IMAGE_DAILY_LIMIT)
+    img_line = ("∞ (админ бота)" if target_id in ADMIN_IDS
+                else f"осталось {img_left} из {IMAGE_DAILY_LIMIT}")
+
+    hon = honorary_rank(target_id)
+    if hon:
+        found = next((r for r in QUIZ_RANKS if r["name"] == hon), None)
+        rank = f'{found["icon"] if found else "🏅"} {hon} (почётное)'
+    else:
+        rank = f'{stats["rank_icon"]} {stats["rank"]}'
+
+    quiz = ""
+    if stats["total_attempts"]:
+        rate = f' · {stats["success_rate"]}%'
+        quiz = (f'{stats["correct_answers"]} верных из '
+                f'{stats["total_attempts"]}{rate}')
+
+    tiles = [
+        ("Служба в гарнизоне", f'{ti["days"]} дн.',
+         f'сообщений в группах: {ti["msgs"]}'),
+        ("Нарушения", f'{ti["mutes"]} мутов',
+         f'удалённых ссылок: {ti["links"]}'),
+        ("Звание", rank, quiz or "в викторину не играл"),
+        ("Общение с ботом", f'{usage["total_requests"]} запросов',
+         f'контекст {ctx_len} из {MAX_CONTEXT_MESSAGES} · картинки: {img_line}'),
+    ]
+    cards = "".join(
+        f'<div class="card"><div class="k">{esc(k)}</div>'
+        f'<div class="v">{esc(v)}</div><div class="sub">{esc(sub)}</div></div>'
+        for k, v, sub in tiles
+    )
+    block = f'<div class="grid">{cards}</div>'
+
+    if bot_membership:
+        lines = "".join(f'<div class="row"><div class="name">{esc(line)}</div></div>'
+                        for line in bot_membership)
+        block += f'<h2>Группы</h2><div class="rows">{lines}</div>'
+    return block
+
+
+def _user_settings_block(csrf: str, target_id: int) -> str:
+    """Персональные настройки: четыре регулятора и три тумблера."""
+    from handlers.admin.panel_users import (_USER_LIMITS, _USER_TOGGLES,
+                                            _base_value)
+    from services.user_settings import get as us_get
+
+    titles = {
+        "count":  ("Порог флуда", "сообщений за окно"),
+        "window": ("Окно засчёта", "секунд"),
+        "mute":   ("Длительность мута", "секунд"),
+        "img":    ("Лимит картинок", "в сутки"),
+    }
+    personal = us_get(target_id)
+    items = []
+    for code, (title, unit) in titles.items():
+        field = _USER_LIMITS[code]["field"]
+        own = personal.get(field)
+        if own is None:
+            shown = f'{_base_value(code)} {unit} · общая'
+        else:
+            shown = f'{own} {unit} · своё'
+        minus = _uform(csrf, target_id, {"do": "set", "code": code, "delta": "-1"},
+                       '<button type="submit" class="rnd" aria-label="меньше">−</button>',
+                       "ctl step")
+        plus = _uform(csrf, target_id, {"do": "set", "code": code, "delta": "1"},
+                      '<button type="submit" class="rnd" aria-label="больше">+</button>',
+                      "ctl step")
+        control = (f'<div class="num">{minus}'
+                   f'<span class="val wide">{esc(shown)}</span>{plus}</div>')
+        items.append((title, "ниже минимума — вернётся общая настройка бота", control))
+
+    from web.actions import USER_TOGGLE_WORDS
+    for code, field in _USER_TOGGLES.items():
+        title, words = USER_TOGGLE_WORDS[code]
+        value = 1 if personal.get(field) else 0
+        state = "on" if value else "off"
+        inner = (f'<button type="submit" class="switch {state}">'
+                 f'<span class="knob"></span><span class="lbl">'
+                 f'{esc(words[value])}</span></button>')
+        items.append((title, "", _uform(csrf, target_id,
+                                        {"do": "tog", "code": code}, inner, "ctl sw")))
+    return "<h2>Персональные настройки</h2>" + _rows(items)
+
+
+def _user_role_block(csrf: str, target_id: int) -> str:
+    """Роль и галочки прав модератора."""
+    from services import roles
+
+    role = roles.role_of(target_id)
+    if role == "owner":
+        return ('<h2>Роль</h2><div class="rows"><div class="row">'
+                '<div class="name">👑 Владелец<div class="note">задаётся в '
+                'config.py — из админки не меняется</div></div></div></div>')
+
+    items = []
+    if role == "moderator":
+        items.append(("🛡 Модератор", "снятие уберёт все галочки прав разом",
+                      _uform(csrf, target_id, {"do": "role", "make": "0"},
+                             _btn("Снять модератора", "danger"))))
+        perms = roles.perms_of(target_id)
+        for code, meta in roles.PERMS.items():
+            on = perms.get(code)
+            state = "on" if on else "off"
+            inner = (f'<button type="submit" class="switch {state}">'
+                     f'<span class="knob"></span><span class="lbl">'
+                     f'{"выдано" if on else "нет"}</span></button>')
+            items.append((meta["title"], meta["hint"],
+                          _uform(csrf, target_id, {"do": "perm", "code": code},
+                                 inner, "ctl sw")))
+    else:
+        items.append(("Обычный участник", "модератору права выдаются галочками",
+                      _uform(csrf, target_id, {"do": "role", "make": "1"},
+                             _btn("Назначить модератором"))))
+    return "<h2>Роль и права</h2>" + _rows(items)
+
+
+def _user_moderation_block(csrf: str, target_id: int) -> str:
+    """Ручные меры по каждой известной группе."""
+    from database.history import get_known_chats
+    from handlers.admin.panel_users import _MUTE_PRESETS, _chat_title
+
+    chats = get_known_chats() or []
+    if not chats:
+        return ('<h2>Меры</h2><div class="rows">'
+                '<div class="empty">бот не знает ни одной группы</div></div>')
+
+    blocks = []
+    for chat in chats:
+        chat_id = chat["chat_id"] if isinstance(chat, dict) else chat
+        title = _chat_title(chat_id)
+        mutes = "".join(
+            _uform(csrf, target_id,
+                   {"do": "mod", "act": "mute", "chat": chat_id, "sec": sec},
+                   f'<button type="submit" class="chip">{esc(lbl)}</button>',
+                   "ctl chipform")
+            for sec, lbl in _MUTE_PRESETS)
+        others = "".join(
+            _uform(csrf, target_id, {"do": "mod", "act": act, "chat": chat_id},
+                   f'<button type="submit" class="chip">{esc(lbl)}</button>',
+                   "ctl chipform")
+            for act, lbl in (("unmute", "🔓 Размут"), ("kick", "👢 Кик"),
+                             ("ban", "⛔ Бан"), ("unban", "🔙 Разбан")))
+        blocks.append(
+            f'<div class="modchat"><div class="name">{esc(title)}</div>'
+            f'<div class="note">🔇 мут на срок:</div>'
+            f'<div class="chips">{mutes}</div>'
+            f'<div class="chips">{others}</div></div>'
+        )
+    return ("<h2>Меры</h2>"
+            '<div class="warnline">Кик и бан применяются СРАЗУ, без второго '
+            'вопроса — кнопка одна. Бан снимается только «Разбаном».</div>'
+            + "".join(blocks))
+
+
+def _user_danger_block(csrf: str, target_id: int, confirm: str) -> str:
+    """Три действия, которые стирают данные, — каждое со своим вопросом."""
+    jobs = [
+        ("viol", "Обнулить нарушения",
+         "счётчики мутов и удалённых ссылок обнулятся, взыскание снимется "
+         "досрочно. Стаж и число сообщений останутся"),
+        ("clr", "Очистить диалог с ИИ",
+         "бот забудет разговор — то же самое, что команда /clear от самого "
+         "человека"),
+        ("reset", "Сбросить персональные настройки",
+         "человек вернётся на общие правила бота по всем полям сразу"),
+    ]
+    items = []
+    for code, title, hint in jobs:
+        if confirm == code:
+            control = (
+                '<div class="warn-btns">'
+                + _uform(csrf, target_id, {"do": code, "confirm": "1"},
+                         _btn("Да, выполнить", "danger"))
+                + f'<a class="btn" href="/users/{int(target_id)}">Отмена</a>'
+                + '</div>')
+        else:
+            control = _uform(csrf, target_id, {"do": code}, _btn(title))
+        items.append((title, hint, control))
+    return "<h2>Очистка</h2>" + _rows(items)
+
+
+def _user_rank_block(csrf: str, target_id: int) -> str:
+    """Почётное звание: все звания списком, текущее подсвечено."""
+    from config import QUIZ_RANKS
+    from services.user_settings import honorary_rank
+
+    cur = honorary_rank(target_id)
+    chips = []
+    if cur:
+        chips.append(_uform(csrf, target_id, {"do": "rank", "idx": "-1"},
+                            '<button type="submit" class="chip">🚫 убрать</button>',
+                            "ctl chipform"))
+    for idx, r in enumerate(QUIZ_RANKS):
+        label = f'{r["icon"]} {r["name"]}'
+        if r["name"] == cur:
+            chips.append(f'<span class="chip on">{esc(label)}</span>')
+        else:
+            chips.append(_uform(csrf, target_id, {"do": "rank", "idx": idx},
+                                f'<button type="submit" class="chip">{esc(label)}</button>',
+                                "ctl chipform"))
+    return ("<h2>Почётное звание</h2>"
+            '<div class="note" style="margin-bottom:8px">Почётное звание '
+            'перекрывает заработанное в викторине.</div>'
+            f'<div class="chips">{"".join(chips)}</div>')
+
+
+async def page_user_card(bot, target_id: int, csrf: str = "",
+                         confirm: str = "", message: str = "",
+                         bad: bool = False) -> str:
+    """
+    Карточка участника.
+
+    confirm — код действия, для которого показать вопрос «точно?».
+    message — что сказать о только что выполненном действии.
+    """
+    from database.history import list_known_users
+    from handlers.admin.panel_users import (_chat_membership, _display_name)
+    from services import roles
+
+    info = next((u for u in list_known_users(1000) if u["user_id"] == target_id),
+                {"user_id": target_id, "username": "", "first_name": "",
+                 "quiz_name": "", "msg_count": 0, "mute_count": 0, "link_count": 0})
+    name = _display_name(info)
+    nick = f' (@{info["username"]})' if info.get("username") else ""
+    role = roles.role_of(target_id)
+    badge = {"owner": '<span class="tag owner">👑 владелец</span>',
+             "moderator": '<span class="tag mod">🛡 модератор</span>'}.get(role, "")
+
+    membership = []
+    if bot is not None:
+        try:
+            membership = await _chat_membership(bot, target_id)
+        except Exception as e:
+            logger.debug("🌐 Не удалось узнать группы участника %s: %s", target_id, e)
+
+    head = (f'<header><h1>{esc(name)}{esc(nick)} {badge}</h1>'
+            f'<div class="ver">id {int(target_id)} · '
+            f'<a href="/users">← к списку</a></div></header>')
+
+    note = ""
+    if message:
+        note = (f'<div class="{"warn-box" if bad else "ok-box"}">'
+                f'{esc(message)}</div>')
+
+    body = ("<div class=\"wrap\">" + head + note
+            + _user_facts(membership, target_id)
+            + _user_settings_block(csrf, target_id)
+            + _user_rank_block(csrf, target_id)
+            + _user_role_block(csrf, target_id)
+            + _user_moderation_block(csrf, target_id)
+            + _user_danger_block(csrf, target_id, confirm)
+            + '<footer><span><a href="/users">← к списку</a></span>'
+              '<span><a href="/">к сводке</a></span></footer></div>')
+    return _shell(f"{name} — C4_Max", body)
+
+
 # ─── страница промптов (этап 2) ─────────────────────────────────────
 #
 #  Отдельной страницей, а не блоком на главной: промпты — длинные тексты, и
@@ -497,10 +825,14 @@ def page_summary(csrf: str = "") -> str:
 
     foot = ('<footer><span>Правки применяются сразу — бот видит их без '
             'перезапуска.</span><span><a href="/prompts">промпты</a></span>'
+            '<span><a href="/users">пользователи</a></span>'
             '<span><a href="/">обновить</a></span>'
             '<span><a href="/exit">выйти</a></span></footer>')
 
-    nav = '<div class="nav"><a href="/prompts">⚙️ Промпты — пять текстов бота</a></div>'
+    nav = ('<div class="nav">'
+           '<a href="/prompts">⚙️ Промпты</a>'
+           '<a href="/users">👥 Пользователи</a>'
+           '</div>')
 
     body = ("<div class=\"wrap\">" + head + tiles + nav
             + _models_block(csrf)

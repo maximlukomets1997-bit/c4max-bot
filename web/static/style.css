@@ -300,3 +300,52 @@ textarea:focus { border-color: var(--accent); }
 }
 .warn-btns { display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
 .warn-btns form { display: inline; margin: 0; }
+
+/* ─── люди: список и карточка (этап 3) ─────────────────────────────── */
+
+.nav { display: flex; gap: 10px; flex-wrap: wrap; }
+
+.ulist { display: flex; flex-direction: column; gap: 1px;
+         background: var(--line); border: 1px solid var(--line);
+         border-radius: 14px; overflow: hidden; }
+.urow {
+  display: block; padding: 13px 16px; background: var(--card);
+  color: var(--text); text-decoration: none;
+  transition: background .15s;
+}
+.urow:hover { background: var(--card-2); }
+.uname { font-weight: 620; font-size: 15px; }
+
+.tag {
+  display: inline-block; margin-left: 7px; padding: 2px 8px;
+  border-radius: 7px; font-size: 11.5px; font-weight: 620;
+  vertical-align: middle;
+}
+.tag.owner { color: var(--warn); background: color-mix(in srgb, var(--warn) 15%, transparent); }
+.tag.mod   { color: var(--accent); background: color-mix(in srgb, var(--accent) 15%, transparent); }
+
+.val.wide { min-width: 168px; }
+
+.ok-box, .warnline {
+  border-radius: 10px; padding: 11px 14px; font-size: 14px;
+  margin-bottom: 16px;
+}
+.ok-box {
+  border: 1px solid var(--ok);
+  background: color-mix(in srgb, var(--ok) 11%, var(--card));
+}
+.warnline {
+  border: 1px solid var(--warn); color: var(--dim);
+  background: color-mix(in srgb, var(--warn) 9%, var(--card));
+}
+
+.modchat {
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: 14px; padding: 14px 16px; margin-bottom: 12px;
+  box-shadow: var(--shadow);
+}
+.modchat .name { font-weight: 620; margin-bottom: 8px; }
+.modchat .note { margin: 8px 0 6px; }
+
+/* Карточка человека длинная — заголовки разделов держим заметными. */
+.wrap h2 { margin-top: 30px; }

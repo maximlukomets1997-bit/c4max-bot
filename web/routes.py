@@ -151,6 +151,131 @@ async def prompts(request):
                            content_type="text/html")
 
 
+async def users(request):
+    """Список всех, кого знает бот."""
+    csrf = auth.csrf_for(request.cookies.get(WEB_COOKIE_NAME))
+    return aioweb.Response(text=pages.page_users(csrf), content_type="text/html")
+
+
+# Действия карточки, которые СТИРАЮТ данные и потому спрашивают подтверждение.
+# ⚠️ Кик и бан сюда НЕ входят намеренно: они не стирают ничего, их видно в
+# журнале, и они отменяются «Разбаном». Спрашивать о них дважды на странице,
+# где кнопка и так одна, значит приучить нажимать «да» не глядя.
+_USER_CONFIRM = ("viol", "clr", "reset")
+
+
+async def user_card(request):
+    """
+    Карточка участника: GET показывает, POST выполняет одно действие.
+
+    ⚠️ Каждое действие зовёт web/actions.py, а тот — те же функции, что кнопки
+    карточки в боте, вместе с записью в журнал персонала тем же кодом.
+    """
+    csrf = auth.csrf_for(request.cookies.get(WEB_COOKIE_NAME))
+    application = request.app.get("tg")
+    bot = application.bot if application is not None else None
+
+    try:
+        target_id = int(request.match_info["uid"])
+    except (KeyError, ValueError):
+        raise aioweb.HTTPNotFound()
+
+    if request.method == "GET":
+        page = await pages.page_user_card(bot, target_id, csrf)
+        return aioweb.Response(text=page, content_type="text/html")
+
+    form = await request.post()
+    if not auth.csrf_ok(request, str(form.get("csrf", ""))):
+        logger.warning("🌐 Действие над участником отклонено: подпись формы не сошлась")
+        page = await pages.page_user_card(bot, target_id, csrf)
+        return aioweb.Response(text=page, content_type="text/html", status=403)
+
+    actor_id = auth.current_user(request)
+    do = str(form.get("do", ""))
+
+    if do in _USER_CONFIRM and str(form.get("confirm", "")) != "1":
+        page = await pages.page_user_card(bot, target_id, csrf, confirm=do)
+        return aioweb.Response(text=page, content_type="text/html")
+
+    message, bad = "", False
+    try:
+        message = await _run_user_action(actor_id, target_id, do, form, application)
+    except actions.ActionError as e:
+        message, bad = f"Не вышло: {e}", True
+        logger.warning("🌐 Действие «%s» над %s не принято: %s", do, target_id, e)
+    except Exception as e:
+        message, bad = f"Не вышло: {e}", True
+        logger.error("🌐 Действие «%s» над %s сорвалось: %s", do, target_id, e)
+
+    page = await pages.page_user_card(bot, target_id, csrf,
+                                      message=message, bad=bad)
+    return aioweb.Response(text=page, content_type="text/html",
+                           status=400 if bad else 200)
+
+
+async def _run_user_action(actor_id: int, target_id: int, do: str, form,
+                           application) -> str:
+    """Одно действие карточки. Возвращает строку о том, что вышло."""
+    if do == "set":
+        code = str(form.get("code", ""))
+        delta = 1 if str(form.get("delta", "1")) == "1" else -1
+        new_val, changed = actions.user_adjust(actor_id, target_id, code, delta)
+        if not changed:
+            return "Дальше некуда — значение на границе."
+        return ("↩️ Вернул общую настройку бота." if new_val is None
+                else f"Новое значение: {new_val}")
+
+    if do == "tog":
+        code = str(form.get("code", ""))
+        new_val = actions.user_toggle(actor_id, target_id, code)
+        title, words = actions.USER_TOGGLE_WORDS[code]
+        return f"{title}: {words[new_val]}"
+
+    if do == "viol":
+        actions.user_reset_violations(actor_id, target_id)
+        return "🧾 Нарушения обнулены."
+
+    if do == "clr":
+        actions.user_clear_history(actor_id, target_id)
+        return "🧹 История диалога очищена."
+
+    if do == "reset":
+        actions.user_reset_settings(actor_id, target_id)
+        return "↩️ Персональные настройки сброшены — действуют общие."
+
+    if do == "rank":
+        try:
+            idx = int(form.get("idx", ""))
+        except (TypeError, ValueError):
+            raise actions.ActionError("не понял, какое звание")
+        name = actions.user_rank(actor_id, target_id, idx)
+        return f"🎖️ Присвоено звание: {name}" if name else "🚫 Почётное звание убрано."
+
+    if do == "role":
+        make = str(form.get("make", "")) == "1"
+        await actions.user_role(actor_id, target_id, make, application)
+        return ("🛡 Назначен модератором. Права выдайте галочками ниже."
+                if make else "🚫 Модератор снят вместе со всеми правами.")
+
+    if do == "perm":
+        code = str(form.get("code", ""))
+        on = actions.user_perm(actor_id, target_id, code)
+        from services import roles
+        return f'{roles.PERMS[code]["title"]}: {"✅ выдано" if on else "⬜ снято"}'
+
+    if do == "mod":
+        act = str(form.get("act", ""))
+        try:
+            chat_id = int(form.get("chat", ""))
+            seconds = int(form.get("sec", "0") or 0)
+        except (TypeError, ValueError):
+            raise actions.ActionError("не понял, в какой группе и на какой срок")
+        return await actions.user_moderate(actor_id, target_id, act, chat_id,
+                                           seconds, application)
+
+    raise actions.ActionError(f"неизвестное действие «{do}»")
+
+
 async def enter(request):
     """
     Вход. Два способа, оба заканчиваются одной и той же кукой:
@@ -201,6 +326,9 @@ ROUTES = (
     ("POST", "/set",     apply,   "owner"),
     ("GET",  "/prompts", prompts, "owner"),
     ("POST", "/prompts", prompts, "owner"),
+    ("GET",  "/users",   users,   "owner"),
+    ("GET",  "/users/{uid}", user_card, "owner"),
+    ("POST", "/users/{uid}", user_card, "owner"),
     ("GET",  "/enter",   enter,   "open"),
     ("POST", "/enter",   enter,   "open"),
     ("GET",  "/exit",    exit_,   "owner"),
