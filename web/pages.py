@@ -390,6 +390,99 @@ _CONTROLS_JS = """
 """
 
 
+# ─── страница промптов (этап 2) ─────────────────────────────────────
+#
+#  Отдельной страницей, а не блоком на главной: промпты — длинные тексты, и
+#  рядом со сводкой и тумблерами они превратили бы её в простыню.
+#
+#  ⚠️ ЗДЕСЬ НЕТ НИ СТРОЧКИ JavaScript, и это осознанно. На главной сценарий
+#  оправдан — там десятки мелких правок подряд. Здесь правка одна и редкая:
+#  вставил текст, нажал «Сохранить». Обычная форма надёжнее и понятнее.
+
+def page_prompts(csrf: str = "", confirm: str = "", saved: str = "") -> str:
+    """
+    Страница промптов.
+
+    confirm — ключ промпта, для которого показать вопрос «точно стереть?»
+    (человек отправил пустое поле поверх непустого текста).
+    saved   — ключ промпта, который только что сохранён (подсветить карточку).
+    """
+    from services import prompts_spec
+
+    assembled, assembled_len = prompts_spec.assembled_system_prompt()
+
+    cards = []
+    for item in prompts_spec.PROMPTS:
+        key = item["key"]
+        text = prompts_spec.read(key)
+        marks = []
+        if text:
+            marks.append(f"{len(text)} символов")
+        else:
+            marks.append("пусто — бот работает без этого куска")
+        # У основного промпта показываем, что уйдёт модели ЦЕЛИКОМ: он
+        # склеивается с дополнениями, и по одному полю этого не видно.
+        if key == "custom_system_prompt" and assembled_len != len(text):
+            marks.append(f"вместе с дополнениями модель получит {assembled_len}")
+
+        if key == confirm:
+            body = (
+                '<div class="warn-box">'
+                '<b>Стереть этот промпт?</b><br>'
+                'Поле пустое, а текст в нём есть. Заводского текста у промптов '
+                'нет — восстановить будет нечем.'
+                '<div class="warn-btns">'
+                + f'<form method="post" action="/prompts">'
+                  f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+                  f'<input type="hidden" name="key" value="{esc(key)}">'
+                  f'<input type="hidden" name="text" value="">'
+                  f'<input type="hidden" name="confirm" value="1">'
+                  f'<button type="submit" class="btn danger">Да, стереть</button>'
+                  f'</form>'
+                + '<a class="btn" href="/prompts">Отмена</a>'
+                + '</div></div>'
+            )
+        else:
+            body = (
+                f'<form method="post" action="/prompts">'
+                f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+                f'<input type="hidden" name="key" value="{esc(key)}">'
+                f'<textarea name="text" rows="10" spellcheck="false" '
+                f'placeholder="Пусто. Бот работает без этого текста.">{esc(text)}</textarea>'
+                f'<div class="pbtns">'
+                f'<button type="submit" class="btn primary">Сохранить</button>'
+                f'<span class="note">чтобы стереть — очистите поле и сохраните</span>'
+                f'</div></form>'
+            )
+
+        cls = "pcard saved" if key == saved else "pcard"
+        cards.append(
+            f'<div class="{cls}">'
+            f'<div class="phead"><h3>{esc(item["title"])}</h3>'
+            f'<span class="pmeta">{esc(" · ".join(marks))}</span></div>'
+            f'<div class="note">{esc(item["hint"])}</div>'
+            f'{body}</div>'
+        )
+
+    head = ("<header>"
+            "<h1>Промпты</h1>"
+            "<div class=\"ver\"><a href=\"/\">← к сводке</a></div>"
+            "</header>")
+
+    intro = ('<div class="card wide"><div class="note">'
+             'Промпты — это инструкции модели. Заводских текстов у них нет: '
+             'пустое поле означает «работать без этого куска», а не «взять '
+             'значение по умолчанию». Правка применяется сразу, следующий же '
+             'ответ бота пойдёт по новому тексту.'
+             '</div></div>')
+
+    foot = ('<footer><span><a href="/">← к сводке</a></span>'
+            '<span><a href="/exit">выйти</a></span></footer>')
+
+    body = "<div class=\"wrap\">" + head + intro + "".join(cards) + foot + "</div>"
+    return _shell("Промпты — C4_Max", body)
+
+
 def page_summary(csrf: str = "") -> str:
     """Главная страница: сводка сверху, управление ниже."""
     tiles, stats = _tiles()
@@ -403,10 +496,13 @@ def page_summary(csrf: str = "") -> str:
             "</header>")
 
     foot = ('<footer><span>Правки применяются сразу — бот видит их без '
-            'перезапуска.</span><span><a href="/">обновить</a></span>'
+            'перезапуска.</span><span><a href="/prompts">промпты</a></span>'
+            '<span><a href="/">обновить</a></span>'
             '<span><a href="/exit">выйти</a></span></footer>')
 
-    body = ("<div class=\"wrap\">" + head + tiles
+    nav = '<div class="nav"><a href="/prompts">⚙️ Промпты — пять текстов бота</a></div>'
+
+    body = ("<div class=\"wrap\">" + head + tiles + nav
             + _models_block(csrf)
             + _thinking_block(csrf)
             + _spec_blocks(csrf)

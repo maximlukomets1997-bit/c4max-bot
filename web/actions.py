@@ -116,6 +116,34 @@ async def _announce_proactive(application, now_on: bool) -> None:
         logger.warning("⚠️ Объявление о смене режима «Сам в разговор» не отработало: %s", e)
 
 
+# ─── промпты ────────────────────────────────────────────────────────
+
+def apply_prompt(user_id: int, key: str, text: str) -> int:
+    """
+    Сохраняет промпт. Возвращает длину сохранённого текста.
+
+    ⚠️ Делает ровно то же, что команда /X_prompt_set в боте: пишет настройку
+    и строку в лог. В журнал персонала промпты НЕ пишутся — их не пишет туда
+    и команда (сверено по handlers/admin/panel_prompts.py). Добавлять журнал
+    «заодно» здесь нельзя: тогда правка с сайта оставляла бы след, а та же
+    правка из бота — нет.
+
+    ⚠️ Пустой текст = промпт стёрт. Заводского значения у промптов НЕТ,
+    поэтому подтверждение спрашивает страница, до вызова этой функции.
+    """
+    from services import prompts_spec
+    if key not in prompts_spec.BY_KEY:
+        raise ActionError(f"неизвестный промпт «{key}»")
+    length = prompts_spec.write(key, text)
+    title = prompts_spec.BY_KEY[key]["title"]
+    if length:
+        logger.info("🌐 Сайт: промпт «%s» заменён, %d символов (админ %s)",
+                    title, length, user_id)
+    else:
+        logger.info("🌐 Сайт: промпт «%s» СТЁРТ (админ %s)", title, user_id)
+    return length
+
+
 # ─── выбор модели ───────────────────────────────────────────────────
 
 def apply_model(user_id: int, key: str) -> str:

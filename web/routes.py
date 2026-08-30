@@ -105,6 +105,52 @@ def _answer(request, payload: dict, status: int = 200):
     return aioweb.HTTPSeeOther("/")
 
 
+async def prompts(request):
+    """
+    Страница промптов. GET показывает пять текстов, POST сохраняет один.
+
+    ⚠️ Пустое поле поверх непустого текста НЕ сохраняется сразу: страница
+    возвращается с вопросом «точно стереть?». Заводских текстов у промптов
+    нет, и случайно очищенное поле означало бы потерю текста насовсем — в
+    боте на это же место поставлено подтверждение кнопкой.
+    """
+    csrf = auth.csrf_for(request.cookies.get(WEB_COOKIE_NAME))
+    if request.method == "GET":
+        return aioweb.Response(text=pages.page_prompts(csrf),
+                               content_type="text/html")
+
+    form = await request.post()
+    if not auth.csrf_ok(request, str(form.get("csrf", ""))):
+        logger.warning("🌐 Правка промпта отклонена: подпись формы не сошлась")
+        return aioweb.Response(text=pages.page_prompts(csrf),
+                               content_type="text/html", status=403)
+
+    user_id = auth.current_user(request)
+    key = str(form.get("key", ""))
+    text = str(form.get("text", ""))
+
+    from services import prompts_spec
+    if key not in prompts_spec.BY_KEY:
+        logger.warning("🌐 Правка промпта не принята: неизвестный ключ «%s»", key)
+        return aioweb.Response(text=pages.page_prompts(csrf),
+                               content_type="text/html", status=400)
+
+    stirring = not text.strip() and prompts_spec.read(key)
+    if stirring and str(form.get("confirm", "")) != "1":
+        return aioweb.Response(text=pages.page_prompts(csrf, confirm=key),
+                               content_type="text/html")
+
+    try:
+        actions.apply_prompt(user_id, key, text)
+    except actions.ActionError as e:
+        logger.warning("🌐 Правка промпта не принята: %s", e)
+        return aioweb.Response(text=pages.page_prompts(csrf),
+                               content_type="text/html", status=400)
+
+    return aioweb.Response(text=pages.page_prompts(csrf, saved=key),
+                           content_type="text/html")
+
+
 async def enter(request):
     """
     Вход. Два способа, оба заканчиваются одной и той же кукой:
@@ -151,12 +197,14 @@ async def health(request):
 #  "open" — без входа.
 
 ROUTES = (
-    ("GET",  "/",       index,  "owner"),
-    ("POST", "/set",    apply,  "owner"),
-    ("GET",  "/enter",  enter,  "open"),
-    ("POST", "/enter",  enter,  "open"),
-    ("GET",  "/exit",   exit_,  "owner"),
-    ("GET",  "/health", health, "open"),
+    ("GET",  "/",        index,   "owner"),
+    ("POST", "/set",     apply,   "owner"),
+    ("GET",  "/prompts", prompts, "owner"),
+    ("POST", "/prompts", prompts, "owner"),
+    ("GET",  "/enter",   enter,   "open"),
+    ("POST", "/enter",   enter,   "open"),
+    ("GET",  "/exit",    exit_,   "owner"),
+    ("GET",  "/health",  health,  "open"),
 )
 
 

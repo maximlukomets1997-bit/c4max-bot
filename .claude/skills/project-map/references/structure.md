@@ -1,6 +1,6 @@
 # Структура: файл → что в нём объявлено
 
-Снимок от 2026-08-30 по коду версии v4.86: таблица пересобрана скриптом и
+Снимок от 2026-08-30 по коду версии v4.87: таблица пересобрана скриптом и
 сверена с кодом. Пересобрать:
 
 ```
@@ -14,7 +14,7 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 наружу. Имена с подчёркиванием тоже иногда зовут снаружи — проверяй
 скриптом `impact.py`, а не этим списком.
 
-Всего файлов с кодом: **65**. Отдельных тестовых файлов (`test_*.py`,
+Всего файлов с кодом: **66**. Отдельных тестовых файлов (`test_*.py`,
 `pytest`) по-прежнему **0** — но с 28.08.2026 у проекта есть `selftest.py`:
 проверки поведения в том же стиле, что `preflight.py`, без сторонних
 библиотек. Он не заменяет ручной прогон (проверяет функции по отдельности,
@@ -31,7 +31,7 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 | `utils_format.py` | 313 | 8 | `strip_thoughts`, `thoughts_enabled`, `build_text_and_entities`, `send_formatted`, `convert_md`, `fits_caption`, `reply_md` |
 | `logging_setup.py` | 248 | 3 | `archive_old_logs`, `setup_logging` |
 | `preflight.py` | 675 | 0 | `check_imports`, `check_models`, `check_providers`, `check_tables`, `check_ranks`, `check_callbacks`, `check_panels`, `check_handlers`, `check_web`, `main` |
-| `selftest.py` | 1759 | 0 | проверки ПОВЕДЕНИЯ (28.08.2026), 15 групп: `check_money`, `check_price_list`, `check_mute_tag`, `check_permissions`, `check_thoughts`, `check_long_answers`, `check_wait_budgets`, `check_album_not_flood`, `check_album_collect`, `check_time_keys`, `check_rag_pick`, `check_quiz_ranks`, `check_daily_report`, `check_settings_spec`, `check_web_auth`, `main`. Отвечает на «правильно ли считает», тогда как `preflight.py` — на «запустится ли». Зовётся из `deploy.sh` и CI, красный откатывает выкатку |
+| `selftest.py` | 1879 | 0 | проверки ПОВЕДЕНИЯ (28.08.2026), 16 групп: `check_money`, `check_price_list`, `check_mute_tag`, `check_permissions`, `check_thoughts`, `check_long_answers`, `check_wait_budgets`, `check_album_not_flood`, `check_album_collect`, `check_time_keys`, `check_rag_pick`, `check_quiz_ranks`, `check_daily_report`, `check_settings_spec`, `check_prompts_spec`, `check_web_auth`, `main`. Отвечает на «правильно ли считает», тогда как `preflight.py` — на «запустится ли». Зовётся из `deploy.sh` и CI, красный откатывает выкатку |
 | `reset_db.py` | 81 | 0 | `main` |
 | `watchdog_local.py` | 297 | 0 | `main` |
 
@@ -88,6 +88,7 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 | `services/scraper.py` | 346 | 1 | `fetch_latest_news`, `fetch_article` (сайт `https://wtmobile.com/ru/news`) |
 | `services/roles.py` | 311 | 11 | `load`, `make_moderator`, `unmake_moderator`, `grant_perm`, `is_owner`, `is_moderator`, `is_staff`, `role_of`, `can`, `has_any_perm`, `perms_of`, `list_moderators`, `can_act_on`, `perm_for_callback`, `may_press` |
 | `services/settings_spec.py` | 338 | 7 | ЕДИНЫЙ список простых настроек (тумблер и число): пределы, шаги, начальные значения. `SPEC`, `SECTIONS`, `read`, `display`, `toggle`, `adjust`, `write`, `keys_of`, `title`. Читают и панели бота, и сайт — второй копии пределов быть не должно |
+| `services/prompts_spec.py` | 128 | 4 | список пяти промптов плюс дополнений: ключ, название, куда уходит текст, запасная константа. `PROMPTS`, `BY_KEY`, `read`, `write`, `assembled_system_prompt`. Тексты подсказок для Telegram остались в `panel_prompts._PROMPTS`; что оба списка про одно и то же, сверяет `selftest` |
 | `services/knowledge_store.py` | 300 | 6 | `save_pending_news`, `read_title`, `detect_kind`, `list_articles`, `read_article`, `approve_article`, `delete_article`, `add_article`, `replace_article` |
 | `services/group_digest.py` | 328 | 3 | `is_enabled`, `week_key`, `due_now`, `note_sent`, `collect`, `render`, `build` |
 | `services/update_log.py` | 263 | 1 | `available`, `version_of`, `recent`, `stats`, `fmt_time`, `fmt_day`, `fmt_ago` |
@@ -111,7 +112,7 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 | `jobs/rag.py` | 85 | `rag_catchup_loop` |
 | `jobs/web.py` | 71 | `web_loop` — поднимает сайт внутри процесса бота |
 
-## `web/` — веб-админка (30.08.2026, этапы 0–1)
+## `web/` — веб-админка (30.08.2026, этапы 0–2)
 
 Сайт живёт внутри процесса бота; как он подключён и почему именно так —
 `references/wiring.md`, раздел «Веб-админка».
@@ -119,10 +120,10 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 | файл | строк | публичные имена |
 |---|---:|---|
 | `web/__init__.py` | 21 | re-export `ROUTES`, `build_app` |
-| `web/routes.py` | 194 | `ROUTES` — единственный список адресов; `build_app`, `index`, `apply`, `enter`, `exit_`, `health` |
+| `web/routes.py` | 242 | `ROUTES` — единственный список адресов; `build_app`, `index`, `apply`, `prompts`, `enter`, `exit_`, `health` |
 | `web/auth.py` | 263 | `check_webapp`, `check_widget`, `is_allowed`, `make_session`, `read_session`, `make_login_token`, `read_login_token`, `make_login_url`, `csrf_for`, `csrf_ok`, `current_user` |
-| `web/pages.py` | 417 | `esc`, `page_login`, `page_denied`, `page_summary` |
-| `web/actions.py` | 169 | `ActionError`, `apply_setting`, `apply_model`, `apply_image_model`, `apply_thinking` — правка с сайта делает ВСЁ то же, что нажатие кнопки |
+| `web/pages.py` | 513 | `esc`, `page_login`, `page_denied`, `page_summary`, `page_prompts` |
+| `web/actions.py` | 197 | `ActionError`, `apply_setting`, `apply_prompt`, `apply_model`, `apply_image_model`, `apply_thinking` — правка с сайта делает ВСЁ то же, что нажатие кнопки |
 | `web/static/style.css` | — | оформление; ни одного адреса со стороны |
 
 ## Прочее

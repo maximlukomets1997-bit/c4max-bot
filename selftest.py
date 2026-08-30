@@ -1527,6 +1527,125 @@ class _no_row:
         return False
 
 
+def check_prompts_spec():
+    """
+    Список промптов (services/prompts_spec.py) против таблицы промптов панели
+    бота и против настоящих читалок из database/history.py.
+
+    ⚠️ Ради чего проверка существует. Промпты описаны в ДВУХ местах: панель
+    знает тексты подсказок и подтверждений для Telegram, сайт — куда какой
+    текст уходит. Заведёшь шестой промпт в панели и забудешь в списке — он
+    просто не появится на сайте, молча и без единой ошибки. Обратный случай
+    хуже: сайт покажет поле, которого бот не знает, и правка уйдёт в никуда.
+
+    Отдельно проверяется, что поле для правки показывает ХРАНИМЫЙ текст, а не
+    то, что отдаёт читалка: у половины промптов читалка подставляет запасное
+    значение из config, и правь мы показанное ею — в базу уехала бы копия
+    запасного текста вместо пустоты.
+    """
+    import database.history as hist
+    from services import prompts_spec
+    from handlers.admin.panel_prompts import _PROMPTS
+
+    problems = []
+    done = 0
+
+    # ─── два списка описывают одни и те же промпты ───
+    # У панели ключи лежат в "keys" (у основного промпта их два: свой текст
+    # и дополнения), у списка — по одному на карточку.
+    panel_keys = {key for spec in _PROMPTS.values() for key in spec["keys"]}
+    site_keys = set(prompts_spec.BY_KEY)
+    done += 1
+    for key in sorted(panel_keys - site_keys):
+        problems.append(f"промпт «{key}» есть в панели бота, но не на сайте")
+    for key in sorted(site_keys - panel_keys):
+        problems.append(f"промпт «{key}» есть на сайте, но не в панели бота")
+
+    # ─── у каждого есть название и пояснение ───
+    for item in prompts_spec.PROMPTS:
+        done += 1
+        if not item.get("title") or not item.get("hint"):
+            problems.append(f"промпт «{item['key']}»: нет названия или пояснения")
+
+    # ─── читалки, на которые ссылается список, существуют ───
+    for item in prompts_spec.PROMPTS:
+        if not item["reader"]:
+            continue
+        done += 1
+        if not hasattr(hist, item["reader"]):
+            problems.append(f"промпт «{item['key']}»: читалки "
+                            f"{item['reader']} в database/history нет")
+
+    # ─── правка и стирание доходят до бота ───
+    for item in prompts_spec.PROMPTS:
+        key = item["key"]
+        saved = hist.get_setting(key, "")
+        try:
+            prompts_spec.write(key, "  проверка текста  ")
+            done += 1
+            if prompts_spec.read(key) != "проверка текста":
+                problems.append(f"«{key}»: пробелы по краям не срезаны")
+            done += 1
+            if hist.get_setting(key, "") != "проверка текста":
+                problems.append(f"«{key}»: текст не дошёл до settings")
+            prompts_spec.write(key, "")
+            done += 1
+            if prompts_spec.read(key) != "":
+                problems.append(f"«{key}»: очистка не сработала")
+        finally:
+            hist.set_setting(key, saved)
+
+    # ─── поле показывает ХРАНИМОЕ, а не запасное ───
+    # ⚠️ ПРОВЕРКА ДОЛЖНА РАБОТАТЬ, ДАЖЕ КОГДА ЗАПАСНЫЕ ТЕКСТЫ ПУСТЫ. Сегодня
+    # они пусты (убраны 16.08.2026), и просто «прочитать при пустой настройке»
+    # ничего не доказывает: подмена читалки на запасной текст такую проверку
+    # прошла бы насквозь (наступил на это при написании 30.08.2026). Поэтому
+    # временно КЛАДЁМ в константу метку и требуем, чтобы поле её не показало,
+    # а читалка бота — показала: тогда видно, что это два разных пути.
+    import config as cfg
+    for item in prompts_spec.PROMPTS:
+        if not item.get("fallback"):
+            continue
+        key, const = item["key"], item["fallback"]
+        saved = hist.get_setting(key, "")
+        saved_const = getattr(cfg, const)
+        try:
+            hist.set_setting(key, "")
+            setattr(cfg, const, "ЗАПАСНОЙ ТЕКСТ")
+            done += 1
+            if prompts_spec.read(key) != "":
+                problems.append(f"«{key}»: поле показывает запасной текст "
+                                f"вместо пустоты — правка запишет его копию")
+            done += 1
+            reader = getattr(hist, item["reader"])
+            if reader() != "ЗАПАСНОЙ ТЕКСТ":
+                problems.append(f"«{key}»: читалка бота НЕ берёт запасной "
+                                f"текст из config.{const} — проверка выше "
+                                f"ничего не значит")
+        finally:
+            setattr(cfg, const, saved_const)
+            hist.set_setting(key, saved)
+
+    # ─── собранный системный промпт = основной + дополнения ───
+    saved_main = hist.get_setting("custom_system_prompt", "")
+    saved_add = hist.get_setting("prompt_additions", "")
+    try:
+        hist.set_setting("custom_system_prompt", "ОСНОВА")
+        hist.set_setting("prompt_additions", "ДОБАВКА")
+        text, length = prompts_spec.assembled_system_prompt()
+        done += 2
+        if "ОСНОВА" not in text or "ДОБАВКА" not in text:
+            problems.append("собранный промпт не содержит основу или дополнения")
+        if length != len(text):
+            problems.append("длина собранного промпта посчитана неверно")
+    finally:
+        hist.set_setting("custom_system_prompt", saved_main)
+        hist.set_setting("prompt_additions", saved_add)
+
+    return problems, (f"{done} проверок: {len(prompts_spec.PROMPTS)} промптов, "
+                      f"сверка с панелью бота и читалками, правка и стирание")
+
+
 def check_web_auth():
     """
     Вход в веб-админку: пускает ли она того, кого надо, и, ГЛАВНОЕ, отшивает
@@ -1702,6 +1821,7 @@ CHECKS = (
     ("звания викторины — лестница без дыр", check_quiz_ranks),
     ("суточный отчёт — расход за период", check_daily_report),
     ("единый список настроек против читалок бота", check_settings_spec),
+    ("список промптов против панели бота", check_prompts_spec),
     ("вход в веб-админку — подпись и срок", check_web_auth),
 )
 
