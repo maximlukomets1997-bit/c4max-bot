@@ -16,6 +16,16 @@ from utils import schedule_delete
 logger = logging.getLogger(__name__)
 from .common import _adm_back_row, _fmt_mod_time, _is_group_chat, _onoff, _require
 
+# Какую настройку крутит какая пара кнопок ➖/➕ (30.08.2026). Вынесено из тела
+# ветки наверх, чтобы соответствие можно было ПРОВЕРИТЬ, а не только прочитать:
+# selftest.py::check_settings_spec сверяет, что все три ключа существуют в
+# едином списке настроек. Приставки не должны быть началом друг друга.
+_KB_ADJUST_KEYS = {
+    "kb_margin": "rag_peak_margin",
+    "kb_thr":    "rag_min_similarity",
+    "kb_topk":   "rag_top_k",
+}
+
 
 
 
@@ -572,38 +582,16 @@ async def _handle_kb_callback(query, context, data: str, chat_id: int, user_id: 
 
     if action in ("kb_thr_dec", "kb_thr_inc", "kb_topk_dec", "kb_topk_inc",
                   "kb_margin_dec", "kb_margin_inc"):
-        from config import RAG_TOP_K, RAG_MIN_SIMILARITY, RAG_PEAK_MARGIN
-        if action.startswith("kb_margin"):
-            # Запас «пик над полкой»: шаг 0.01 — рабочий диапазон узкий
-            # (дефолт 0.14, выверен замером 2026-07-19 — см. config.py).
-            # 0 = правило выключено, проходит всё, что выше порога сходства.
-            try:
-                cur = float(get_setting("rag_peak_margin", str(RAG_PEAK_MARGIN)))
-            except (TypeError, ValueError):
-                cur = RAG_PEAK_MARGIN
-            new_val = round(cur + (0.01 if action.endswith("inc") else -0.01), 2)
-            new_val = max(0.0, min(0.30, new_val))
-            set_setting("rag_peak_margin", f"{new_val:.2f}")
-            logger.info("📚 /rag: запас «пик над полкой» = %.2f", new_val)
-        elif action.startswith("kb_thr"):
-            try:
-                cur = float(get_setting("rag_min_similarity", str(RAG_MIN_SIMILARITY)))
-            except (TypeError, ValueError):
-                cur = RAG_MIN_SIMILARITY
-            # Шаг 0.02: зазор между болтовнёй и реальными вопросами узкий
-            # (~0.59 против ~0.60 по замерам 2026-07-05), 0.05 слишком грубо
-            new_val = round(cur + (0.02 if action.endswith("inc") else -0.02), 2)
-            new_val = max(0.05, min(0.95, new_val))
-            set_setting("rag_min_similarity", f"{new_val:.2f}")
-            logger.info("📚 /rag: порог сходства = %.2f", new_val)
-        else:
-            try:
-                cur = int(get_setting("rag_top_k", str(RAG_TOP_K)))
-            except (TypeError, ValueError):
-                cur = RAG_TOP_K
-            new_val = max(1, min(10, cur + (1 if action.endswith("inc") else -1)))
-            set_setting("rag_top_k", str(new_val))
-            logger.info("📚 /rag: фрагментов в контекст = %d", new_val)
+        # Шаги, пределы и начальные значения всех трёх регуляторов живут в
+        # services/settings_spec.py — ОДНОЙ таблицей на весь проект
+        # (30.08.2026). Раньше они стояли прямо здесь тремя кусками кода;
+        # после появления сайта у тех же настроек стало два хозяина, и две
+        # копии пределов разъехались бы. Почему шаг именно такой — там же,
+        # рядом со значением.
+        from services.settings_spec import adjust
+        key = next(v for k, v in _KB_ADJUST_KEYS.items() if action.startswith(k))
+        new_val = adjust(key, 1 if action.endswith("inc") else -1)
+        logger.info("📚 /rag: %s = %s", key, new_val)
         await query.answer()
         # Перерисовываем панель с новыми значениями на кнопках
         text, markup = _build_rag_panel(context, user_id)

@@ -182,28 +182,17 @@ def _build_mod_panel_text_and_keyboard(viewer_id: int = 0):
     return text, InlineKeyboardMarkup(_filter_keyboard(keyboard, viewer_id))
 
 
-# Шаги и границы изменения порогов кнопками +/-
-_MOD_LIMITS = {
-    "antispam_msg_count":   {"step": 1,  "min": 2,  "max": 50},
-    "antispam_window_sec":  {"step": 1,  "min": 2,  "max": 60},
-    "antispam_mute_sec":    {"step": 60, "min": 30, "max": 86400},
-    # Срок на проверку «я не бот»: от минуты (успеет только живой человек,
-    # уже открывший чат) до часа (человек мог зайти и отложить телефон).
-    "greet_timeout_sec":    {"step": 60, "min": 60, "max": 3600},
-}
+def _adjust_setting(key: str, delta_steps: int) -> int:
+    """
+    Меняет числовую настройку на delta_steps шагов кнопками ➖/➕.
 
-
-def _adjust_setting(key: str, default: int, delta_steps: int) -> int:
-    """Меняет числовую настройку на delta_steps шагов в пределах _MOD_LIMITS."""
-    lim = _MOD_LIMITS[key]
-    try:
-        cur = int(get_setting(key, str(default)))
-    except (TypeError, ValueError):
-        cur = default
-    new_val = cur + lim["step"] * delta_steps
-    new_val = max(lim["min"], min(lim["max"], new_val))
-    set_setting(key, str(new_val))
-    return new_val
+    Шаги, пределы и начальные значения живут в services/settings_spec.py —
+    ОДНОЙ таблицей на весь проект (30.08.2026). Раньше они лежали здесь
+    отдельным словарём `_MOD_LIMITS`; после появления сайта у тех же
+    настроек стало два хозяина, и две копии пределов разъехались бы.
+    """
+    from services.settings_spec import adjust
+    return adjust(key, delta_steps)
 
 
 async def _handle_mod_callback(update, context, query, user_id, data):
@@ -275,7 +264,6 @@ async def _handle_clearlog_callback(query, confirmed: bool, user_id: int):
 
 async def _handle_antispam_callback(update, query, parts):
     """Ветки mod:antispam:<действие> — тумблер и кнопки +/- порогов."""
-    from config import ANTISPAM_MSG_COUNT, ANTISPAM_WINDOW_SEC, ANTISPAM_MUTE_SEC
     action = parts[2] if len(parts) > 2 else ""
     # Общие настройки действуют на ВСЕ группы сразу — каждая правка попадает
     # в журнал персонала (кто крутил пороги, видно поимённо).
@@ -302,17 +290,17 @@ async def _handle_antispam_callback(update, query, parts):
         _audit(actor_id, "antispam", 0, f"фильтр ссылок {state}")
         await query.answer(f"Фильтр ссылок {state}", show_alert=False)
     elif action in ("count_inc", "count_dec"):
-        new_count = _adjust_setting("antispam_msg_count", ANTISPAM_MSG_COUNT, 1 if action.endswith("inc") else -1)
+        new_count = _adjust_setting("antispam_msg_count", 1 if action.endswith("inc") else -1)
         logger.info("🛡 /mod: порог сообщений = %d", new_count)
         _audit(actor_id, "antispam", 0, f"общий порог = {new_count} сообщ.")
         await query.answer()
     elif action in ("window_inc", "window_dec"):
-        new_window = _adjust_setting("antispam_window_sec", ANTISPAM_WINDOW_SEC, 1 if action.endswith("inc") else -1)
+        new_window = _adjust_setting("antispam_window_sec", 1 if action.endswith("inc") else -1)
         logger.info("🛡 /mod: окно засчёта = %d сек", new_window)
         _audit(actor_id, "antispam", 0, f"общее окно = {new_window} сек")
         await query.answer()
     elif action in ("mute_inc", "mute_dec"):
-        new_mute = _adjust_setting("antispam_mute_sec", ANTISPAM_MUTE_SEC, 1 if action.endswith("inc") else -1)
+        new_mute = _adjust_setting("antispam_mute_sec", 1 if action.endswith("inc") else -1)
         logger.info("🛡 /mod: длительность мута = %d сек", new_mute)
         _audit(actor_id, "antispam", 0, f"общая длительность мута = {new_mute} сек")
         await query.answer()
@@ -337,7 +325,6 @@ async def _handle_greet_callback(query, parts):
     владельца — он задан в таблице прав (`mod:greet:` в services/roles.py),
     прятать кнопки здесь не нужно, это сделает `_filter_keyboard`.
     """
-    from config import GREET_TIMEOUT_SEC
     from services import greeter
 
     action = parts[2] if len(parts) > 2 else ""
@@ -364,7 +351,7 @@ async def _handle_greet_callback(query, parts):
         await query.answer(f"👋 {title.capitalize()}: {state}", show_alert=False)
     elif action in ("time_inc", "time_dec"):
         before = greeter.timeout_sec()
-        after = _adjust_setting("greet_timeout_sec", GREET_TIMEOUT_SEC,
+        after = _adjust_setting("greet_timeout_sec",
                                 1 if action.endswith("inc") else -1)
         if after == before:
             # Упёрлись в границу: панель получилась бы точь-в-точь прежней, а

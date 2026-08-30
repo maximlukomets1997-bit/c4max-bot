@@ -35,6 +35,26 @@ def _token_bytes() -> bytes:
     return TELEGRAM_TOKEN.encode()
 
 
+def _same(mine: str, given: str) -> bool:
+    """
+    Совпали ли две подписи, за одинаковое время при любом расхождении.
+
+    ⚠️ СРАВНИВАЕМ БАЙТАМИ, А НЕ СТРОКАМИ. hmac.compare_digest на строках
+    ТРЕБУЕТ, чтобы обе были из латиницы и цифр, а иначе бросает TypeError —
+    и подпись, присланная кириллицей, роняла бы обработчик пятисотой ошибкой
+    вместо честного отказа. Своя подпись всегда латиницей, а вот чужая
+    приходит какая угодно. Поймано живой проверкой 30.08.2026.
+
+    ⚠️ Не «чинить» обратно на «==»: обычное сравнение отвечает тем быстрее,
+    чем раньше строки разошлись, и по времени ответа подпись подбирается
+    посимвольно.
+    """
+    if not mine or not given:
+        return False
+    return hmac.compare_digest(mine.encode("utf-8", "surrogatepass"),
+                               given.encode("utf-8", "surrogatepass"))
+
+
 # ─── подпись Telegram ───────────────────────────────────────────────
 
 def _check_string(pairs: dict) -> str:
@@ -47,14 +67,12 @@ def _check_string(pairs: dict) -> str:
 
 
 def _verify(pairs: dict, secret: bytes) -> bool:
-    """Совпала ли подпись. Сравнение через compare_digest — обычное «==»
-    отвечает тем быстрее, чем раньше строки разошлись, и по времени ответа
-    подпись можно подобрать посимвольно."""
+    """Совпала ли подпись Telegram (сравнение — через _same)."""
     given = pairs.get("hash", "")
     if not given or not TELEGRAM_TOKEN:
         return False
     mine = hmac.new(secret, _check_string(pairs).encode(), hashlib.sha256).hexdigest()
-    return hmac.compare_digest(mine, given)
+    return _same(mine, given)
 
 
 def _fresh(pairs: dict) -> bool:
@@ -153,7 +171,7 @@ def read_session(cookie: str | None) -> int | None:
         return None
     body = f"{parts[0]}.{parts[1]}"
     mine = hmac.new(_token_bytes(), body.encode(), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(mine, parts[2]):
+    if not _same(mine, parts[2]):
         return None
     try:
         user_id, expires = int(parts[0]), int(parts[1])
@@ -194,7 +212,7 @@ def read_login_token(token: str | None) -> int | None:
         return None
     body = f"{parts[0]}.{parts[1]}"
     mine = hmac.new(_token_bytes(), f"login:{body}".encode(), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(mine, parts[2]):
+    if not _same(mine, parts[2]):
         return None
     try:
         user_id, expires = int(parts[0]), int(parts[1])
@@ -211,6 +229,28 @@ def make_login_url(user_id: int) -> str:
     if not WEB_PUBLIC_URL:
         return ""
     return f"{WEB_PUBLIC_URL}/enter?t={make_login_token(user_id)}"
+
+
+# ─── защита от чужой формы (CSRF) ───────────────────────────────────
+#
+#  Кука входа помечена SameSite=Lax — браузер сам не отправит её вместе с
+#  формой, поданной с чужого сайта. Этого уже достаточно, но одной строкой
+#  защиты для админки мало: пометку куки легко потерять при будущей правке
+#  и не заметить. Поэтому каждая форма несёт скрытое поле, выведенное из
+#  куки, и правка без него не принимается.
+
+def csrf_for(cookie: str | None) -> str:
+    """Подпись для форм этой сессии."""
+    if not cookie or not TELEGRAM_TOKEN:
+        return ""
+    return hmac.new(_token_bytes(), f"csrf:{cookie}".encode(),
+                    hashlib.sha256).hexdigest()
+
+
+def csrf_ok(request, given: str) -> bool:
+    """Совпало ли скрытое поле формы с подписью этой сессии."""
+    mine = csrf_for(request.cookies.get(WEB_COOKIE_NAME))
+    return _same(mine, given)
 
 
 def current_user(request) -> int | None:

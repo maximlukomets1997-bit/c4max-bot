@@ -33,21 +33,18 @@ def _int_setting(key: str, default: int) -> int:
 
 # Шаги и границы регуляторов «Сам в разговор» (кнопки ➖/➕ этой панели);
 # тот же паттерн, что _MOD_LIMITS в panel_mod.py.
-_PROACTIVE_LIMITS = {
-    # Пауз по времени здесь БОЛЬШЕ НЕТ (обе убраны 2026-07-20, см. proactive.py):
-    # они дублировали друг друга. Остались порог сообщений и размер стенограммы.
-    "proactive_min_msgs":      {"step": 1,  "min": 1, "max": 20},
-    "proactive_context_msgs":  {"step": 5,  "min": 5, "max": 50},
-}
+def _adjust_proactive_setting(key: str, delta_steps: int) -> int:
+    """
+    Меняет числовую настройку «Сам в разговор» на delta_steps шагов.
 
-
-def _adjust_proactive_setting(key: str, default: int, delta_steps: int) -> int:
-    """Меняет числовую настройку на delta_steps шагов в пределах _PROACTIVE_LIMITS."""
-    lim = _PROACTIVE_LIMITS[key]
-    new_val = _int_setting(key, default) + lim["step"] * delta_steps
-    new_val = max(lim["min"], min(lim["max"], new_val))
-    set_setting(key, str(new_val))
-    return new_val
+    Шаги и пределы живут в services/settings_spec.py — ОДНОЙ таблицей на весь
+    проект (30.08.2026). Раньше здесь лежал свой словарь `_PROACTIVE_LIMITS`;
+    после появления сайта у тех же настроек стало два хозяина.
+    (Пауз по времени тут нет с 2026-07-20 — они дублировали друг друга,
+    см. services/proactive.py. Остались порог сообщений и стенограмма.)
+    """
+    from services.settings_spec import adjust
+    return adjust(key, delta_steps)
 
 
 async def _announce_proactive_off(bot):
@@ -346,12 +343,12 @@ async def _handle_proactive_callback(query, user_id, data):
             logger.warning("⚠️ Объявление о смене режима «Сам в разговор» не отработало: %s", e)
         await query.answer(f"Сам в разговор {state}", show_alert=False)
     elif action in ("mm_inc", "mm_dec"):
-        new_mm = _adjust_proactive_setting("proactive_min_msgs", PROACTIVE_MIN_MSGS,
+        new_mm = _adjust_proactive_setting("proactive_min_msgs",
                                            1 if action.endswith("inc") else -1)
         logger.info("🔧 Панель промптов: порог «Сам в разговор» = %d сообщ.", new_mm)
         await query.answer()
     elif action in ("ctx_inc", "ctx_dec"):
-        new_ctx = _adjust_proactive_setting("proactive_context_msgs", PROACTIVE_CONTEXT_MSGS,
+        new_ctx = _adjust_proactive_setting("proactive_context_msgs",
                                             1 if action.endswith("inc") else -1)
         logger.info("🔧 Панель промптов: стенограмма «Сам в разговор» = %d сообщ.", new_ctx)
         await query.answer()

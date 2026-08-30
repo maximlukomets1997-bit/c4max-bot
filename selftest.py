@@ -1332,6 +1332,201 @@ def check_daily_report():
     return problems, f"{done} проверок: расход, перенос, раскладка, копилка недели"
 
 
+def check_settings_spec():
+    """
+    Единый список простых настроек (services/settings_spec.py) против тех, кто
+    эти настройки РЕАЛЬНО читает в боте.
+
+    ⚠️ Ради чего проверка существует. 30.08.2026 пределы и начальные значения
+    съехались в один файл из трёх разных мест, потому что настройки стало
+    крутить два хозяина — кнопки в Telegram и страница сайта. Цена ошибки тут
+    тихая: разойдись начальное значение у списка и у читалки — панель
+    показывала бы одно, а бот вёл себя по-другому, и до первого нажатия
+    кнопки этого не увидел бы никто.
+
+    Поэтому сверяем не комментарии, а поведение: для каждого тумблера зовём
+    его настоящую читалку из services/antispam.py, services/greeter.py,
+    utils_format.py и требуем совпадения — и при пустой базе (начальное
+    значение), и при "1", и при "0".
+    """
+    import database.history as hist
+    from services import settings_spec as spec
+
+    problems = []
+    done = 0
+
+    def expect(title, got, want):
+        nonlocal done
+        done += 1
+        if got != want:
+            problems.append(f"{title}: получилось {got!r}, ожидалось {want!r}")
+
+    # ─── тумблеры против своих настоящих читалок ───
+    from services.antispam import is_enabled, is_linkfilter_enabled
+    from services import greeter
+    from utils_format import thoughts_enabled
+
+    readers = {
+        "antispam_enabled":   is_enabled,
+        "linkfilter_enabled": is_linkfilter_enabled,
+        "greet_enabled":      greeter.is_enabled,
+        "greet_captcha":      greeter.captcha_enabled,
+        "greet_kick":         greeter.kick_enabled,
+        "thoughts_enabled":   thoughts_enabled,
+    }
+    for key, reader in readers.items():
+        # Начальное значение: список и читалка обязаны сойтись на чистой базе.
+        with _no_row(hist, key):
+            expect(f"{key}: начальное значение", spec.read(key), reader())
+        for raw, want in (("1", True), ("0", False)):
+            hist.set_setting(key, raw)
+            expect(f"{key} = {raw}: список", spec.read(key), want)
+            expect(f"{key} = {raw}: читалка бота", reader(), want)
+
+    # ─── числа против своих читалок ───
+    from services.antispam import get_thresholds
+    hist.set_setting("antispam_msg_count", "7")
+    hist.set_setting("antispam_window_sec", "9")
+    hist.set_setting("antispam_mute_sec", "600")
+    expect("пороги антиспама: список против читалки",
+           (spec.read("antispam_msg_count"), spec.read("antispam_window_sec"),
+            spec.read("antispam_mute_sec")),
+           get_thresholds())
+
+    hist.set_setting("greet_timeout_sec", "900")
+    expect("срок проверки: список против читалки",
+           spec.read("greet_timeout_sec"), greeter.timeout_sec())
+
+    # ─── пределы: за границу не выпускаем ───
+    hist.set_setting("antispam_msg_count", "2")
+    expect("порог флуда: ниже минимума не уходит", spec.adjust("antispam_msg_count", -1), 2)
+    hist.set_setting("antispam_msg_count", "50")
+    expect("порог флуда: выше максимума не уходит", spec.adjust("antispam_msg_count", +1), 50)
+    hist.set_setting("greet_timeout_sec", "60")
+    expect("срок проверки: ниже минимума не уходит", spec.adjust("greet_timeout_sec", -1), 60)
+    hist.set_setting("rag_top_k", "10")
+    expect("статей в ответ: выше максимума не уходит", spec.adjust("rag_top_k", +1), 10)
+
+    # ─── шаг: тот же, что был у кнопок до переезда ───
+    hist.set_setting("antispam_mute_sec", "300")
+    expect("мут: шаг 60 секунд", spec.adjust("antispam_mute_sec", +1), 360)
+    hist.set_setting("proactive_context_msgs", "25")
+    expect("стенограмма: шаг 5", spec.adjust("proactive_context_msgs", +1), 30)
+    hist.set_setting("rag_min_similarity", "0.58")
+    expect("порог сходства: шаг 0.02", spec.adjust("rag_min_similarity", +1), 0.60)
+    hist.set_setting("rag_peak_margin", "0.14")
+    expect("запас над фоном: шаг 0.01", spec.adjust("rag_peak_margin", -1), 0.13)
+
+    # ⚠️ Дробное обязано лечь в базу СТРОКОЙ с двумя знаками. Без округления
+    # арифметика с плавающей точкой пишет туда 0.13000000000000003, и это
+    # значение потом читают все, включая отбор статей.
+    expect("запас над фоном: в базе две цифры после точки",
+           hist.get_setting("rag_peak_margin", ""), "0.13")
+
+    # ─── прямая запись (поле и ползунок на сайте) ───
+    expect("прямая запись: подрезается сверху", spec.write("antispam_msg_count", 999), 50)
+    expect("прямая запись: подрезается снизу", spec.write("antispam_msg_count", -5), 2)
+    # Значение между шагами обязано прижаться к сетке, иначе кнопки ➖/➕ в
+    # Telegram пойдут по сдвинутой шкале и разойдутся с сайтом навсегда.
+    expect("прямая запись: прижимается к шагу", spec.write("antispam_mute_sec", 350), 360)
+    expect("прямая запись: дробное прижимается к шагу",
+           spec.write("rag_min_similarity", 0.611), 0.62)
+
+    # ⚠️ ГЛАВНАЯ ПРОВЕРКА ЭТОГО БЛОКА: сетка у кнопок ➖/➕ и у прямой записи
+    # ОДНА И ТА ЖЕ. Шагнули кнопкой — записали то же самое напрямую — значение
+    # не должно сдвинуться ни на волос. Разойдись сетки, и сайт с кнопками
+    # ходили бы по разным лестницам: правка с одной стороны каждый раз слегка
+    # двигала бы значение. Именно здесь это и поймалось при написании.
+    for key, item in spec.SPEC.items():
+        if item["kind"] == "toggle":
+            continue
+        for steps in (-2, -1, 1, 2):
+            _reset_setting(hist, key, item)
+            after_button = spec.adjust(key, steps)
+            after_write = spec.write(key, after_button)
+            expect(f"{key}: сетка кнопок и прямой записи совпадает (шагов {steps})",
+                   after_write, after_button)
+    expect("прямая запись: тумблер понимает «выключено»",
+           spec.write("antispam_enabled", "0"), False)
+    expect("прямая запись: тумблер понимает «включено»",
+           spec.write("antispam_enabled", "on"), True)
+    try:
+        spec.write("antispam_msg_count", "не число")
+        problems.append("прямая запись: мусор проглочен молча")
+    except ValueError:
+        done += 1
+
+    # ─── мусор в базе не роняет бота ───
+    hist.set_setting("antispam_msg_count", "пять")
+    expect("мусор в числе = начальное значение",
+           spec.read("antispam_msg_count"), spec.SPEC["antispam_msg_count"]["default"])
+
+    # ─── кнопки ➖/➕ базы знаний крутят существующие настройки ───
+    # Соответствие «пара кнопок → настройка» живёт в panel_rag; опечатка в
+    # ключе проявилась бы только при живом нажатии, уже на сервере.
+    from handlers.admin.panel_rag import _KB_ADJUST_KEYS
+    for prefix, key in _KB_ADJUST_KEYS.items():
+        done += 1
+        if key not in spec.SPEC:
+            problems.append(f"кнопки {prefix}: настройки «{key}» нет в списке")
+    for prefix in _KB_ADJUST_KEYS:
+        for other in _KB_ADJUST_KEYS:
+            if prefix != other and other.startswith(prefix):
+                problems.append(f"приставки кнопок пересекаются: «{prefix}» и «{other}»")
+
+    # ─── у каждой настройки есть раздел, и раздел объявлен ───
+    known = {code for code, _ in spec.SECTIONS}
+    for key, item in spec.SPEC.items():
+        done += 1
+        if item["section"] not in known:
+            problems.append(f"{key}: раздел «{item['section']}» не объявлен в SECTIONS")
+        if item["kind"] != "toggle":
+            for field in ("min", "max", "step"):
+                if field not in item:
+                    problems.append(f"{key}: у числа нет «{field}»")
+
+    return problems, (f"{done} проверок: {len(spec.SPEC)} настроек, "
+                      f"{len(readers)} сверок с читалками бота, пределы, шаги, прямая запись")
+
+
+def _flip_last(text: str) -> str:
+    """Меняет последний знак строки на заведомо другой — чтобы порча подписи
+    была порчей при любом её содержимом, а не через раз."""
+    return text[:-1] + ("1" if text[-1] == "0" else "0")
+
+
+def _reset_setting(hist, key, item):
+    """Ставит настройку в её начальное значение — точка отсчёта для сверки сеток."""
+    default = item["default"]
+    if item["kind"] == "float":
+        hist.set_setting(key, f"{default:.{item.get('digits', 2)}f}")
+    else:
+        hist.set_setting(key, str(default))
+
+
+class _no_row:
+    """Временно убирает строку настройки из базы — чтобы проверить, что
+    список и читалка сходятся на НАЧАЛЬНОМ значении, а не на записанном."""
+
+    def __init__(self, hist, key):
+        self.hist, self.key = hist, key
+
+    def __enter__(self):
+        with self.hist._lock:
+            conn = self.hist._get_connection()
+            row = conn.execute("SELECT value FROM settings WHERE key=?",
+                               (self.key,)).fetchone()
+            self.saved = row["value"] if row else None
+            conn.execute("DELETE FROM settings WHERE key=?", (self.key,))
+            conn.commit()
+        return self
+
+    def __exit__(self, *exc):
+        if self.saved is not None:
+            self.hist.set_setting(self.key, self.saved)
+        return False
+
+
 def check_web_auth():
     """
     Вход в веб-админку: пускает ли она того, кого надо, и, ГЛАВНОЕ, отшивает
@@ -1429,7 +1624,12 @@ def check_web_auth():
         expect("своя кука читается", auth.read_session(cookie), OWNER)
         expect("кука с подменённым id",
                auth.read_session(cookie.replace(str(OWNER), str(STRANGER), 1)), None)
-        expect("кука с испорченной подписью", auth.read_session(cookie[:-1] + "0"), None)
+        # ⚠️ Портим последний знак ЗАВЕДОМО ДРУГИМ. Прежняя запись подставляла
+        # «0» вслепую, и раз в шестнадцать прогонов подпись оставалась целой —
+        # проверка мигала. Срок в куке меняется каждый прогон, поэтому такое
+        # ловится не сразу и выглядит как «само прошло».
+        expect("кука с испорченной подписью",
+               auth.read_session(_flip_last(cookie)), None)
         expect("мусор вместо куки", auth.read_session("что-то не то"), None)
         expect("пустая кука", auth.read_session(None), None)
 
@@ -1443,7 +1643,7 @@ def check_web_auth():
         token = auth.make_login_token(OWNER)
         expect("своя ссылка входа читается", auth.read_login_token(token), OWNER)
         expect("ссылка с испорченной подписью",
-               auth.read_login_token(token[:-1] + "0"), None)
+               auth.read_login_token(_flip_last(token)), None)
 
         body = f"{OWNER}.{int(time.time()) - 10}"
         old_link = body + "." + hmac.new(TOKEN.encode(), f"login:{body}".encode(),
@@ -1455,6 +1655,25 @@ def check_web_auth():
         expect("кука не годится вместо ссылки", auth.read_login_token(cookie), None)
         expect("ссылка не годится вместо куки", auth.read_session(token), None)
 
+        # ─── подпись с чужими буквами не роняет обработчик ───
+        # ⚠️ ЗАЧЕМ ЭТО ЗДЕСЬ. hmac.compare_digest на СТРОКАХ требует латиницы
+        # и бросает TypeError на всём остальном. Свои подписи всегда латиницей,
+        # а чужая приходит какая угодно — и присланная кириллицей роняла
+        # обработчик пятисотой ошибкой вместо честного отказа (поймано живой
+        # проверкой 30.08.2026). Теперь сравнение идёт по байтам.
+        expect("кириллица вместо подписи куки", auth.read_session("1.2.мусор"), None)
+        expect("кириллица вместо подписи ссылки", auth.read_login_token("1.2.мусор"), None)
+        cyr = dict(good)
+        cyr["hash"] = "подделка"
+        expect("кириллица вместо подписи мини-приложения",
+               auth.check_webapp(urlencode(cyr)), None)
+        expect("кириллица вместо подписи формы",
+               auth._same(auth.csrf_for(cookie), "подделка"), False)
+        expect("верная подпись формы принимается",
+               auth._same(auth.csrf_for(cookie), auth.csrf_for(cookie)), True)
+        expect("подпись формы от ДРУГОГО входа не годится",
+               auth._same(auth.csrf_for(cookie), auth.csrf_for(cookie + "x")), False)
+
         # ─── токена нет вовсе (бот без .env) ───
         auth.TELEGRAM_TOKEN = ""
         expect("без токена мини-приложение не пускает",
@@ -1464,7 +1683,8 @@ def check_web_auth():
     finally:
         auth.TELEGRAM_TOKEN, auth.ADMIN_IDS = saved_token, saved_admins
 
-    return problems, f"{done} проверок: две схемы подписи, срок, подмена id, кука, ссылка"
+    return problems, (f"{done} проверок: две схемы подписи, срок, подмена id, "
+                      f"кука, ссылка, подпись формы, чужие буквы")
 
 
 CHECKS = (
@@ -1481,6 +1701,7 @@ CHECKS = (
     ("база знаний — пик против полки", check_rag_pick),
     ("звания викторины — лестница без дыр", check_quiz_ranks),
     ("суточный отчёт — расход за период", check_daily_report),
+    ("единый список настроек против читалок бота", check_settings_spec),
     ("вход в веб-админку — подпись и срок", check_web_auth),
 )
 

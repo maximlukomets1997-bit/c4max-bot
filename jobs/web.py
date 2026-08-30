@@ -43,7 +43,9 @@ async def web_loop(application):
         logger.error("🌐 Веб-админка НЕ поднята: нет библиотеки (%s)", e)
         return
 
-    runner = aioweb.AppRunner(build_app(), access_log=None)
+    # application нужен сайту ровно для одного действия — объявления
+    # группам при выключении «Сам в разговор» (web/actions.py).
+    runner = aioweb.AppRunner(build_app(application), access_log=None)
     try:
         await runner.setup()
         await aioweb.TCPSite(runner, WEB_HOST, WEB_PORT).start()

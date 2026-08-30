@@ -147,3 +147,89 @@ footer {
 .center h1 { margin: 0; font-size: 22px; }
 .center p { margin: 0; color: var(--dim); max-width: 420px; }
 .center .big { font-size: 44px; line-height: 1; }
+
+/* ─── органы управления (этап 1) ───────────────────────────────────
+   Каждый — форма. Внешний вид тумблера и кнопок держится на классах,
+   которые ставит сервер; сценарий страницы их же и переключает. */
+
+.ctl { display: inline; margin: 0; }
+.ctlbox { display: flex; flex-direction: column; align-items: flex-end; gap: 7px; }
+
+.row { transition: background .35s; }
+.row.ok  { background: color-mix(in srgb, var(--ok) 12%, var(--card)); }
+.row.bad { background: color-mix(in srgb, #e05252 14%, var(--card)); }
+
+/* тумблер */
+.switch {
+  display: inline-flex; align-items: center; gap: 9px;
+  border: 1px solid var(--line); background: var(--card-2);
+  border-radius: 999px; padding: 4px 13px 4px 5px;
+  font: inherit; font-size: 13px; font-weight: 620;
+  color: var(--off); cursor: pointer; white-space: nowrap;
+  transition: color .15s, border-color .15s, background .15s;
+}
+.switch .knob {
+  width: 15px; height: 15px; border-radius: 50%;
+  background: var(--off); transition: background .15s, transform .15s;
+}
+.switch.on { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, var(--line)); }
+.switch.on .knob { background: var(--ok); transform: translateX(2px); }
+.switch:hover { border-color: var(--accent); }
+
+/* число: ➖ значение ➕ */
+.num { display: inline-flex; align-items: center; gap: 10px; }
+.num .val {
+  min-width: 92px; text-align: center;
+  font-size: 15px; font-weight: 650; color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+.rnd {
+  width: 30px; height: 30px; border-radius: 50%;
+  border: 1px solid var(--line); background: var(--card-2); color: var(--text);
+  font: inherit; font-size: 17px; line-height: 1; cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+  transition: border-color .15s, background .15s;
+}
+.rnd:hover { border-color: var(--accent); color: var(--accent); }
+.rnd:active { transform: scale(.94); }
+
+/* ползунок — надстройка: без сценария он просто не отправляет ничего */
+.slider {
+  -webkit-appearance: none; appearance: none;
+  width: 190px; max-width: 55vw; height: 4px; border-radius: 2px;
+  background: var(--line); outline: none; cursor: pointer;
+}
+.slider::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 16px; height: 16px; border-radius: 50%;
+  background: var(--accent); border: 2px solid var(--card); cursor: pointer;
+}
+.slider::-moz-range-thumb {
+  width: 14px; height: 14px; border-radius: 50%;
+  background: var(--accent); border: 2px solid var(--card); cursor: pointer;
+}
+
+/* ряды взаимоисключающих кнопок (модели, ступени раздумий) */
+.chips { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 6px; }
+.chipform { display: contents; }
+.chip {
+  display: inline-block; padding: 7px 13px; border-radius: 10px;
+  border: 1px solid var(--line); background: var(--card);
+  font: inherit; font-size: 13.5px; color: var(--text);
+  cursor: pointer; white-space: nowrap;
+  transition: border-color .15s, background .15s, color .15s;
+}
+.chip:hover { border-color: var(--accent); color: var(--accent); }
+.chip.on {
+  background: color-mix(in srgb, var(--accent) 16%, var(--card));
+  border-color: var(--accent); color: var(--accent);
+  font-weight: 650; cursor: default;
+}
+.chips .chips { margin-bottom: 0; }
+
+/* в узком окне подписи и органы становятся друг под другом */
+@media (max-width: 560px) {
+  .row { flex-wrap: wrap; }
+  .ctlbox { align-items: flex-start; width: 100%; }
+  .slider { max-width: 100%; width: 100%; }
+}

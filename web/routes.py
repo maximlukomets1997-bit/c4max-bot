@@ -1,5 +1,5 @@
 # ───────────────────────────────────────────────
-#  web/routes.py — адреса сайта и их обработчики (30.08.2026, этап 0).
+#  web/routes.py — адреса сайта и их обработчики (30.08.2026, этапы 0–1).
 #
 #  ⚠️ ROUTES — ЕДИНСТВЕННОЕ место, где перечислены адреса сайта. По этой
 #  таблице собирается приложение И по ней же проверяет preflight.py::check_web:
@@ -9,7 +9,7 @@
 #  ⚠️ КОЛОНКА «вход» НЕ ДЕКОРАТИВНАЯ. "owner" означает, что обработчик обёрнут
 #  в проверку входа автоматически, при сборке приложения, — руками её в
 #  обработчиках не пишем и забыть негде. "open" разрешено только двум адресам:
-#  самому входу и оформлению страницы.
+#  самому входу и ответу «сайт поднялся».
 # ───────────────────────────────────────────────
 
 import logging
@@ -18,7 +18,7 @@ import os
 from aiohttp import web as aioweb
 
 from config import WEB_COOKIE_NAME, WEB_PUBLIC_URL, WEB_SESSION_TTL_SEC
-from . import auth, pages
+from . import actions, auth, pages
 
 logger = logging.getLogger(__name__)
 
@@ -33,8 +33,76 @@ _SECURE_COOKIE = WEB_PUBLIC_URL.startswith("https://")
 # ─── обработчики ────────────────────────────────────────────────────
 
 async def index(request):
-    """Сводка. Собирается на каждый заход — кэша намеренно нет: цифры живые."""
-    return aioweb.Response(text=pages.page_summary(), content_type="text/html")
+    """Сводка и органы управления. Собирается на каждый заход — кэша
+    намеренно нет: и цифры, и положения тумблеров должны быть живыми."""
+    csrf = auth.csrf_for(request.cookies.get(WEB_COOKIE_NAME))
+    return aioweb.Response(text=pages.page_summary(csrf), content_type="text/html")
+
+
+async def apply(request):
+    """
+    Приём правки. Поля формы: csrf, what, key, value (у тумблера value нет).
+
+    Отвечает по-разному и намеренно: сценарию страницы — JSON с новым
+    значением (чтобы обновить один орган на месте), обычной форме без
+    сценария — переброс на главную (чтобы страница перерисовалась целиком).
+    """
+    form = await request.post()
+    if not auth.csrf_ok(request, str(form.get("csrf", ""))):
+        # Форма пришла не с нашей страницы (или вход сменили в другой вкладке).
+        # Молча ничего не меняем.
+        logger.warning("🌐 Правка отклонена: подпись формы не сошлась")
+        return _answer(request, {"ok": False, "error": "устаревшая страница"}, 403)
+
+    user_id = auth.current_user(request)
+    what = str(form.get("what", ""))
+    key = str(form.get("key", ""))
+    raw = form.get("value")
+
+    try:
+        if what == "setting":
+            shown = await actions.apply_setting(user_id, key, raw,
+                                                request.app.get("tg"))
+            return _answer(request, _setting_answer(key, shown))
+        if what == "model":
+            actions.apply_model(user_id, key)
+        elif what == "image":
+            actions.apply_image_model(user_id, key)
+        elif what == "think":
+            provider, _, code = key.partition(":")
+            actions.apply_thinking(user_id, provider, code)
+        else:
+            raise actions.ActionError(f"неизвестное действие «{what}»")
+    except actions.ActionError as e:
+        logger.warning("🌐 Правка не принята: %s", e)
+        return _answer(request, {"ok": False, "error": str(e)}, 400)
+
+    # Выбор из ряда кнопок меняет подсветку соседей — проще перерисовать всё.
+    return _answer(request, {"ok": True, "reload": True})
+
+
+def _setting_answer(key: str, shown: str) -> dict:
+    """
+    Ответ сценарию страницы: новое значение и заново посчитанные СОСЕДНИЕ
+    значения для ➖/➕. Без них после правки кнопки остались бы с прежними
+    числами в формах и на второе нажатие вернули бы настройку назад.
+    """
+    from services import settings_spec as sspec
+    item = sspec.SPEC[key]
+    answer = {"ok": True, "shown": shown}
+    if item["kind"] == "toggle":
+        answer["on"] = sspec.read(key)
+    else:
+        answer["raw"] = sspec.read(key)
+        answer["neighbours"] = [pages._neighbour(key, -1), pages._neighbour(key, +1)]
+    return answer
+
+
+def _answer(request, payload: dict, status: int = 200):
+    """JSON — сценарию страницы, переброс на главную — обычной форме."""
+    if "application/json" in request.headers.get("Accept", ""):
+        return aioweb.json_response(payload, status=status)
+    return aioweb.HTTPSeeOther("/")
 
 
 async def enter(request):
@@ -84,6 +152,7 @@ async def health(request):
 
 ROUTES = (
     ("GET",  "/",       index,  "owner"),
+    ("POST", "/set",    apply,  "owner"),
     ("GET",  "/enter",  enter,  "open"),
     ("POST", "/enter",  enter,  "open"),
     ("GET",  "/exit",   exit_,  "owner"),
@@ -106,12 +175,17 @@ def _guard(handler):
     return wrapped
 
 
-def build_app():
+def build_app(application=None):
     """
     Собирает aiohttp-приложение по ROUTES. Отдельной функцией — чтобы то же
     самое мог собрать preflight, не поднимая сервер.
+
+    application — приложение Telegram. Нужно ровно одному действию: объявлению
+    группам при выключении «Сам в разговор». Без него (в проверках) сайт
+    работает, объявление молча пропускается с записью в лог.
     """
     app = aioweb.Application()
+    app["tg"] = application
     for method, path, handler, access in ROUTES:
         app.router.add_route(method, path,
                              _guard(handler) if access == "owner" else handler)

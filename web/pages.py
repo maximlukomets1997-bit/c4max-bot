@@ -1,14 +1,16 @@
 # ───────────────────────────────────────────────
-#  web/pages.py — сборка страниц веб-админки (30.08.2026, этап 0).
-#
-#  Здесь ТОЛЬКО показ: страницы ничего не меняют. Правку настроек добавит
-#  этап 1, и она пойдёт через те же функции, что и кнопки панелей, — писать
-#  в базу отсюда напрямую нельзя (см. config.py, блок «ВЕБ-АДМИНКА»).
+#  web/pages.py — сборка страниц веб-админки (30.08.2026, этапы 0–1).
 #
 #  ⚠️ Ни одного адреса со стороны: ни шрифтов, ни картинок, ни библиотек.
 #  Дело не в скорости — каждый чужой адрес на странице сообщал бы чужому
 #  серверу, когда владелец открывает свою админку. График рисуется прямым
 #  SVG, а не библиотекой, по той же причине.
+#
+#  ⚠️ КАЖДЫЙ ОРГАН УПРАВЛЕНИЯ — ЭТО ФОРМА, а не кнопка со сценарием. Страница
+#  обязана полностью работать без JavaScript: сломается сценарий, отключится
+#  он в браузере — админка остаётся рабочей, просто перезагружается целиком.
+#  Сценарий внизу файла — только ускорение: он перехватывает отправку и
+#  обновляет один орган на месте. Убери его, и ничего не сломается.
 #
 #  ⚠️ Любое значение, пришедшее не из наших констант, проходит через esc().
 #  Названия моделей и версия — наши, но правило держим общим: место, где
@@ -18,9 +20,10 @@
 import html
 import logging
 
-from config import (AVAILABLE_IMAGE_MODELS, AVAILABLE_MODELS, BOT_VERSION,
-                    BOT_VERSION_URL, GEMINI_MODEL, PROVIDERS, THINKING_LEVELS,
-                    THINKING_PHASES, AUTO_UPDATE_ENABLED_DEFAULT)
+from config import (AUTO_UPDATE_ENABLED_DEFAULT, AVAILABLE_IMAGE_MODELS,
+                    AVAILABLE_MODELS, BOT_VERSION, BOT_VERSION_URL,
+                    GEMINI_MODEL, PROVIDERS, THINKING_LEVELS, THINKING_PHASES)
+from services import settings_spec as spec
 
 logger = logging.getLogger(__name__)
 
@@ -29,15 +32,12 @@ def esc(value) -> str:
     return html.escape(str(value), quote=True)
 
 
-def _shell(title: str, body: str, refresh: int = 0) -> str:
-    """Общая обёртка страницы. refresh > 0 — сама перечитывается раз в N секунд."""
-    meta = f'<meta http-equiv="refresh" content="{refresh}">' if refresh else ""
+def _shell(title: str, body: str) -> str:
     return (
         "<!doctype html><html lang=\"ru\"><head>"
         "<meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
         "<meta name=\"robots\" content=\"noindex, nofollow\">"
-        f"{meta}"
         f"<title>{esc(title)}</title>"
         "<link rel=\"stylesheet\" href=\"/static/style.css\">"
         "</head><body>" + body + "</body></html>"
@@ -53,8 +53,7 @@ def _shell(title: str, body: str, refresh: int = 0) -> str:
 _WEBAPP_JS = """
 <script>
 (function () {
-  var h = location.hash || "";
-  var m = h.match(/tgWebAppData=([^&]*)/);
+  var m = (location.hash || "").match(/tgWebAppData=([^&]*)/);
   if (!m) return;
   var f = document.createElement("form");
   f.method = "POST"; f.action = "/enter";
@@ -91,55 +90,161 @@ def page_denied() -> str:
     return _shell("Нет доступа", body)
 
 
-# ─── сводка ─────────────────────────────────────────────────────────
+# ─── органы управления ──────────────────────────────────────────────
+#
+#  Все они — формы к POST /set. Поля:
+#    csrf  — подпись сессии (без неё правка не принимается);
+#    what  — «setting» | «model» | «image» | «think»;
+#    key   — ключ настройки, модели или провайдера;
+#    value — значение; у тумблера его нет вовсе (это «переключи»).
 
-def _state(on: bool, yes: str = "включено", no: str = "выключено") -> str:
-    cls = "on" if on else "off"
-    return f'<span class="state {cls}">{esc(yes if on else no)}</span>'
+def _form(csrf: str, what: str, key: str, value=None, cls: str = "",
+          inner: str = "") -> str:
+    hidden = (f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+              f'<input type="hidden" name="what" value="{esc(what)}">'
+              f'<input type="hidden" name="key" value="{esc(key)}">')
+    if value is not None:
+        hidden += f'<input type="hidden" name="value" value="{esc(value)}">'
+    return (f'<form method="post" action="/set" class="ctl {cls}" '
+            f'data-key="{esc(key)}">{hidden}{inner}</form>')
 
 
-def _num(value) -> str:
-    return f'<span class="state num">{esc(value)}</span>'
+def _switch(csrf: str, key: str) -> str:
+    """Тумблер. Без сценария — обычная кнопка формы, с ним — переключается на месте."""
+    on = spec.read(key)
+    state = "on" if on else "off"
+    word = "включено" if on else "выключено"
+    inner = (f'<button type="submit" class="switch {state}" '
+             f'aria-pressed="{"true" if on else "false"}">'
+             f'<span class="knob"></span><span class="lbl">{word}</span></button>')
+    return _form(csrf, "setting", key, None, "sw", inner)
 
 
-def _rows_html(items) -> str:
-    """items — список (название, значение-html, подпись-или-пусто)."""
-    if not items:
-        return '<div class="rows"><div class="empty">пусто</div></div>'
+def _stepper(csrf: str, key: str) -> str:
+    """
+    Регулятор числа: ➖ значение ➕ плюс ползунок.
+
+    ⚠️ Ползунок — НАДСТРОЙКА: без сценария он ничего не отправляет, и остаются
+    рабочими ➖/➕. Поэтому шкала и пределы у них общие (settings_spec), а не
+    заданы здесь.
+    """
+    item = spec.SPEC[key]
+    value = spec.read(key)
+    shown = spec.display(key)
+    minus = _form(csrf, "setting", key, _neighbour(key, -1), "step",
+                  '<button type="submit" class="rnd" aria-label="меньше">−</button>')
+    plus = _form(csrf, "setting", key, _neighbour(key, +1), "step",
+                 '<button type="submit" class="rnd" aria-label="больше">+</button>')
+    slider = (f'<input type="range" class="slider" data-key="{esc(key)}" '
+              f'min="{item["min"]}" max="{item["max"]}" step="{item["step"]}" '
+              f'value="{value}">')
+    return (f'<div class="num" data-key="{esc(key)}">'
+            f'{minus}<span class="val">{esc(shown)}</span>{plus}</div>'
+            f'{slider}')
+
+
+def _neighbour(key: str, steps: int):
+    """
+    Соседнее по шкале значение — его подставляем в форму ➖/➕.
+
+    ⚠️ Считаем ЗДЕСЬ, а не «шагни от текущего» на сервере, намеренно: форма
+    несёт конкретное значение, поэтому двойное нажатие по залипшей кнопке или
+    повторная отправка страницы не уводят настройку дальше, чем видел человек.
+    """
+    item = spec.SPEC[key]
+    value = spec.read(key) + item["step"] * steps
+    value = max(item["min"], min(item["max"], value))
+    if item["kind"] == "float":
+        return f"{round(value, item.get('digits', 2)):.{item.get('digits', 2)}f}"
+    return int(value)
+
+
+def _chips(csrf: str, what: str, options: list, current) -> str:
+    """Ряд взаимоисключающих кнопок: активная подсвечена и не нажимается."""
     out = []
-    for name, value, note in items:
-        sub = f'<div class="note">{esc(note)}</div>' if note else ""
-        out.append(f'<div class="row"><div class="name">{esc(name)}{sub}</div>{value}</div>')
+    for key, label in options:
+        if key == current:
+            out.append(f'<span class="chip on">{esc(label)}</span>')
+        else:
+            out.append(_form(csrf, what, key, "1", "chipform",
+                             f'<button type="submit" class="chip">{esc(label)}</button>'))
+    return '<div class="chips">' + "".join(out) + "</div>"
+
+
+def _rows(items) -> str:
+    """items — список (название, подпись, html органа управления)."""
+    out = []
+    for name, hint, control in items:
+        sub = f'<div class="note">{esc(hint)}</div>' if hint else ""
+        out.append(f'<div class="row"><div class="name">{esc(name)}{sub}</div>'
+                   f'<div class="ctlbox">{control}</div></div>')
     return '<div class="rows">' + "".join(out) + "</div>"
 
 
-def _thinking_rows() -> list:
+# ─── блоки страницы ─────────────────────────────────────────────────
+
+def _models_block(csrf: str) -> str:
+    import database.history as hist
+    active = hist.get_setting("active_model", GEMINI_MODEL)
+    active_img = hist.get_setting("active_image_model", "")
+
+    text_options = [
+        (key, f'{PROVIDERS.get(info.get("provider", ""), {}).get("icon", "")} {info["name"]}'.strip())
+        for key, info in AVAILABLE_MODELS.items()
+    ]
+    img_options = [(key, info["name"]) for key, info in AVAILABLE_IMAGE_MODELS.items()]
+
+    return ("<h2>Модель</h2>"
+            + _chips(csrf, "model", text_options, active)
+            + "<h2>Модель картинок</h2>"
+            + _chips(csrf, "image", img_options, active_img))
+
+
+def _thinking_block(csrf: str) -> str:
     """
-    Глубина раздумий по провайдерам — ровно то же, что показывают кнопки
-    панели «📡 Настройки API»: значок провайдера, фаза луны, название ступени.
-    Значение спрашиваем у services.gemini.thinking_level, а не читаем настройку
-    сами: там же живёт откат на начальное положение при мусоре в базе.
+    Глубина раздумий. На кнопке в Telegram видно одно положение и она листает
+    по кругу; здесь помещается вся шкала, поэтому ступень выбирается сразу.
+    Значение спрашиваем у services.gemini.thinking_level — там же живёт откат
+    на начальное положение при мусоре в базе.
     """
     from services.gemini import thinking_level
 
-    rows = []
+    items = []
     for provider, levels in THINKING_LEVELS.items():
         meta = PROVIDERS.get(provider, {})
         codes = [code for code, _ in levels]
         cur = thinking_level(provider)
-        pos = codes.index(cur) if cur in codes else 0
+        if cur not in codes:
+            cur = codes[0]
         phases = THINKING_PHASES.get(len(codes))
-        phase = phases[pos] if phases else ("🌑" if pos == 0 else "🌕")
+        options = []
+        for pos, (code, label) in enumerate(levels):
+            phase = phases[pos] if phases else ("🌑" if pos == 0 else "🌕")
+            options.append((f"{provider}:{code}", f"{phase} {label}"))
         title = f'{meta.get("icon", "")} {meta.get("title", provider)}'.strip()
-        rows.append((title, _num(f'{phase} {dict(levels)[codes[pos]]}'), ""))
-    return rows
+        items.append((title, "", _chips(csrf, "think", options, f"{provider}:{cur}")))
+    return "<h2>Глубина раздумий</h2>" + _rows(items)
+
+
+def _spec_blocks(csrf: str) -> str:
+    """Разделы простых настроек — порядок и состав берутся из settings_spec."""
+    out = []
+    for code, title in spec.SECTIONS:
+        items = []
+        for key in spec.keys_of(code):
+            item = spec.SPEC[key]
+            control = (_switch(csrf, key) if item["kind"] == "toggle"
+                       else _stepper(csrf, key))
+            items.append((item["title"], item.get("hint", ""), control))
+        if items:
+            out.append(f"<h2>{esc(title)}</h2>" + _rows(items))
+    return "".join(out)
 
 
 def _chart(pairs: list, limit: int = 8) -> str:
     """
     Столбики «вызовов по моделям». Рисуем прямым SVG: библиотеке графиков
     здесь нечего делать, а тянуть её со стороны нельзя (см. шапку файла).
-    Ширина в процентах — картинка тянется под ширину окна сама.
     """
     data = [(name, cnt) for name, cnt in pairs if cnt][:limit]
     if not data:
@@ -168,42 +273,30 @@ def _chart(pairs: list, limit: int = 8) -> str:
     return '<div class="card wide">' + "".join(parts) + "</div>"
 
 
-def page_summary() -> str:
-    """
-    Главная страница этапа 0: «бот жив и вот его сегодняшнее состояние».
-    Ничего не меняет — только показывает.
-    """
+def _tiles() -> str:
     import database.history as hist
     from services import daily_report
 
     stats = hist.get_bot_stats()
-    active = stats.get("active_model") or GEMINI_MODEL
+    # ⚠️ На чистой базе get_bot_stats отдаёт строку "unknown", а не пустоту —
+    # проверка «или» её не ловит, и в плитке было бы написано «unknown».
+    active = stats.get("active_model")
+    if active not in AVAILABLE_MODELS:
+        active = GEMINI_MODEL
     active_title = AVAILABLE_MODELS.get(active, {}).get("name", active)
-    active_provider = PROVIDERS.get(
-        AVAILABLE_MODELS.get(active, {}).get("provider", ""), {})
+    icon = PROVIDERS.get(AVAILABLE_MODELS.get(active, {}).get("provider", ""), {}).get("icon", "")
 
     img = hist.get_setting("active_image_model", "")
     img_title = AVAILABLE_IMAGE_MODELS.get(img, {}).get("name", img or "—")
 
     # Расход с последнего снимка (обычно с полуночи). Считается на лету и
-    # снимок не трогает — та же функция, что у кнопки в панели статистики.
+    # снимок НЕ трогает — та же функция, что у кнопки в панели статистики.
     calls_today, money_today, _ = daily_report._open_day_totals()
 
-    version = (f'<a href="{esc(BOT_VERSION_URL)}" target="_blank" '
-               f'rel="noopener noreferrer">v{esc(BOT_VERSION)}</a>')
-
-    head = (
-        "<header>"
-        "<h1>Админка C4_Max</h1>"
-        f"<div class=\"ver\">{version}</div>"
-        "<div class=\"pill\"><span class=\"dot\"></span>работает</div>"
-        "</header>"
-    )
-
-    tiles = (
+    return (
         "<div class=\"grid\">"
         f"<div class=\"card\"><div class=\"k\">Активная модель</div>"
-        f"<div class=\"v\">{esc(active_provider.get('icon', ''))} {esc(active_title)}</div>"
+        f"<div class=\"v\">{esc(icon)} {esc(active_title)}</div>"
         f"<div class=\"sub\">картинки: {esc(img_title)}</div></div>"
 
         f"<div class=\"card\"><div class=\"k\">Сегодня</div>"
@@ -218,33 +311,106 @@ def page_summary() -> str:
         f"<div class=\"v\">{esc(stats.get('subscriptions', 0))}</div>"
         f"<div class=\"sub\">сообщений групп в архиве: {esc(stats.get('group_msg_count', 0))}</div></div>"
         "</div>"
-    )
+    ), stats
 
-    thinking = "<h2>Глубина раздумий</h2>" + _rows_html(_thinking_rows())
 
-    switches = "<h2>Тумблеры</h2>" + _rows_html([
-        ("Ответы ИИ", _state(hist.get_setting("ai_replies_enabled", "1") == "1"),
-         "отвечает ли бот на сообщения вообще"),
-        ("Показывать мысли модели", _state(hist.get_setting("toggle_thoughts", "0") == "1"),
-         "цитата рассуждений под ответом"),
-        ("Антиспам", _state(hist.get_setting("antispam_enabled", "1") == "1"),
-         "мут за флуд в группах"),
-        ("Фильтр ссылок", _state(hist.get_setting("linkfilter_enabled", "0") == "1"), ""),
-        ("Приветствие новичков", _state(hist.get_setting("greet_enabled", "0") == "1"), ""),
-        ("База знаний (RAG)", _state(hist.get_setting("rag_enabled", "0") == "1"),
-         "подмешивать статьи в ответ"),
-        ("Сам в разговор", _state(hist.get_setting("proactive_enabled", "0") == "1"), ""),
-        ("Самообновление", _state(
-            hist.get_setting("auto_update_enabled", AUTO_UPDATE_ENABLED_DEFAULT) == "1"),
-         "забирать новый код с GitHub раз в 5 минут"),
-    ])
+# Ускорение: перехватываем отправку формы, шлём её тем же адресом и обновляем
+# только этот орган. Страница целиком не перезагружается — на телефоне это
+# разница между «работает» и «мучение».
+# ⚠️ Ничего сверх этого сценарий не делает. Отключи его — останутся обычные
+# формы, и админка будет работать так же, только с перезагрузкой.
+_CONTROLS_JS = """
+<script>
+(function () {
+  function post(form, extraValue) {
+    var body = new FormData(form);
+    if (extraValue !== undefined) body.set("value", extraValue);
+    return fetch("/set", {method: "POST", body: body, headers: {"Accept": "application/json"}})
+      .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); });
+  }
+  function flash(node, bad) {
+    node.classList.add(bad ? "bad" : "ok");
+    setTimeout(function () { node.classList.remove("ok", "bad"); }, 700);
+  }
+  document.addEventListener("submit", function (e) {
+    var form = e.target.closest("form.ctl");
+    if (!form) return;
+    e.preventDefault();
+    var box = form.closest(".row") || form;
+    post(form).then(function (data) {
+      render(form.dataset.key, data);
+      flash(box, false);
+    }).catch(function () { flash(box, true); location.reload(); });
+  });
+  document.addEventListener("change", function (e) {
+    var slider = e.target.closest("input.slider");
+    if (!slider) return;
+    var row = slider.closest(".row");
+    var form = row.querySelector("form.ctl");
+    post(form, slider.value).then(function (data) {
+      render(slider.dataset.key, data);
+      flash(row, false);
+    }).catch(function () { location.reload(); });
+  });
+  // Пока ползунок тянут — показываем число, но на сервер ничего не шлём.
+  document.addEventListener("input", function (e) {
+    var slider = e.target.closest("input.slider");
+    if (!slider) return;
+    var val = slider.closest(".row").querySelector(".val");
+    if (val) val.textContent = slider.value;
+  });
+  function render(key, data) {
+    if (!data || !data.ok) { location.reload(); return; }
+    if (data.reload) { location.reload(); return; }
+    var row = document.querySelector('[data-key="' + key + '"]');
+    row = row && row.closest(".row");
+    if (!row) { location.reload(); return; }
+    var val = row.querySelector(".val");
+    if (val) val.textContent = data.shown;
+    var sw = row.querySelector(".switch");
+    if (sw) {
+      sw.classList.toggle("on", data.on);
+      sw.classList.toggle("off", !data.on);
+      sw.setAttribute("aria-pressed", data.on ? "true" : "false");
+      sw.querySelector(".lbl").textContent = data.shown;
+    }
+    // У ➖/➕ в формах записаны СОСЕДНИЕ значения — после правки они устарели.
+    if (data.neighbours) {
+      var forms = row.querySelectorAll("form.step");
+      if (forms.length === 2) {
+        forms[0].querySelector('[name="value"]').value = data.neighbours[0];
+        forms[1].querySelector('[name="value"]').value = data.neighbours[1];
+      }
+      var slider = row.querySelector("input.slider");
+      if (slider && data.raw !== undefined) slider.value = data.raw;
+    }
+  }
+})();
+</script>
+"""
 
-    chart = "<h2>Вызовы по моделям</h2>" + _chart(stats.get("api_calls_by_model", []))
 
-    foot = ('<footer><span>Страница только показывает — менять настройки '
-            'пока можно кнопками в боте.</span>'
+def page_summary(csrf: str = "") -> str:
+    """Главная страница: сводка сверху, управление ниже."""
+    tiles, stats = _tiles()
+
+    version = (f'<a href="{esc(BOT_VERSION_URL)}" target="_blank" '
+               f'rel="noopener noreferrer">v{esc(BOT_VERSION)}</a>')
+    head = ("<header>"
+            "<h1>Админка C4_Max</h1>"
+            f"<div class=\"ver\">{version}</div>"
+            "<div class=\"pill\"><span class=\"dot\"></span>работает</div>"
+            "</header>")
+
+    foot = ('<footer><span>Правки применяются сразу — бот видит их без '
+            'перезапуска.</span><span><a href="/">обновить</a></span>'
             '<span><a href="/exit">выйти</a></span></footer>')
 
-    body = "<div class=\"wrap\">" + head + tiles + thinking + switches + chart + foot + "</div>"
-    # 60 секунд: цифры живые, но чаще дёргать базу ради взгляда на экран незачем.
-    return _shell("Админка C4_Max", body, refresh=60)
+    body = ("<div class=\"wrap\">" + head + tiles
+            + _models_block(csrf)
+            + _thinking_block(csrf)
+            + _spec_blocks(csrf)
+            + "<h2>Вызовы по моделям</h2>"
+            + _chart(stats.get("api_calls_by_model", []))
+            + foot + "</div>" + _CONTROLS_JS)
+    return _shell("Админка C4_Max", body)
