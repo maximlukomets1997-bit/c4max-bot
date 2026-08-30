@@ -803,6 +803,21 @@ def apply_image_model(user_id: int, key: str) -> str:
     return name
 
 
+def apply_theme(user_id: int, code: str) -> str:
+    """
+    Выбор темы оформления сайта. Настройка общая (владелец один), поэтому
+    лежит в settings, а не в куке: открыл админку с другого устройства —
+    вид тот же.
+    """
+    from .pages import THEMES, THEME_SETTING_KEY
+    known = {c: label for c, label, _ in THEMES}
+    if code not in known:
+        raise ActionError(f"неизвестная тема «{code}»")
+    set_setting(THEME_SETTING_KEY, code)
+    logger.info("🌐 Сайт: тема оформления → %s (админ %s)", code, user_id)
+    return known[code]
+
+
 # ─── глубина раздумий ───────────────────────────────────────────────
 
 def apply_thinking(user_id: int, provider: str, code: str) -> str:

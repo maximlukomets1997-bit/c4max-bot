@@ -1783,6 +1783,81 @@ def check_web_pages():
     expect(f"в список скачивания попало лишнее: {_DOWNLOADS}",
            set(_DOWNLOADS) == {"log", "archive", "chatlog", "backup"})
 
+    # ── оформление: цвета только через переменные, и палитры не разъехались ──
+    # ⚠️ У CSS нет компилятора: переменная, ссылающаяся сама на себя, опечатка
+    # в её имени и цвет, забытый в одной из тем, не роняют ничего — цвет просто
+    # оказывается не тот. На всё это я наступил при заведении тем 30.08.2026.
+    css = pathlib.Path(ROOT, "web", "static", "style.css").read_text(encoding="utf-8")
+
+    # Палитры: тёмная (:root) и светлая (:root[data-theme="light"]).
+    palettes = {}
+    for sel, body in re.findall(r"(:root[^{]*)\{([^}]*)\}", css):
+        palettes[sel.strip()] = dict(
+            re.findall(r"(--[a-z0-9-]+)\s*:\s*([^;]+);", body))
+    expect(f"палитр в оформлении не две, а {len(palettes)}: {sorted(palettes)}",
+           len(palettes) == 2)
+
+    for sel, defined in palettes.items():
+        for name, value in defined.items():
+            expect(f"{sel}: цвет {name} ссылается сам на себя — "
+                   f"на странице его не будет", f"var({name})" not in value)
+
+    # ⚠️ ГЛАВНАЯ СВЕРКА: обе темы описывают ОДИН И ТОТ ЖЕ набор цветов.
+    # Забудешь цвет в светлой — в ней подставится тёмный, и на белом фоне
+    # окажется чёрное пятно. Ничего при этом не падает.
+    if len(palettes) == 2:
+        (sel_a, a), (sel_b, b) = palettes.items()
+        done += 1
+        for name in sorted(set(a) - set(b)):
+            problems.append(f"цвет {name} есть в «{sel_a}», но не в «{sel_b}» — "
+                            f"во второй теме подставится чужой")
+        for name in sorted(set(b) - set(a)):
+            problems.append(f"цвет {name} есть в «{sel_b}», но не в «{sel_a}» — "
+                            f"во второй теме подставится чужой")
+
+    all_defined = set().union(*palettes.values()) if palettes else set()
+    used = set(re.findall(r"var\((--[a-z0-9-]+)\)", css))
+    done += 1
+    for name in sorted(used - all_defined):
+        problems.append(f"оформление зовёт {name}, а такой переменной нет")
+
+    # ⚠️ Цвет, зашитый мимо палитр, не переключится вместе с темой.
+    # Первая версия этой строки требовала после цвета символ забоя (\x08):
+    # так «\b» превратился в управляющий символ по дороге через оболочку.
+    # Проверка при этом бодро зеленела и не находила НИЧЕГО.
+    outside = re.sub(r":root[^{]*\{[^}]*\}", "", css)
+    stray = set(re.findall(r"#[0-9a-fA-F]{3,8}", outside))
+    expect(f"в оформлении зашиты цвета мимо палитр: {sorted(stray)}", not stray)
+
+    # ── тема доезжает до страницы ──
+    import database.history as _h
+    saved_theme = _h.get_setting(pages.THEME_SETTING_KEY, "")
+    try:
+        _h.set_setting(pages.THEME_SETTING_KEY, "light")
+        light_page = pages.page_summary("подпись")
+        expect("светлая тема не помечена на странице",
+               'data-theme="light"' in light_page)
+        # ⚠️ ПОМЕТКА СТРАНИЦЫ И СЕЛЕКТОР ПАЛИТРЫ — ОДНА И ТА ЖЕ СТРОКА.
+        # Переименуй её в оформлении, и светлая тема молча останется тёмной:
+        # палитр по-прежнему две, набор цветов совпадает, ничего не падает.
+        # Ровно этот подлом прошёл мимо первой версии проверки.
+        mark = re.search(r'data-theme="([a-z]+)"', light_page)
+        done += 1
+        if not mark:
+            problems.append("на странице нет пометки темы вовсе")
+        elif not any(f'[data-theme="{mark.group(1)}"]' in sel for sel in palettes):
+            problems.append(
+                f'страница помечена data-theme="{mark.group(1)}", а палитры '
+                f'с таким селектором в оформлении нет: {sorted(palettes)}')
+        _h.set_setting(pages.THEME_SETTING_KEY, "dark")
+        expect("тёмная тема помечена как светлая",
+               'data-theme="light"' not in pages.page_summary("подпись"))
+        _h.set_setting(pages.THEME_SETTING_KEY, "мусор")
+        expect("мусор в настройке темы не откатился на тёмную",
+               pages.current_theme() == "dark")
+    finally:
+        _h.set_setting(pages.THEME_SETTING_KEY, saved_theme)
+
     # ── чужой текст экранируется ──
     # ⚠️ Имя, заголовок статьи и текст вопроса приходят от людей. Символ «<»
     # в них не должен доезжать до страницы как разметка.

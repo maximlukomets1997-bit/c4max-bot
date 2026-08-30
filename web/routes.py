@@ -68,6 +68,8 @@ async def apply(request):
             actions.apply_model(user_id, key)
         elif what == "image":
             actions.apply_image_model(user_id, key)
+        elif what == "theme":
+            actions.apply_theme(user_id, key)
         elif what == "think":
             provider, _, code = key.partition(":")
             actions.apply_thinking(user_id, provider, code)

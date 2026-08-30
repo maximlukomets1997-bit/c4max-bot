@@ -46,12 +46,49 @@ def plain(text: str) -> str:
     return html.unescape(_re.sub(r"</?[a-zA-Z][^>]*>", "", text or ""))
 
 
+# Две темы на выбор. Ключ настройки и цвет полосы браузера для каждой.
+# ⚠️ Значения ("dark"/"light") попадают в разметку страницы и в базу — менять
+# их нельзя, не поменяв и то, и другое.
+THEME_SETTING_KEY = "web_theme"
+THEMES = (
+    ("dark",  "🌑 Тёмная",  "#000000"),
+    ("light", "☀️ Светлая", "#f4f6f9"),
+)
+THEME_DEFAULT = "dark"
+
+
+def current_theme() -> str:
+    """
+    Выбранная тема. Мусор в настройке или недоступная база = тёмная:
+    страница обязана собраться в любом случае, оформление — не тот повод,
+    чтобы админка не открылась.
+    """
+    try:
+        import database.history as hist
+        value = hist.get_setting(THEME_SETTING_KEY, THEME_DEFAULT)
+    except Exception:
+        return THEME_DEFAULT
+    return value if value in {code for code, _, _ in THEMES} else THEME_DEFAULT
+
+
 def _shell(title: str, body: str) -> str:
+    theme = current_theme()
+    bar = next(color for code, _, color in THEMES if code == theme)
+    # Пометку вешаем ТОЛЬКО у светлой: тёмная — это и есть :root по умолчанию.
+    mark = ' data-theme="light"' if theme == "light" else ""
     return (
-        "<!doctype html><html lang=\"ru\"><head>"
+        f"<!doctype html><html lang=\"ru\"{mark}><head>"
         "<meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
         "<meta name=\"robots\" content=\"noindex, nofollow\">"
+        # ⚠️ Обе строки — про тему, и обе нужны.
+        # color-scheme говорит браузеру, какими рисовать поля ввода, ползунки
+        # и полосу прокрутки ДО того, как загрузится оформление: без неё
+        # тёмная страница на светлом компьютере успевает мигнуть белым.
+        # theme-color красит полосы браузера на телефоне — иначе чёрная
+        # страница окажется в белой рамке.
+        f"<meta name=\"color-scheme\" content=\"{theme}\">"
+        f"<meta name=\"theme-color\" content=\"{bar}\">"
         f"<title>{esc(title)}</title>"
         "<link rel=\"stylesheet\" href=\"/static/style.css\">"
         "</head><body>" + body + "</body></html>"
@@ -212,6 +249,14 @@ def _models_block(csrf: str) -> str:
             + _chips(csrf, "model", text_options, active)
             + "<h2>Модель картинок</h2>"
             + _chips(csrf, "image", img_options, active_img))
+
+
+def _theme_block(csrf: str) -> str:
+    """Переключатель темы. Тем же рядом кнопок, что и выбор модели."""
+    return ("<h2>Вид</h2>"
+            + _chips(csrf, "theme",
+                     [(code, label) for code, label, _ in THEMES],
+                     current_theme()))
 
 
 def _thinking_block(csrf: str) -> str:
@@ -1386,6 +1431,7 @@ def page_summary(csrf: str = "") -> str:
 
     body = ("<div class=\"wrap\">" + head + tiles + nav
             + _models_block(csrf)
+            + _theme_block(csrf)
             + _thinking_block(csrf)
             + _spec_blocks(csrf)
             + "<h2>Вызовы по моделям</h2>"
