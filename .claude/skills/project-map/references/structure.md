@@ -1,6 +1,6 @@
 # Структура: файл → что в нём объявлено
 
-Снимок от 2026-08-28 по коду версии v4.74: таблица пересобрана скриптом и
+Снимок от 2026-08-30 по коду версии v4.85: таблица пересобрана скриптом и
 сверена с кодом. Пересобрать:
 
 ```
@@ -14,7 +14,7 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 наружу. Имена с подчёркиванием тоже иногда зовут снаружи — проверяй
 скриптом `impact.py`, а не этим списком.
 
-Всего файлов с кодом: **58**. Отдельных тестовых файлов (`test_*.py`,
+Всего файлов с кодом: **63**. Отдельных тестовых файлов (`test_*.py`,
 `pytest`) по-прежнему **0** — но с 28.08.2026 у проекта есть `selftest.py`:
 проверки поведения в том же стиле, что `preflight.py`, без сторонних
 библиотек. Он не заменяет ручной прогон (проверяет функции по отдельности,
@@ -25,13 +25,13 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 | файл | строк | тянут | публичные имена |
 |---|---:|---:|---|
 | `bot.py` | 11 | 0 | — (только вызывает `main.main`) |
-| `main.py` | 580 | 1 | `post_init`, `post_stop`, `post_shutdown`, `main` |
-| `config.py` | 1304 | 35 | `read_build_mark` + 114 констант верхнего уровня (заводские тексты всех пяти промптов — пустые строки) |
+| `main.py` | 585 | 1 | `post_init`, `post_stop`, `post_shutdown`, `main` |
+| `config.py` | 1347 | 39 | `read_build_mark` + 122 константы верхнего уровня (заводские тексты всех пяти промптов — пустые строки) |
 | `utils.py` | 181 | 19 | `should_respond_in_group`, `clean_mention`, `keep_chat_action`, `delete_user_message_safe`, `mention`, `schedule_delete`, `register_and_clean_bot_message` |
 | `utils_format.py` | 313 | 8 | `strip_thoughts`, `thoughts_enabled`, `build_text_and_entities`, `send_formatted`, `convert_md`, `fits_caption`, `reply_md` |
 | `logging_setup.py` | 248 | 3 | `archive_old_logs`, `setup_logging` |
-| `preflight.py` | 592 | 0 | `check_imports`, `check_models`, `check_providers`, `check_tables`, `check_ranks`, `check_callbacks`, `check_panels`, `check_handlers`, `main` |
-| `selftest.py` | 1402 | 0 | проверки ПОВЕДЕНИЯ (28.08.2026), 13 групп: `check_money`, `check_price_list`, `check_mute_tag`, `check_permissions`, `check_thoughts`, `check_long_answers`, `check_wait_budgets`, `check_album_not_flood`, `check_album_collect`, `check_time_keys`, `check_rag_pick`, `check_quiz_ranks`, `check_daily_report`, `main`. Отвечает на «правильно ли считает», тогда как `preflight.py` — на «запустится ли». Зовётся из `deploy.sh` и CI, красный откатывает выкатку |
+| `preflight.py` | 675 | 0 | `check_imports`, `check_models`, `check_providers`, `check_tables`, `check_ranks`, `check_callbacks`, `check_panels`, `check_handlers`, `check_web`, `main` |
+| `selftest.py` | 1538 | 0 | проверки ПОВЕДЕНИЯ (28.08.2026), 14 групп: `check_money`, `check_price_list`, `check_mute_tag`, `check_permissions`, `check_thoughts`, `check_long_answers`, `check_wait_budgets`, `check_album_not_flood`, `check_album_collect`, `check_time_keys`, `check_rag_pick`, `check_quiz_ranks`, `check_daily_report`, `check_web_auth`, `main`. Отвечает на «правильно ли считает», тогда как `preflight.py` — на «запустится ли». Зовётся из `deploy.sh` и CI, красный откатывает выкатку |
 | `reset_db.py` | 81 | 0 | `main` |
 | `watchdog_local.py` | 297 | 0 | `main` |
 
@@ -61,8 +61,8 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 |---|---:|---:|---|
 | `handlers/admin/__init__.py` | 40 | 4 | только re-export; новое имя, не вписанное сюда, роняет старт бота |
 | `handlers/admin/common.py` | 490 | 13 | публичных нет — всё через имена с подчёркиванием (`_onoff`, `_require`, `_send_panel_message`, `_adm_back_row` и др.), но тянут его 13 модулей |
-| `handlers/admin/router.py` | 751 | 1 | `handle_callback_query` — единственный роутер всех кнопок |
-| `handlers/admin/panel_main.py` | 507 | 4 | `send_stats_panel`, `send_api_panel`, `send_daily_report_panel`, `send_weekly_report_panel`, `cmd_stats`, `build_adm_keyboard`, `send_adm_panel`, `cmd_adm` |
+| `handlers/admin/router.py` | 785 | 1 | `handle_callback_query` — единственный роутер всех кнопок |
+| `handlers/admin/panel_main.py` | 537 | 4 | `send_stats_panel`, `send_api_panel`, `send_daily_report_panel`, `send_weekly_report_panel`, `cmd_stats`, `build_adm_keyboard`, `send_adm_panel`, `cmd_adm` |
 | `handlers/admin/panel_prompts.py` | 1329 | 3 | `send_prompt_files`, `send_prompts_panel`, `handle_prompt_reset`, `cmd_prompt_set/add/reset`, `cmd_news_prompt_set/reset`, `cmd_rag_prompt_set/reset`, `cmd_author_prompt_set/reset`, `cmd_proactive_prompt_set/reset` |
 | `handlers/admin/panel_users.py` | 1346 | 3 | `send_users_panel`, `send_user_card`, `cmd_users` |
 | `handlers/admin/panel_rag.py` | 1000 | 6 | `send_rag_panel`, `cmd_rag`, `handle_kb_document`, `handle_kb_test_query` (панель из трёх экранов: разделы → список раздела → настройки поиска) |
@@ -101,13 +101,27 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 
 | файл | строк | публичные имена |
 |---|---:|---|
-| `jobs/__init__.py` | 37 | re-export; новая задача, не вписанная сюда, роняет старт `main.py` |
+| `jobs/__init__.py` | 39 | re-export; новая задача, не вписанная сюда, роняет старт `main.py` |
 | `jobs/reports.py` | 405 | `daily_report_loop`, `weekly_group_digest`, `daily_quiz`, `nightly_backup` |
 | `jobs/cleanup.py` | 234 | `cleanup_loop` |
 | `jobs/update.py` | 221 | `forget_update_notice`, `auto_update_loop` |
 | `jobs/news.py` | 230 | `send_news_to_chat`, `news_polling_loop` |
 | `jobs/watchdog.py` | 102 | `watchdog_loop` |
 | `jobs/rag.py` | 85 | `rag_catchup_loop` |
+| `jobs/web.py` | 71 | `web_loop` — поднимает сайт внутри процесса бота |
+
+## `web/` — веб-админка (30.08.2026, этап 0)
+
+Сайт живёт внутри процесса бота; как он подключён и почему именно так —
+`references/wiring.md`, раздел «Веб-админка».
+
+| файл | строк | публичные имена |
+|---|---:|---|
+| `web/__init__.py` | 21 | re-export `ROUTES`, `build_app` |
+| `web/routes.py` | 120 | `ROUTES` — единственный список адресов; `build_app`, `index`, `enter`, `exit_`, `health` |
+| `web/auth.py` | 223 | `check_webapp`, `check_widget`, `is_allowed`, `make_session`, `read_session`, `make_login_token`, `read_login_token`, `make_login_url`, `current_user` |
+| `web/pages.py` | 251 | `esc`, `page_login`, `page_denied`, `page_summary` |
+| `web/static/style.css` | — | оформление; ни одного адреса со стороны |
 
 ## Прочее
 

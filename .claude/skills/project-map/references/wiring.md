@@ -17,7 +17,7 @@
 ## Жизненный цикл процесса (`main.py`)
 
 - `post_init` — выставляет меню команд Telegram (публичное + отдельное для
-  персонала), поднимает **6 фоновых задач** в `application.bot_data["background_tasks"]`,
+  персонала), поднимает **7 фоновых задач** в `application.bot_data["background_tasks"]`,
   убирает устаревшее уведомление об обновлении, шлёт админам «Бот запущен»
   и открывает каждому его панель `/adm`.
 - `post_stop` — сообщение об остановке, пока бот ещё «живой».
@@ -31,7 +31,7 @@
 
 ## Фоновые задачи — запускаются в `main.post_init`
 
-Все шесть создаются как `asyncio.create_task(...)`; их имена приходят из
+Все семь создаются как `asyncio.create_task(...)`; их имена приходят из
 `jobs/__init__.py` (re-export). Задача, не вписанная туда, роняет старт.
 
 | задача | файл |
@@ -42,6 +42,7 @@
 | `daily_report_loop` | `jobs/reports.py` |
 | `watchdog_loop` | `jobs/watchdog.py` |
 | `auto_update_loop` | `jobs/update.py` |
+| `web_loop` | `jobs/web.py` |
 
 `jobs/reports.py` отдаёт наружу ещё `weekly_group_digest`, `nightly_backup` и
 `daily_quiz` (вопрос дня, сроки из `config.QUIZ_AUTO_HOURS` — 12:00 и 18:00
@@ -87,8 +88,8 @@
 
 Единственный роутер — `handlers/admin/router.py::handle_callback_query`.
 `preflight.py::check_callbacks` сверяет кнопки, найденные в коде панелей,
-с ветками роутера (на 2026-08-20 — **218 кнопок, 38 точных
-веток + 13 по приставке**).
+с ветками роутера (на 2026-08-30 — **220 кнопок, 39 точных
+веток + 14 по приставке**).
 
 Ограничение Telegram: `callback_data` ≤ 64 байта. Права на нажатие
 проверяются через `services/roles.py` (`perm_for_callback`, `may_press`).
@@ -124,14 +125,14 @@ user_image_calls, user_settings, user_token_usage
 
 ## Конфигурация
 
-`config.py` (1088, 106 констант) — читают 34 модуля. Значения
+`config.py` (1347, 122 константы) — читают 39 модулей. Значения
 берутся из `.env` (`python-dotenv`). Ключи из `.env.example`:
 
 ```
 TELEGRAM_TOKEN, GEMINI_API_KEY, GEMINI_IMAGEN_API_KEY, QWEN_API_KEY,
 DEEPSEEK_API_KEY, XIAOMI_API_KEY, RAG_ENABLED, RAG_TOP_K,
 RAG_MIN_SIMILARITY, RAG_CHUNK_MODE, RAG_LEX_BOOST, RAG_PEAK_MARGIN,
-RAG_STRONG_SIM, WATCHDOG_URL
+RAG_STRONG_SIM, WATCHDOG_URL, WEB_ENABLED, WEB_PUBLIC_URL
 ```
 
 Заметные константы: `ADMIN_IDS` (список id владельцев, зашит в код),
@@ -144,10 +145,41 @@ RAG_STRONG_SIM, WATCHDOG_URL
 `AUTO_UPDATE_INTERVAL_SEC = 300`, `AUTO_UPDATE_QUIET_SEC = 60`,
 `WATCHDOG_PING_SEC = 60`, `THINKING_LEVELS` (положения кнопок глубины
 раздумий — своя шкала у каждого провайдера, у MiMo их всего два) вместе с
-`THINKING_DEFAULT`, `THINKING_PHASES` и `QWEN_THINKING_BUDGET`.
+`THINKING_DEFAULT`, `THINKING_PHASES` и `QWEN_THINKING_BUDGET`; `WEB_ENABLED`, `WEB_HOST`, `WEB_PORT`,
+`WEB_PUBLIC_URL`, `WEB_COOKIE_NAME`, `WEB_SESSION_TTL_SEC`,
+`WEB_AUTH_MAX_AGE_SEC` (веб-админка).
 
 `preflight.py::check_models` сверяет `AVAILABLE_MODELS` с раскладкой кнопок
 в `handlers/admin/panel_main.py` — это место расходится чаще прочих.
+
+## Веб-админка (сайт) — с 30.08.2026
+
+Сайт живёт **внутри процесса бота**: седьмая фоновая задача `jobs/web.py`
+поднимает aiohttp на `127.0.0.1:8080`, страницы лежат в пакете `web/`.
+Так сделано не для удобства: права и персональные настройки лежат в ПАМЯТИ
+процесса, и отдельная программа, пишущая в ту же базу, их правок не увидела
+бы до перезапуска бота.
+
+| файл | что в нём |
+|---|---|
+| `jobs/web.py` | фоновая задача: поднять и погасить сервер |
+| `web/routes.py` | `ROUTES` — единственный список адресов; `build_app()` |
+| `web/auth.py` | подпись Telegram (две схемы), кука входа, одноразовая ссылка |
+| `web/pages.py` | сборка HTML: сводка, вход, отказ |
+| `web/static/style.css` | оформление; ничего со стороны не грузится |
+
+- Наружу сайт смотрит **через Caddy** (HTTPS, сертификат Let's Encrypt).
+  Сам бот в интернет ничего не открывает: `WEB_HOST=127.0.0.1`.
+- Вход: только `config.ADMIN_IDS`, паролей нет. Мини-приложение из бота —
+  подпись `HMAC(токен, "WebAppData")`; браузер — одноразовая ссылка на 5
+  минут, которую бот шлёт в личку (кнопка `web:link`).
+- Проверка «вход не забыт» — `preflight.py::check_web`: она не читает код,
+  а ДЁРГАЕТ каждый закрытый адрес с пустыми куками и ждёт 401.
+- Кнопки в панелях бота остаются все (решение Максима 30.08.2026): сайт —
+  вторая дверь, а не замена. `_web_row()` в `panel_main.py` появляется,
+  только когда `WEB_ENABLED` и `WEB_PUBLIC_URL` заданы.
+- ⚠️ Новый адрес сайта дописывать в `ROUTES`, иначе `check_web` о нём не
+  узнает; открытый без входа адрес роняет проверку намеренно.
 
 ## Сеть
 

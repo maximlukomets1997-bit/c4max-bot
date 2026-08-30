@@ -7,7 +7,7 @@ import html
 import logging
 import os
 
-from telegram import Update, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardMarkup, LinkPreviewOptions
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 from config import (AVAILABLE_MODELS, AVAILABLE_IMAGE_MODELS, GEMINI_MODEL,
@@ -593,6 +593,36 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             await query.edit_message_reply_markup(reply_markup=_build_api_keyboard(user_id))
         except Exception as e:
             logger.warning("⚠️ Не удалось обновить клавиатуру тумблера мыслей: %s", e)
+        return
+
+    if data == "web:link":
+        # Одноразовая ссылка на веб-админку для НАСТОЯЩЕГО браузера
+        # (30.08.2026, этап 0). Соседняя кнопка «🌐 Админка» открывает тот же
+        # сайт внутри Telegram и ссылки не требует — там Telegram сам говорит
+        # странице, кто пришёл.
+        #
+        # ⚠️ ССЫЛКА — ЭТО КЛЮЧ ОТ АДМИНКИ НА ПЯТЬ МИНУТ. Уходит в личку
+        # нажавшему и никуда больше; пересылать её нельзя. Срок и подпись —
+        # web/auth.py::make_login_url.
+        from web.auth import make_login_url
+        link = make_login_url(user_id)
+        if not link:
+            await query.answer("❌ Адрес сайта не настроен (WEB_PUBLIC_URL)",
+                               show_alert=True)
+            return
+        logger.info("🌐 Админ %s запросил ссылку входа в веб-админку", user_id)
+        await query.answer("Ссылка отправлена в личку")
+        # Отдельным сообщением, а не всплывашкой: из всплывашки ссылку не
+        # скопировать и не нажать.
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=("🌐 <b>Вход в админку</b>\n\n"
+                  f'<a href="{link}">Открыть в браузере</a>\n\n'
+                  "<i>Ссылка работает 5 минут и только для вас. "
+                  "Не пересылайте её.</i>"),
+            parse_mode=ParseMode.HTML,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
+        )
         return
 
     if data.startswith("think:"):

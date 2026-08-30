@@ -382,13 +382,42 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_stats_panel(context.bot, chat_id, user_id)
 
 
+def _web_row():
+    """
+    Ряд входа в веб-админку (30.08.2026, этап 0). Пусто, если сайт не поднят
+    или не настроен адрес — тогда ряда в панели просто нет.
+
+    Две разные двери, и это намеренно:
+      • «🌐 Админка» — мини-приложение, открывается ВНУТРИ Telegram. Вход
+        происходит молча: Telegram сам передаёт странице, кто её открыл.
+        ⚠️ Кнопка web_app работает ТОЛЬКО в личке — панели бота и так живут
+        только в личке (_is_group_chat), но помнить об этом надо.
+      • «🔗 Ссылка в браузер» — бот присылает одноразовую ссылку на пять
+        минут, чтобы открыть админку в настоящем браузере (на большом экране
+        удобнее, а внутри Telegram нет ни адресной строки, ни вкладок).
+
+    ⚠️ У web_app-кнопки НЕТ callback_data — она не проходит ни через роутер,
+    ни через проверку прав (_filter_keyboard пропускает такие как есть).
+    Поэтому ряд целиком владельческий по второй кнопке, а сам адрес сайта
+    ничего не открывает без подписи Telegram (см. web/auth.py).
+    """
+    from config import WEB_ENABLED, WEB_PUBLIC_URL
+    if not (WEB_ENABLED and WEB_PUBLIC_URL.startswith("https://")):
+        return []
+    from telegram import WebAppInfo
+    return [[
+        InlineKeyboardButton("🌐 Админка", web_app=WebAppInfo(url=WEB_PUBLIC_URL)),
+        InlineKeyboardButton("🔗 Ссылка в браузер", callback_data="web:link"),
+    ]]
+
+
 def _adm_rows():
     """
     Ряды кнопок главной панели ДО фильтра по правам. Вынесены отдельно, чтобы
     ту же раскладку могла собрать ветка, которая ВОЗВРАЩАЕТ клавиатуру /adm
     после действия (очистка разговоров — router.py), не отправляя панель заново.
     """
-    return [
+    return _web_row() + [
         [InlineKeyboardButton("💬 Статистика", callback_data="adm_open_stats")],
         [InlineKeyboardButton("⚙️ Управление PROMPTами", callback_data="adm_open_prompts")],
         # Отчёты о расходах (за вчера и за неделю) живут ВНУТРИ панели API —

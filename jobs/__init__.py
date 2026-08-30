@@ -1,9 +1,10 @@
 # ───────────────────────────────────────────────
 #  jobs/__init__.py — ОГЛАВЛЕНИЕ пакета фоновых задач.
 #
-#  До 2026-08-04 всё это лежало в одном файле jobs.py на 837 строк. Шесть
-#  циклов не зовут друг друга вовсе — это была не «одна тема», а шесть,
-#  сложенных в один файл; поэтому он разрезан по циклам БЕЗ правки логики.
+#  До 2026-08-04 всё это лежало в одном файле jobs.py на 837 строк. Циклы не
+#  зовут друг друга вовсе — это была не «одна тема», а шесть, сложенных в
+#  один файл; поэтому он разрезан по циклам БЕЗ правки логики.
+#  С 30.08.2026 их семь: добавилась веб-админка (web.py).
 #
 #  Снаружи пакет выглядит как прежний модуль: `from jobs import cleanup_loop`
 #  работает как работал. ⚠️ Новая фоновая задача — класть в СВОЙ файл и
@@ -17,6 +18,7 @@
 #    rag.py      — ежечасный добор базы знаний после лимита Google
 #    update.py   — самообновление: забрать новый код с GitHub и перезапуститься
 #    watchdog.py — отметки живости внешнему сторожу (healthchecks.io)
+#    web.py      — веб-админка: сайт внутри процесса бота (страницы в web/)
 # ───────────────────────────────────────────────
 
 from .news import send_news_to_chat, news_polling_loop
@@ -26,11 +28,12 @@ from .reports import (daily_report_loop, nightly_backup, weekly_group_digest,
 from .rag import rag_catchup_loop
 from .update import auto_update_loop, forget_update_notice
 from .watchdog import watchdog_loop
+from .web import web_loop
 
 __all__ = [
     "send_news_to_chat", "news_polling_loop",
     "cleanup_loop", "_monthly_stats_reset",
     "daily_report_loop", "nightly_backup", "weekly_group_digest", "daily_quiz",
     "rag_catchup_loop", "auto_update_loop", "forget_update_notice",
-    "watchdog_loop",
+    "watchdog_loop", "web_loop",
 ]

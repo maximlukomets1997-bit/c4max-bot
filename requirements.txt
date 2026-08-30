@@ -4,3 +4,4 @@ beautifulsoup4>=4.12.0
 python-dotenv>=1.0.0
 telegramify-markdown>=1.1.0
 tzdata>=2024.1
+aiohttp>=3.9.0

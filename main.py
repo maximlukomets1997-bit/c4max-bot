@@ -27,6 +27,7 @@ from jobs import rag_catchup_loop
 from jobs import daily_report_loop
 from jobs import watchdog_loop
 from jobs import auto_update_loop, forget_update_notice
+from jobs import web_loop
 
 logger = logging.getLogger(__name__)
 
@@ -330,6 +331,10 @@ async def post_init(application):
         # версии, и забирает её в тишине (см. jobs.auto_update_loop).
         # Дома завершается сразу — там код с GitHub не забирается.
         asyncio.create_task(auto_update_loop(application)),
+        # Веб-админка (30.08.2026): сайт внутри этого же процесса, слушает
+        # 127.0.0.1, наружу его выводит Caddy с HTTPS. WEB_ENABLED не задан
+        # в .env (дома так и есть) — задача завершается сразу.
+        asyncio.create_task(web_loop(application)),
     ]
 
     # Убираем УСТАРЕВШЕЕ уведомление «⬇️ Обновился сам…» от прошлой сборки

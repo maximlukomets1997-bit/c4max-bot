@@ -1332,6 +1332,141 @@ def check_daily_report():
     return problems, f"{done} проверок: расход, перенос, раскладка, копилка недели"
 
 
+def check_web_auth():
+    """
+    Вход в веб-админку: пускает ли она того, кого надо, и, ГЛАВНОЕ, отшивает
+    ли всех остальных.
+
+    ⚠️ Ради чего проверка существует. У кнопок бота от чужого нажатия
+    страхует запрет по умолчанию в services/roles.py, а сайт стоит в
+    интернете, и единственное, что отделяет админку от прохожего, — совпала
+    подпись или нет. Ошибиться тут можно тихо: перепутанный ключ подписи или
+    забытая проверка срока не мешают ВЛАДЕЛЬЦУ войти, поэтому руками такое
+    не замечается вовсе.
+
+    Отдельно проверяются два ключа. Telegram считает подпись по-разному для
+    мини-приложения (ключ выведен из слова WebAppData) и для входа из
+    браузера (ключ — просто хэш токена). Подпись, посчитанная не тем ключом,
+    обязана быть отвергнута — иначе одна дверь открывалась бы ключом от другой.
+    """
+    import hashlib
+    import hmac
+    import time
+    from urllib.parse import urlencode
+
+    from web import auth
+
+    problems = []
+    done = 0
+
+    TOKEN = "123456789:AAEeTestTokenForSelfTestOnly"
+    OWNER, STRANGER = 111, 222
+
+    saved_token, saved_admins = auth.TELEGRAM_TOKEN, auth.ADMIN_IDS
+    auth.TELEGRAM_TOKEN, auth.ADMIN_IDS = TOKEN, (OWNER,)
+
+    def expect(title, got, want):
+        nonlocal done
+        done += 1
+        if got != want:
+            problems.append(f"{title}: получилось {got!r}, ожидалось {want!r}")
+
+    def sign(pairs: dict, secret: bytes) -> dict:
+        """Подписывает набор полей так же, как это делает Telegram."""
+        check = "\n".join(f"{k}={pairs[k]}" for k in sorted(pairs))
+        out = dict(pairs)
+        out["hash"] = hmac.new(secret, check.encode(), hashlib.sha256).hexdigest()
+        return out
+
+    webapp_key = hmac.new(b"WebAppData", TOKEN.encode(), hashlib.sha256).digest()
+    widget_key = hashlib.sha256(TOKEN.encode()).digest()
+
+    try:
+        now = int(time.time())
+
+        # ─── мини-приложение (кнопка «🌐 Админка» в боте) ───
+        good = sign({"auth_date": str(now),
+                     "user": '{"id":%d,"first_name":"O"}' % OWNER}, webapp_key)
+        expect("своя подпись мини-приложения",
+               auth.check_webapp(urlencode(good)), OWNER)
+
+        bad = dict(good)
+        bad["user"] = '{"id":%d,"first_name":"X"}' % STRANGER
+        expect("подменённые данные при той же подписи",
+               auth.check_webapp(urlencode(bad)), None)
+
+        # Тот же набор, подписанный ключом ДРУГОЙ двери.
+        wrong_key = sign({"auth_date": str(now),
+                          "user": '{"id":%d,"first_name":"O"}' % OWNER}, widget_key)
+        expect("подпись мини-приложения не тем ключом",
+               auth.check_webapp(urlencode(wrong_key)), None)
+
+        stale = sign({"auth_date": str(now - auth.WEB_AUTH_MAX_AGE_SEC - 60),
+                      "user": '{"id":%d,"first_name":"O"}' % OWNER}, webapp_key)
+        expect("просроченная подпись мини-приложения",
+               auth.check_webapp(urlencode(stale)), None)
+
+        expect("пустые данные мини-приложения", auth.check_webapp(""), None)
+
+        # ─── вход из браузера (второй ключ) ───
+        w_good = sign({"id": str(OWNER), "auth_date": str(now),
+                       "first_name": "O"}, widget_key)
+        expect("своя подпись входа из браузера", auth.check_widget(w_good), OWNER)
+
+        w_wrong = sign({"id": str(OWNER), "auth_date": str(now),
+                        "first_name": "O"}, webapp_key)
+        expect("подпись входа из браузера не тем ключом",
+               auth.check_widget(w_wrong), None)
+
+        # ─── кто вообще имеет право войти ───
+        expect("владелец допущен", auth.is_allowed(OWNER), True)
+        expect("посторонний с ВЕРНОЙ подписью не допущен",
+               auth.is_allowed(STRANGER), False)
+        expect("никто не допущен", auth.is_allowed(None), False)
+
+        # ─── наша кука со входом ───
+        cookie = auth.make_session(OWNER)
+        expect("своя кука читается", auth.read_session(cookie), OWNER)
+        expect("кука с подменённым id",
+               auth.read_session(cookie.replace(str(OWNER), str(STRANGER), 1)), None)
+        expect("кука с испорченной подписью", auth.read_session(cookie[:-1] + "0"), None)
+        expect("мусор вместо куки", auth.read_session("что-то не то"), None)
+        expect("пустая кука", auth.read_session(None), None)
+
+        # Просроченная кука: собираем руками, срок в прошлом.
+        body = f"{OWNER}.{int(time.time()) - 10}"
+        old = body + "." + hmac.new(TOKEN.encode(), body.encode(),
+                                    hashlib.sha256).hexdigest()
+        expect("просроченная кука", auth.read_session(old), None)
+
+        # ─── одноразовая ссылка «открыть в браузере» ───
+        token = auth.make_login_token(OWNER)
+        expect("своя ссылка входа читается", auth.read_login_token(token), OWNER)
+        expect("ссылка с испорченной подписью",
+               auth.read_login_token(token[:-1] + "0"), None)
+
+        body = f"{OWNER}.{int(time.time()) - 10}"
+        old_link = body + "." + hmac.new(TOKEN.encode(), f"login:{body}".encode(),
+                                         hashlib.sha256).hexdigest()
+        expect("просроченная ссылка входа", auth.read_login_token(old_link), None)
+
+        # ⚠️ Ссылка и кука подписаны РАЗНЫМИ приставками намеренно: иначе
+        # пятиминутная ссылка работала бы как недельная кука и наоборот.
+        expect("кука не годится вместо ссылки", auth.read_login_token(cookie), None)
+        expect("ссылка не годится вместо куки", auth.read_session(token), None)
+
+        # ─── токена нет вовсе (бот без .env) ───
+        auth.TELEGRAM_TOKEN = ""
+        expect("без токена мини-приложение не пускает",
+               auth.check_webapp(urlencode(good)), None)
+        expect("без токена браузер не пускает", auth.check_widget(w_good), None)
+        expect("без токена кука не читается", auth.read_session(cookie), None)
+    finally:
+        auth.TELEGRAM_TOKEN, auth.ADMIN_IDS = saved_token, saved_admins
+
+    return problems, f"{done} проверок: две схемы подписи, срок, подмена id, кука, ссылка"
+
+
 CHECKS = (
     ("деньги — расчёт стоимости запросов", check_money),
     ("деньги — сам прайс не менялся", check_price_list),
@@ -1346,6 +1481,7 @@ CHECKS = (
     ("база знаний — пик против полки", check_rag_pick),
     ("звания викторины — лестница без дыр", check_quiz_ranks),
     ("суточный отчёт — расход за период", check_daily_report),
+    ("вход в веб-админку — подпись и срок", check_web_auth),
 )
 
 

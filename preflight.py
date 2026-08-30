@@ -34,6 +34,7 @@
 # ───────────────────────────────────────────────
 
 import ast
+import asyncio
 import os
 import sys
 import tempfile
@@ -522,6 +523,87 @@ def check_handlers():
     return [], f"обработчиков: {total} в {len(app.handlers)} группах"
 
 
+def check_web():
+    """
+    Веб-админка: сверяет таблицу адресов web/routes.py::ROUTES с тем, что
+    реально собралось в приложении, и — главное — что КАЖДЫЙ адрес с пометкой
+    "owner" правда закрыт входом.
+
+    Проверка вида «забыл ли автор проверку доступа» здесь не теоретическая:
+    у кнопок бота от этого страхует запрет по умолчанию в services/roles.py,
+    а у страниц сайта такого запрета нет — обёртку ставит сборка приложения,
+    и достаточно один раз добавить адрес мимо таблицы, чтобы страница
+    открылась кому угодно. Поэтому обёртку тут не «читают», а дёргают:
+    обработчик зовётся с пустыми куками и обязан ответить «войдите».
+
+    ⚠️ Список открытых адресов зашит НАРОЧНО. Новый открытый адрес уронит
+    проверку — это не помеха, а вопрос «ты точно хочешь пускать сюда без
+    входа?», заданный до выкатки, а не после.
+    """
+    problems = []
+    try:
+        from web import ROUTES, build_app
+    except ImportError as e:
+        return [f"пакет web не собирается: {e}"], ""
+
+    allowed_open = {"/enter", "/health"}
+
+    # 1) Таблица сама по себе: обработчик вызываемый, доступ известного вида,
+    #    открытые адреса — только из разрешённого списка.
+    for method, path, handler, access in ROUTES:
+        if not callable(handler):
+            problems.append(f"{method} {path}: обработчик не вызывается")
+        if access not in ("owner", "open"):
+            problems.append(f"{method} {path}: неизвестный уровень входа «{access}»")
+        if access == "open" and path not in allowed_open:
+            problems.append(f"{method} {path}: открыт без входа, а в списке открытых его нет")
+
+    # 2) Приложение собирается, и в нём ровно те адреса, что в таблице.
+    try:
+        app = build_app()
+    except Exception as e:
+        return problems + [f"приложение сайта не собирается: {e}"], ""
+
+    built = {(r.method, r.resource.canonical) for r in app.router.routes()
+             if r.method != "HEAD" and not r.resource.canonical.startswith("/static")}
+    listed = {(m, p) for m, p, _, _ in ROUTES}
+    for extra in sorted(built - listed):
+        problems.append(f"{extra[0]} {extra[1]}: адрес есть в приложении, но не в ROUTES")
+    for missing in sorted(listed - built):
+        problems.append(f"{missing[0]} {missing[1]}: адрес есть в ROUTES, но не собрался")
+
+    # 3) Каждый «owner» правда закрыт: зовём собранный обработчик без кук.
+    class _NoCookies:
+        cookies = {}
+
+    closed = 0
+    for route in app.router.routes():
+        if route.method == "HEAD" or route.resource.canonical.startswith("/static"):
+            continue
+        access = next((a for m, p, _, a in ROUTES
+                       if m == route.method and p == route.resource.canonical), None)
+        if access != "owner":
+            continue
+        try:
+            response = asyncio.run(route.handler(_NoCookies()))
+        except Exception as e:
+            problems.append(f"{route.method} {route.resource.canonical}: "
+                            f"обработчик упал на проверке входа ({e})")
+            continue
+        if getattr(response, "status", None) != 401:
+            problems.append(f"{route.method} {route.resource.canonical}: "
+                            f"пускает без входа (ответ {getattr(response, 'status', '?')})")
+        else:
+            closed += 1
+
+    # 4) Оформление на месте — без него страницы открываются голым текстом.
+    css = os.path.join(ROOT, "web", "static", "style.css")
+    if not os.path.exists(css):
+        problems.append("нет web/static/style.css")
+
+    return problems, f"адресов сайта: {len(ROUTES)}, из них под входом: {closed}"
+
+
 # ───────────────────────────────────────────────
 #  Запуск
 # ─────────────────────────────────────────────
@@ -535,6 +617,7 @@ CHECKS = (
     ("кнопки и роутер", check_callbacks),
     ("сборка панелей", check_panels),
     ("регистрация обработчиков", check_handlers),
+    ("адреса веб-админки", check_web),
 )
 
 
