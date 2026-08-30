@@ -606,8 +606,11 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         # config.THINKING_LEVELS, там же живые замеры.
         #
         # ⚠️ Настройка ОБЩАЯ и действует на все ОТВЕТЫ бота: личка, группы,
-        # режим «Сам в разговор», голосовые и видео. Разбор вложений ей НЕ
-        # подчиняется — у него свои уровни (services/gemini.py).
+        # режим «Сам в разговор», голосовые и видео. Два исключения, оба
+        # намеренные: РАЗБОР вложений (у него свои зашитые уровни,
+        # services/gemini.py) и СБОРКА вопросов викторины (services/quiz_bank.py
+        # шлёт thinking_override=True — вопросы собираются на полную независимо
+        # от кнопки, решение Максима 05.08.2026).
         provider = data.split(":", 1)[1]
         levels = THINKING_LEVELS.get(provider)
         if not levels:

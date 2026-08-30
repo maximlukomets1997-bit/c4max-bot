@@ -142,7 +142,9 @@ RAG_STRONG_SIM, WATCHDOG_URL
 не провайдер моделей, а картинки; `preflight` считает четвёрку по
 `AVAILABLE_MODELS`), `AVAILABLE_IMAGE_MODELS` (2), `QUIZ_RANKS` (20 званий),
 `AUTO_UPDATE_INTERVAL_SEC = 300`, `AUTO_UPDATE_QUIET_SEC = 60`,
-`WATCHDOG_PING_SEC = 60`.
+`WATCHDOG_PING_SEC = 60`, `THINKING_LEVELS` (положения кнопок глубины
+раздумий — своя шкала у каждого провайдера, у MiMo их всего два) вместе с
+`THINKING_DEFAULT`, `THINKING_PHASES` и `QWEN_THINKING_BUDGET`.
 
 `preflight.py::check_models` сверяет `AVAILABLE_MODELS` с раскладкой кнопок
 в `handlers/admin/panel_main.py` — это место расходится чаще прочих.
