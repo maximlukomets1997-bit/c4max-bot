@@ -496,13 +496,16 @@ def quiz_generate(actor_id: int, application, retry: bool = False) -> str:
     def describe(result):
         if result is None:
             return "⚠️ Сборка сорвалась. Подробности в логе бота."
-        # В журнал — ПОСЛЕ завершения и тем же кодом, что у кнопки в боте:
-        # запись «собраны вопросы» до окончания работы была бы неправдой.
+        # ⚠️ КЛЮЧ ИМЕННО «saved» (services/quiz_bank.py::_run_over). С «added»
+        # и страница, и журнал бодро сообщали «вопросов добавлено 0» после
+        # удачной сборки сорока вопросов — ничего не падало, просто цифра была
+        # ложью. Тот же класс ошибки, что «correct» вместо «correct_idx».
+        # В журнал пишем ПОСЛЕ завершения и тем же кодом, что у кнопки в боте.
         _staff_audit(actor_id, "quiz_retry" if retry else "quiz_generate", 0,
                      f"статей {result.get('articles', 0)}, "
-                     f"вопросов {result.get('added', 0)}")
+                     f"вопросов {result.get('saved', 0)}")
         return (f"✅ Готово: статей {result.get('articles', 0)}, "
-                f"вопросов добавлено {result.get('added', 0)}, "
+                f"вопросов добавлено {result.get('saved', 0)}, "
                 f"не вышло {result.get('failed', 0)}.")
 
     logger.info("🌐 Сайт: запущена %s вопросов (статей %d, админ %s)",
@@ -644,10 +647,10 @@ def report_text(kind: str) -> str:
     страница показывает обычный текст.
     """
     from services import daily_report
-    import re as _re
+    from .pages import plain
     text = (daily_report.last_report_text() if kind == "day"
             else daily_report.last_weekly_text()) or ""
-    return _re.sub(r"</?[a-zA-Z][^>]*>", "", text)
+    return plain(text)
 
 
 def make_backup(actor_id: int) -> tuple:
@@ -674,22 +677,34 @@ def digest_text(chat_id: int) -> tuple:
     return group_digest.render(data, title), title
 
 
-async def digest_send(actor_id: int, chat_id: int, application) -> str:
+async def digest_send(actor_id: int, chat_id: int, text: str, application) -> str:
     """
     Отправка дайджеста В ГРУППУ.
+
+    ⚠️ УХОДИТ ИМЕННО ТОТ ТЕКСТ, КОТОРЫЙ ЧЕЛОВЕК ВИДЕЛ, а не пересчитанный
+    заново. Это осознанное решение из кнопки в боте
+    (handlers/admin/panel_digest.py, ветка «send»): неделя скользящая, и
+    пересчёт в момент отправки дал бы ДРУГИЕ цифры — в группу ушло бы не то,
+    что владелец одобрил.
+    Сначала я написал здесь пересчёт и заодно позволил отправить, ни разу не
+    нажав «Показать»; поймано разбором ошибок 30.08.2026.
 
     ⚠️ Это ПУБЛИЧНОЕ сообщение всем участникам чата от имени бота —
     подтверждение спрашивает страница, как и кнопка в боте.
     """
     if application is None:
         raise ActionError("нет доступа к боту — дайджест не отправлен")
+    if not (text or "").strip():
+        raise ActionError("нечего отправлять — сначала нажмите «Показать»")
     from telegram.constants import ParseMode
-    text, title = digest_text(chat_id)
+    from handlers.admin.panel_users import _chat_title
+
     await application.bot.send_message(chat_id=chat_id, text=text,
                                        parse_mode=ParseMode.HTML)
-    _staff_audit(actor_id, "digest", 0, f"отправлен в {title}")
-    logger.info("🌐 Сайт: дайджест отправлен в %s (админ %s)", title, actor_id)
-    return f"📤 Дайджест отправлен в «{title}»."
+    # Подробность в журнале — дословно как у кнопки в боте.
+    _staff_audit(actor_id, "digest", 0, f"дайджест отправлен в чат {chat_id}")
+    logger.info("🌐 Сайт: дайджест отправлен в чат %s (админ %s)", chat_id, actor_id)
+    return f"📤 Дайджест отправлен в «{_chat_title(chat_id)}»."
 
 
 def digest_toggle(actor_id: int) -> bool:

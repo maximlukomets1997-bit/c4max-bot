@@ -1798,6 +1798,161 @@ def check_web_pages():
                       f"люди, обслуживание, экранирование")
 
 
+def check_web_wiring():
+    """
+    Сайт не врёт цифрами и не теряет кнопки.
+
+    ⚠️ Ради чего проверка существует. Разбор ошибок 30.08.2026 нашёл ТРИ
+    промаха одного сорта, и ни один не падал:
+      • «Снять и скачать» отдавало САМУЮ СТАРУЮ копию базы: список копий идёт
+        от старых к свежим, а код брал первую;
+      • сборка вопросов всегда рапортовала «добавлено 0» — читался ключ
+        «added», а возвращается «saved»;
+      • обработчик очистки журнала базы знаний был написан, а кнопки к нему
+        не было — ветка висела недостижимой.
+    Всё это — «работает, но неправда». Такое ловится только сверкой с
+    источником, а не чтением кода.
+    """
+    import re as _re
+
+    from web import actions, pages, routes
+
+    problems = []
+    done = 0
+
+    def expect(title, ok):
+        nonlocal done
+        done += 1
+        if not ok:
+            problems.append(title)
+
+    # ── 1. Порядок копий базы: берём последнюю, потому что список от старых ──
+    from services import backup
+    doc = (backup.list_backups.__doc__ or "")
+    expect("докстринг list_backups перестал говорить о порядке — "
+           "проверьте, с какого конца брать свежую копию",
+           "от старых к свежим" in doc)
+    src = _re.search(r"else:\s*\n\s*from services import backup(.|\n)*?_read_file_bytes",
+                     pathlib.Path(ROOT, "web", "routes.py").read_text(encoding="utf-8"))
+    expect("скачивание копии базы берёт не последнюю (самую свежую) запись",
+           bool(src) and "copies[-1]" in src.group(0))
+
+    # ── 2. Ключи, которые сайт читает у сборки вопросов, реально возвращаются ──
+    quiz_src = pathlib.Path(ROOT, "services", "quiz_bank.py").read_text(encoding="utf-8")
+    run_over = _re.search(r"def _run_over(.|\n)*?return \{([^}]*)\}", quiz_src)
+    returned = set(_re.findall(r'"([a-z_]+)"', run_over.group(2))) if run_over else set()
+    expect(f"не разобрал, что возвращает _run_over (нашёл {returned})",
+           {"articles", "saved", "failed"} <= returned)
+    act_src = pathlib.Path(ROOT, "web", "actions.py").read_text(encoding="utf-8")
+    describe = _re.search(r"def quiz_generate(.|\n)*?return longjobs", act_src)
+    used = set(_re.findall(r"result\.get\('([a-z_]+)'", describe.group(0))) if describe else set()
+    expect(f"сайт читает у сборки вопросов ключи {sorted(used)}, "
+           f"а возвращаются {sorted(returned)}",
+           used and used <= returned)
+
+    # ── 3. Каждая форма страницы имеет обработчик, и наоборот ──
+    # ⚠️ СМОТРИМ НА НАРИСОВАННОЕ, А НЕ НА ИСХОДНИК. Первая версия этой
+    # проверки искала литералы в тексте pages.py — и пропустила подлом, где
+    # кнопка в исходнике осталась, а на страницу не попадала. Кнопка, которой
+    # не видно, всё равно что её нет.
+    import asyncio as _asyncio
+    import database.history as _hist
+
+    # Обстановка, при которой на страницах есть ВСЕ кнопки: черновик и
+    # игровой вопрос, известная группа, участник.
+    _hist.add_quiz_question("Проверка проводки", "Вопрос-черновик?",
+                            ["раз", "два"], 0, "")
+    draft = _hist.list_quiz_questions(approved=False, limit=1)
+    if draft:
+        _hist.set_quiz_question_approved(draft[0]["id"], True)
+    _hist.add_quiz_question("Проверка проводки", "Второй вопрос-черновик?",
+                            ["раз", "два"], 0, "")
+    with _hist._lock:
+        _conn = _hist._get_connection()
+        _conn.execute("INSERT OR REPLACE INTO known_chats (chat_id, title, last_seen) "
+                      "VALUES (?, ?, datetime('now'))", (-100999, "Проверочная группа"))
+        _conn.commit()
+    _hist.add_quiz_attempt(777000111, "проверка", True)
+    _hist.note_quiz_failure("проверочная.md", "проверка проводки")
+
+    # ⚠️ Статью заводим во ВРЕМЕННОЙ папке: настоящие статьи базы знаний —
+    # единственное, чего нет ни в git, ни в базе, и трогать их проверкой нельзя.
+    import shutil as _shutil
+    import tempfile as _tempfile
+
+    import services.knowledge_store as _ks
+    from services import roles as _roles
+
+    art_dir = _tempfile.mkdtemp(prefix="c4max-selftest-kb-")
+    saved_folders = dict(_ks._FOLDERS)
+    _ks._FOLDERS["pending"] = os.path.join(art_dir, "pending")
+    _ks._FOLDERS["approved"] = os.path.join(art_dir, "approved")
+    os.makedirs(_ks._FOLDERS["pending"], exist_ok=True)
+    os.makedirs(_ks._FOLDERS["approved"], exist_ok=True)
+    with open(os.path.join(_ks._FOLDERS["pending"], "проверка.md"), "w",
+              encoding="utf-8") as f:
+        f.write("# Проверка проводки" + os.linesep + "Текст." + os.linesep)
+
+    _roles.make_moderator(777000111, 1)
+
+    drawn = ""
+    try:
+        drawn += pages.page_kb(None, "подпись", section="pending",
+                               open_article="pending/проверка.md")
+        drawn += pages.page_quiz(None, "подпись", mode="draft")
+        drawn += pages.page_quiz(None, "подпись", mode="live")
+        drawn += pages.page_system(None, "подпись",
+                                   digest_chat=-100999, digest_body="текст")
+        drawn += _asyncio.run(pages.page_user_card(None, 777000111, "подпись"))
+    finally:
+        _roles.unmake_moderator(777000111)
+        _ks._FOLDERS.update(saved_folders)
+        _shutil.rmtree(art_dir, ignore_errors=True)
+        _hist.clear_quiz_failures()
+        for q in _hist.list_quiz_questions(approved=False, limit=20):
+            _hist.delete_quiz_question(q["id"])
+        for q in _hist.list_quiz_questions(approved=True, limit=20):
+            _hist.delete_quiz_question(q["id"])
+
+    routes_src = pathlib.Path(ROOT, "web", "routes.py").read_text(encoding="utf-8")
+    sent = set(_re.findall(r'name="do" value="([a-z_]+)"', drawn))
+    handled = set(_re.findall(r'do == "([a-z_]+)"', routes_src)) | {"ok", "del"}
+    done += 2
+    for extra in sorted(sent - handled):
+        problems.append(f"страница рисует кнопку «{extra}», а обработчика нет")
+    for orphan in sorted(handled - sent):
+        problems.append(f"обработчик «{orphan}» есть, а кнопки к нему "
+                        f"на страницах не рисуется")
+
+    # ── 4. Разметка Telegram не доезжает до страницы обычным текстом ──
+    expect("значение «не задан» показывается вместе с тегами",
+           pages.plain("<i>не задан</i>") == "не задан")
+    expect("экранированные символы остаются в тексте отчёта",
+           pages.plain("цена &lt;0.01") == "цена <0.01")
+
+    # ── 5. Дайджест уходит В ГРУППУ только тем текстом, который показали ──
+    # ⚠️ Решение из кнопки бота: неделя скользящая, пересчёт в момент отправки
+    # дал бы другие цифры. Пустой текст обязан быть отказом, а не пересчётом.
+    import asyncio
+
+    class _FakeApp:
+        class bot:
+            @staticmethod
+            async def send_message(**kw):
+                raise AssertionError("отправка не должна была случиться")
+
+    try:
+        asyncio.run(actions.digest_send(1, -100, "   ", _FakeApp))
+        problems.append("дайджест ушёл в группу с пустым текстом")
+    except actions.ActionError:
+        done += 1
+    except AssertionError as e:
+        problems.append(str(e))
+
+    return problems, (f"{done} проверок: порядок копий, ключи сборки вопросов, "
+                      f"формы ↔ обработчики, разметка, дайджест")
+
+
 def check_web_auth():
     """
     Вход в веб-админку: пускает ли она того, кого надо, и, ГЛАВНОЕ, отшивает
@@ -1976,6 +2131,7 @@ CHECKS = (
     ("список промптов против панели бота", check_prompts_spec),
     ("журнал персонала знает все коды действий", check_audit_codes),
     ("страницы сайта показывают то, что нужно", check_web_pages),
+    ("сайт: цифры и кнопки не разъехались с источником", check_web_wiring),
     ("вход в веб-админку — подпись и срок", check_web_auth),
 )
 

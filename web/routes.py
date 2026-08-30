@@ -182,8 +182,16 @@ async def system(request):
         return aioweb.Response(text=pages.page_system(application, csrf, confirm=do),
                                content_type="text/html")
     if do == "digest_send" and not confirmed:
+        # Показываем ТОТ ЖЕ текст рядом с вопросом — человек подтверждает не
+        # «отправить дайджест вообще», а именно эти строки.
+        try:
+            chat_id = int(form.get("chat", ""))
+        except (TypeError, ValueError):
+            chat_id = 0
         page = pages.page_system(application, csrf,
-                                 confirm=f'digest:{form.get("chat", "")}')
+                                 confirm=f"digest:{chat_id}",
+                                 digest_chat=chat_id,
+                                 digest_body=str(form.get("text", "")))
         return aioweb.Response(text=page, content_type="text/html")
 
     message, bad = "", False
@@ -207,6 +215,7 @@ async def system(request):
             kwargs = {"digest_chat": chat_id, "digest_body": text}
         elif do == "digest_send":
             message = await actions.digest_send(actor_id, int(form.get("chat", "")),
+                                                str(form.get("text", "")),
                                                 application)
         elif do == "backup":
             path, size = actions.make_backup(actor_id)
@@ -258,7 +267,12 @@ async def download(request):
         copies = backup.list_backups()
         if not copies:
             raise aioweb.HTTPNotFound()
-        newest = os.path.join(backup.backup_dir(), copies[0][0])
+        # ⚠️ list_backups отдаёт копии ОТ СТАРЫХ К СВЕЖИМ (так написано в её
+        # докстринге — она делалась для отчётов). Самая свежая — ПОСЛЕДНЯЯ.
+        # Здесь стояло copies[0], и «Снять и скачать» отдавало копию недельной
+        # давности: файл скачивался, выглядел настоящим, и понять подмену было
+        # нечем. Поймано разбором ошибок 30.08.2026.
+        newest = os.path.join(backup.backup_dir(), copies[-1][0])
         path, raw = adm_common._read_file_bytes(newest)
 
     if not raw:
@@ -337,6 +351,14 @@ async def kb(request):
             actions.kb_delete(actor_id, folder, fname)
             message = f"🗑 Статья удалена: {fname}"
 
+        elif do == "replace":
+            folder = str(form.get("folder", ""))
+            fname = str(form.get("fname", ""))
+            actions.kb_replace(actor_id, folder, fname, str(form.get("text", "")))
+            message = (f"📝 Текст статьи сохранён: {fname}. "
+                       f"Чтобы правка попала в поиск — пересоберите указатель.")
+            open_article = f"{folder}/{fname}"
+
         elif do == "rebuild":
             message = actions.kb_rebuild(actor_id, application)
 
@@ -352,6 +374,10 @@ async def kb(request):
             open_article = ""
 
         elif do == "clearlog":
+            if str(form.get("confirm", "")) != "1":
+                page = pages.page_kb(application, csrf, section=section,
+                                     confirm="clearlog")
+                return aioweb.Response(text=page, content_type="text/html")
             deleted = actions.kb_clear_log(actor_id)
             message = f"🧹 Журнал очищен: {deleted} записей."
 

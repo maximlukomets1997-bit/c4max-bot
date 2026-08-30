@@ -32,6 +32,20 @@ def esc(value) -> str:
     return html.escape(str(value), quote=True)
 
 
+def plain(text: str) -> str:
+    """
+    Текст, собранный ДЛЯ TELEGRAM, приведённый к обычному виду.
+
+    ⚠️ Нужны ОБА шага. Панели бота отдают строки с разметкой и с уже
+    заэкранированными символами: срежешь только теги — на странице останется
+    «&lt;0.01», уберёшь только экранирование — на экран попадёт «<b>».
+    Оба огреха были на странице обслуживания: незаданный остаток показывался
+    как «<i>не задан</i>» (поймано разбором ошибок 30.08.2026).
+    """
+    import re as _re
+    return html.unescape(_re.sub(r"</?[a-zA-Z][^>]*>", "", text or ""))
+
+
 def _shell(title: str, body: str) -> str:
     return (
         "<!doctype html><html lang=\"ru\"><head>"
@@ -420,9 +434,8 @@ def _money_block(csrf: str) -> str:
         info = _balance_field(field_id)
         if not info:
             continue
-        now = _value_str(info["key"], info["kind"], info["absent"])
         # Разметку Telegram из значения убираем — здесь она не к месту.
-        now = now.replace("<b>", "").replace("</b>", "")
+        now = plain(_value_str(info["key"], info["kind"], info["absent"]))
         control = _sysform(
             csrf, {"do": "money", "field": field_id},
             f'<input type="text" name="value" class="qinput short" '
@@ -513,17 +526,24 @@ def page_system(application, csrf: str = "", confirm: str = "",
     for chat in chats:
         cid = chat["chat_id"]
         controls = _sysform(csrf, {"do": "digest_show", "chat": cid}, _btn("Показать"))
-        if confirm == f"digest:{cid}":
-            controls += ('<div class="warn-btns">'
-                         + _sysform(csrf, {"do": "digest_send", "chat": cid,
-                                           "confirm": "1"},
-                                    _btn("Да, отправить в группу", "danger"))
-                         + '<a class="btn" href="/system">Отмена</a></div>')
-        else:
-            controls += _sysform(csrf, {"do": "digest_send", "chat": cid},
-                                 _btn("📤 В группу"))
-        dig_items.append((_chat_title(cid),
-                          "отправка увидят ВСЕ участники чата", controls))
+        # ⚠️ КНОПКА ОТПРАВКИ ЕСТЬ ТОЛЬКО У ПОКАЗАННОГО ДАЙДЖЕСТА, и она несёт
+        # с собой ИМЕННО ТОТ текст, который сейчас на экране. Неделя скользящая:
+        # пересчёт в момент отправки дал бы другие цифры, и в группу ушло бы не
+        # то, что владелец видел (то же решение — в кнопке бота).
+        shown = digest_body if digest_chat == cid else ""
+        if shown:
+            if confirm == f"digest:{cid}":
+                controls += ('<div class="warn-btns">'
+                             + _sysform(csrf, {"do": "digest_send", "chat": cid,
+                                               "text": shown, "confirm": "1"},
+                                        _btn("Да, отправить в группу", "danger"))
+                             + '<a class="btn" href="/system">Отмена</a></div>')
+            else:
+                controls += _sysform(csrf, {"do": "digest_send", "chat": cid,
+                                            "text": shown}, _btn("📤 В группу"))
+        hint = ("отправку увидят ВСЕ участники чата" if shown
+                else "нажмите «Показать» — тогда появится отправка в группу")
+        dig_items.append((_chat_title(cid), hint, controls))
     dig_html = "<h2>📊 Дайджест недели</h2>" + _rows(dig_items)
     if digest_body:
         dig_html += (f'<div class="pcard"><div class="phead"><h3>'
@@ -646,7 +666,21 @@ def page_kb(application, csrf: str = "", section: str = "",
         # страница молча превращается в тупик.
         try:
             _path, text = read_article(folder, fname)
-            body_html = f'<pre class="article">{esc(text)}</pre>'
+            # ⚠️ Текст ПРАВИТСЯ прямо здесь — это та же «📝 Заменить», что в
+            # боте. Без этого поля кнопка бота не имела на сайте пары, а
+            # написанный для неё web/actions.kb_replace никем не звался.
+            body_html = (
+                f'<form method="post" action="/kb" class="ctl">'
+                f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+                f'<input type="hidden" name="do" value="replace">'
+                f'<input type="hidden" name="folder" value="{esc(folder)}">'
+                f'<input type="hidden" name="fname" value="{esc(fname)}">'
+                f'<input type="hidden" name="section" value="{esc(section)}">'
+                f'<textarea name="text" rows="16" spellcheck="false">'
+                f'{esc(text)}</textarea>'
+                f'<div class="pbtns">{_btn("Сохранить текст", "primary")}'
+                f'<span class="note">после правки пересоберите указатель</span>'
+                f'</div></form>')
             meta = f'{len(text)} символов · {"ждёт одобрения" if folder == "pending" else "в базе"}'
         except Exception as e:
             body_html = (f'<div class="warnline">Текст не открывается: '
@@ -727,6 +761,20 @@ def page_kb(application, csrf: str = "", section: str = "",
         for a in get_recent_kb_actions(10))
     log_html = (f'<div class="rows">{log_rows}</div>' if log_rows
                 else '<div class="rows"><div class="empty">журнал пуст</div></div>')
+    # Очистка журнала — та же кнопка, что «🧹 Очистить журнал» в панели бота.
+    # Обработчик для неё был написан сразу, а кнопку я забыл: ветка висела
+    # недостижимой (поймано разбором ошибок 30.08.2026).
+    if confirm == "clearlog":
+        log_html += ('<div class="warn-btns">'
+                     + _kbform(csrf, {"do": "clearlog", "section": section,
+                                      "confirm": "1"},
+                               _btn("Да, очистить журнал", "danger"))
+                     + f'<a class="btn" href="/kb?section={esc(section)}">Отмена</a>'
+                     + '</div>')
+    else:
+        log_html += ('<div class="pbtns">'
+                     + _kbform(csrf, {"do": "clearlog", "section": section},
+                               _btn("🧹 Очистить журнал")) + '</div>')
 
     note = f'<div class="ok-box">{esc(message)}</div>' if message else ""
     head = ('<header><h1>База знаний</h1>'
