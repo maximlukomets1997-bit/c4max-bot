@@ -528,9 +528,11 @@ def page_kb(application, csrf: str = "", section: str = "",
                 mark = "✅" if r["passes"] else "▫️"
                 lex = f' (слова +{r["lex"] * 100:.0f}%)' if r.get("lex") else ""
                 why = "" if r["passes"] else f' — {r.get("reason", "")}'
+                # ⚠️ Округляем, а не обрезаем строку: обрезка «первых четырёх
+                # символов» на ровной сотне давала бы «100.%».
                 lines.append(
                     f'<div class="row"><div class="name">{mark} '
-                    f'{esc(r["similarity"] * 100)[:4]}%{esc(lex)} — '
+                    f'{r["similarity"] * 100:.1f}%{esc(lex)} — '
                     f'{esc(r["title"])}{esc(why)}</div></div>')
             head = (f'Порог {int(round(report["threshold"] * 100))}% · '
                     f'статей в ответ {report["top_k"]} · '
