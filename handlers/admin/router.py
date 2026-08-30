@@ -601,10 +601,14 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         # сайт внутри Telegram и ссылки не требует — там Telegram сам говорит
         # странице, кто пришёл.
         #
-        # ⚠️ ССЫЛКА — ЭТО КЛЮЧ ОТ АДМИНКИ НА ПЯТЬ МИНУТ. Уходит в личку
-        # нажавшему и никуда больше; пересылать её нельзя. Срок и подпись —
-        # web/auth.py::make_login_url.
-        from web.auth import make_login_url
+        # ⚠️ ССЫЛКА — ЭТО КЛЮЧ ОТ АДМИНКИ. Уходит в личку нажавшему и никуда
+        # больше; пересылать её нельзя. Срок и подпись — web/auth.py.
+        #
+        # ⚠️ СРОК БЕРЁТСЯ ИЗ ПЕРЕМЕННОЙ, А НЕ ЧИСЛОМ, и сразу в трёх местах:
+        # в надписи сообщения, в сроке самоудаления и в самой подписи ссылки.
+        # Зашитая «5 минут» пережила бы смену срока и начала бы врать молча —
+        # ровно те же грабли, что с именем модели в логе.
+        from web.auth import LOGIN_LINK_TTL_SEC, make_login_url
         link = make_login_url(user_id)
         if not link:
             await query.answer("❌ Адрес сайта не настроен (WEB_PUBLIC_URL)",
@@ -614,15 +618,26 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await query.answer("Ссылка отправлена в личку")
         # Отдельным сообщением, а не всплывашкой: из всплывашки ссылку не
         # скопировать и не нажать.
-        await context.bot.send_message(
+        minutes = max(1, LOGIN_LINK_TTL_SEC // 60)
+        sent_link = await context.bot.send_message(
             chat_id=user_id,
             text=("🌐 <b>Вход в админку</b>\n\n"
                   f'<a href="{link}">Открыть в браузере</a>\n\n'
-                  "<i>Ссылка работает 5 минут и только для вас. "
+                  f"<i>Ссылка работает {minutes} минут и только для вас. "
                   "Не пересылайте её.</i>"),
             parse_mode=ParseMode.HTML,
             link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
+        # Самоудаление РОВНО ПО СРОКУ ЖИЗНИ ССЫЛКИ (просьба Максима
+        # 30.08.2026): дальше в переписке висел бы мёртвый ключ от админки.
+        # Гигиеной панелей это сообщение убирать нельзя — она снесла бы его
+        # первой же открытой панелью, не дав перейти по ссылке.
+        # ⚠️ Удаление живёт в памяти процесса (utils.schedule_delete):
+        # перезапустится бот в эти минуты — сообщение останется висеть.
+        # Ссылка к тому моменту всё равно уже не работает.
+        if sent_link:
+            schedule_delete(context.bot, user_id, sent_link.message_id,
+                            LOGIN_LINK_TTL_SEC)
         return
 
     if data.startswith("think:"):

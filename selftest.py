@@ -1953,6 +1953,121 @@ def check_web_wiring():
                       f"формы ↔ обработчики, разметка, дайджест")
 
 
+def check_login_link_message():
+    """
+    Сообщение со ссылкой входа само исчезает — и ровно тогда, когда ссылка
+    перестаёт работать (просьба Максима 30.08.2026).
+
+    ⚠️ Ради чего проверка существует. Тут ОДИН срок работает в трёх местах:
+    подпись самой ссылки, надпись «работает N минут» и время самоудаления.
+    Разойдись они — в переписке остался бы висеть мёртвый ключ от админки,
+    либо надпись обещала бы срок, которого нет. Зашитое число такое расхождение
+    даёт молча, поэтому проверка МЕНЯЕТ срок и требует, чтобы за ним поехало
+    и то, и другое.
+
+    Ветка живёт в handlers/admin/router.py и вызывается целиком, с поддельными
+    Telegram-объектами: проверяем поведение, а не текст исходника.
+    """
+    import asyncio
+
+    from services import roles
+    from web import auth as web_auth
+
+    problems = []
+    done = 0
+    OWNER = 4242
+
+    sent = []          # что бот отправил
+    deletes = []       # что поставлено на самоудаление
+
+    class _Msg:
+        message_id = 777
+        chat_id = OWNER
+
+    class _Bot:
+        @staticmethod
+        async def send_message(**kw):
+            sent.append(kw)
+            return _Msg()
+
+    class _Query:
+        data = "web:link"
+        message = _Msg()
+
+        class from_user:
+            id = OWNER
+
+        @staticmethod
+        async def answer(*a, **kw):
+            return None
+
+    class _Update:
+        callback_query = _Query()
+
+    class _Ctx:
+        bot = _Bot()
+        user_data = {}
+
+    import config as cfg
+    import handlers.admin.router as router
+
+    saved = (cfg.WEB_PUBLIC_URL, web_auth.TELEGRAM_TOKEN,
+             web_auth.LOGIN_LINK_TTL_SEC, roles.ADMIN_IDS,
+             dict(roles._cache), roles._loaded, router.schedule_delete)
+    try:
+        cfg.WEB_PUBLIC_URL = "https://проверка.example"
+        web_auth.TELEGRAM_TOKEN = "123456789:AAEeTestTokenForSelfTestOnly"
+        roles.ADMIN_IDS = (OWNER,)
+        roles._cache.clear()
+        roles._loaded = True
+        router.schedule_delete = lambda bot, chat, mid, delay: deletes.append(
+            (chat, mid, delay))
+
+        # ⚠️ Срок берём НЕ ТОТ, что стоит в коде: с настоящими пятью минутами
+        # зашитая «5 минут» прошла бы проверку насквозь.
+        web_auth.LOGIN_LINK_TTL_SEC = 600
+
+        asyncio.run(router.handle_callback_query(_Update(), _Ctx()))
+
+        done += 1
+        if len(sent) != 1:
+            problems.append(f"ссылка входа не отправлена (сообщений: {len(sent)})")
+            return problems, ""
+
+        text = sent[0].get("text", "")
+        done += 1
+        if "Открыть в браузере" not in text:
+            problems.append("в сообщении нет самой ссылки")
+        done += 1
+        if "10 минут" not in text:
+            problems.append(f"надпись не поехала за сроком: ждали «10 минут», "
+                            f"в тексте {text[-90:]!r}")
+
+        done += 1
+        if not deletes:
+            problems.append("сообщение со ссылкой НЕ поставлено на самоудаление — "
+                            "мёртвый ключ от админки останется висеть в переписке")
+        else:
+            chat, mid, delay = deletes[0]
+            done += 3
+            if chat != OWNER:
+                problems.append(f"удаление назначено не в тот чат: {chat}")
+            if mid != _Msg.message_id:
+                problems.append(f"удаление назначено не тому сообщению: {mid}")
+            if delay != 600:
+                problems.append(f"срок самоудаления {delay} не совпал со сроком "
+                                f"жизни ссылки 600")
+    finally:
+        (cfg.WEB_PUBLIC_URL, web_auth.TELEGRAM_TOKEN,
+         web_auth.LOGIN_LINK_TTL_SEC, roles.ADMIN_IDS,
+         cache, roles._loaded, router.schedule_delete) = saved
+        roles._cache.clear()
+        roles._cache.update(cache)
+
+    return problems, (f"{done} проверок: ссылка отправлена, надпись и "
+                      f"самоудаление едут за сроком её жизни")
+
+
 def check_web_auth():
     """
     Вход в веб-админку: пускает ли она того, кого надо, и, ГЛАВНОЕ, отшивает
@@ -2132,6 +2247,7 @@ CHECKS = (
     ("журнал персонала знает все коды действий", check_audit_codes),
     ("страницы сайта показывают то, что нужно", check_web_pages),
     ("сайт: цифры и кнопки не разъехались с источником", check_web_wiring),
+    ("ссылка входа исчезает вместе со своим сроком", check_login_link_message),
     ("вход в веб-админку — подпись и срок", check_web_auth),
 )
 
