@@ -38,6 +38,8 @@
 # ───────────────────────────────────────────────
 
 import os
+import pathlib
+import re
 import sys
 import tempfile
 
@@ -1667,6 +1669,121 @@ def check_prompts_spec():
                       f"сверка с панелью бота и читалками, правка и стирание")
 
 
+def check_audit_codes():
+    """
+    Журнал персонала знает КАЖДЫЙ код действия, который в него пишут.
+
+    ⚠️ Ради чего проверка существует. Код действия — это просто строка в
+    вызове `_audit(...)`. Забыл завести ему подпись в `_ACTION_TITLES` — и
+    журнал молча рисует «❔ quiz_nuke» голым кодом. Ошибка тихая: само
+    действие работает, ломается только его название задним числом, когда
+    кто-то полезет разбираться «кто это сделал».
+
+    Так уже случилось трижды: `thinking` (чинили в v4.83), `quiz_nuke` и
+    `quiz_seed` (нашлись 30.08.2026 при переносе викторины на сайт — их
+    писали с 05.08). Три раза подряд — значит, дело не во внимательности.
+    """
+    from handlers.admin.panel_users import _ACTION_TITLES
+
+    problems = []
+    done = 0
+
+    # Все места, где пишут в журнал: панели бота и действия сайта.
+    files = sorted(pathlib.Path(ROOT, "handlers", "admin").glob("*.py"))
+    files += [pathlib.Path(ROOT, "web", "actions.py")]
+
+    # _audit(user_id, "код", …) / write_audit(…) / _staff_audit(…)
+    pattern = re.compile(r'\b(?:_audit|write_audit|_staff_audit)\('
+                         r'[^,)]+,\s*"([a-z_]+)"')
+    found = {}
+    for path in files:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for code in pattern.findall(text):
+            found.setdefault(code, set()).add(path.name)
+
+    if not found:
+        return ["не нашёл ни одного вызова журнала — проверка сломалась"], ""
+
+    for code, where in sorted(found.items()):
+        done += 1
+        if code not in _ACTION_TITLES:
+            problems.append(f"код «{code}» пишут в журнал ({', '.join(sorted(where))}), "
+                            f"а подписи у него нет — журнал покажет ❔")
+
+    return problems, (f"{done} кодов действий проверено по "
+                      f"{len(files)} файлам, все с подписями")
+
+
+def check_web_pages():
+    """
+    Страницы сайта собираются и показывают то, что нужно.
+
+    ⚠️ Ради чего. Страница — это строка, собранная из данных; опечатка в
+    имени поля не роняет ничего, она просто молча ничего не показывает.
+    Так вышло с верным ответом викторины: страница брала `correct`, а в
+    данных лежит `correct_idx` — вопросы одобрялись бы вслепую, не видя,
+    какой ответ считается правильным. Поэтому проверяем не «собралось ли»,
+    а «видно ли в собранном то, ради чего страницу открывают».
+    """
+    import asyncio
+
+    import database.history as hist
+    from web import pages
+
+    problems = []
+    done = 0
+
+    def expect(title, ok):
+        nonlocal done
+        done += 1
+        if not ok:
+            problems.append(title)
+
+    # ── викторина: верный ответ обязан быть подсвечен ──
+    hist.add_quiz_question("Проверочная статья", "Сколько будет два плюс два?",
+                           ["три", "четыре", "пять", "шесть"], 1, "Потому что.")
+    drafts = hist.list_quiz_questions(approved=False, limit=5)
+    expect("вопрос не попал в банк", bool(drafts))
+    if drafts:
+        html = pages.page_quiz(None, "подпись", mode="draft")
+        expect("вопрос не виден на странице викторины", "два плюс два" in html)
+        # Ровно один вариант помечен верным, и это именно «четыре».
+        marked = re.findall(r'<li class="right">([^<]*)</li>', html)
+        expect(f"верным помечено {marked} вместо ['четыре']", marked == ["четыре"])
+        hist.delete_quiz_question(drafts[0]["id"])
+
+    # ── база знаний: страница собирается и не падает без бота ──
+    html = pages.page_kb(None, "подпись")
+    expect("страница базы знаний не собралась", "База знаний" in html)
+    expect("нет кнопки пересборки указателя", "Пересобрать указатель" in html)
+    expect("нет проверки поиска", "Проверить поиск" in html)
+
+    # ── сводка и промпты ──
+    expect("сводка не собралась", "Админка C4_Max" in pages.page_summary("подпись"))
+    expect("страница промптов не собралась", "Промпты" in pages.page_prompts("подпись"))
+    expect("список людей не собрался", "Пользователи" in pages.page_users("подпись"))
+
+    # ── карточка участника собирается даже на пустом человеке ──
+    card = asyncio.run(pages.page_user_card(None, 999000111, "подпись"))
+    expect("карточка участника не собралась", "Персональные настройки" in card)
+
+    # ── чужой текст экранируется ──
+    # ⚠️ Имя, заголовок статьи и текст вопроса приходят от людей. Символ «<»
+    # в них не должен доезжать до страницы как разметка.
+    hist.add_quiz_question("<b>статья</b>", "<script>alert(1)</script>",
+                           ["<i>раз</i>", "два"], 0, "")
+    html = pages.page_quiz(None, "подпись", mode="draft")
+    expect("чужая разметка доехала до страницы", "<script>alert(1)" not in html)
+    expect("экранированный текст не показан", "&lt;script&gt;" in html)
+    for q in hist.list_quiz_questions(approved=False, limit=5):
+        hist.delete_quiz_question(q["id"])
+
+    return problems, f"{done} проверок: викторина, база знаний, промпты, люди, экранирование"
+
+
 def check_web_auth():
     """
     Вход в веб-админку: пускает ли она того, кого надо, и, ГЛАВНОЕ, отшивает
@@ -1843,6 +1960,8 @@ CHECKS = (
     ("суточный отчёт — расход за период", check_daily_report),
     ("единый список настроек против читалок бота", check_settings_spec),
     ("список промптов против панели бота", check_prompts_spec),
+    ("журнал персонала знает все коды действий", check_audit_codes),
+    ("страницы сайта показывают то, что нужно", check_web_pages),
     ("вход в веб-админку — подпись и срок", check_web_auth),
 )
 

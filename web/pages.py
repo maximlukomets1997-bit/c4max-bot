@@ -390,6 +390,327 @@ _CONTROLS_JS = """
 """
 
 
+# ─── база знаний и викторина (этап 4) ───────────────────────────────
+#
+#  ⚠️ Обе страницы САМИ ПЕРЕЧИТЫВАЮТСЯ, пока идёт долгая работа (пересборка
+#  указателя, сборка вопросов): иначе итог пришлось бы ловить вручную. Как
+#  только работа кончилась, обновление прекращается — незачем дёргать базу.
+
+def _kbform(csrf: str, fields: dict, inner: str, cls: str = "ctl",
+            action: str = "/kb", multipart: bool = False) -> str:
+    hidden = f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+    for name, value in fields.items():
+        hidden += f'<input type="hidden" name="{esc(name)}" value="{esc(value)}">'
+    enc = ' enctype="multipart/form-data"' if multipart else ""
+    return (f'<form method="post" action="{action}" class="{cls}"{enc}>'
+            f'{hidden}{inner}</form>')
+
+
+def _job_box(application, latch: str, what: str) -> tuple:
+    """Полоска состояния долгой работы. Возвращает (html, идёт ли сейчас)."""
+    from . import longjobs
+    if longjobs.is_running(application, latch):
+        return (f'<div class="warnline">⏳ {esc(what)} идёт прямо сейчас. '
+                f'Страница обновляется сама — итог появится здесь.</div>', True)
+    result = longjobs.last_result(application, latch)
+    if result:
+        return f'<div class="ok-box">{esc(result)}</div>', False
+    return "", False
+
+
+def page_kb(application, csrf: str = "", section: str = "",
+            open_article: str = "", confirm: str = "",
+            search: str = "", report=None, message: str = "") -> str:
+    """
+    База знаний: разделы, статьи, загрузка, пересборка указателя, проверка
+    поиска, журнал действий.
+    """
+    from services.knowledge_store import ARTICLE_KINDS, list_articles, read_article
+    from database.history import get_recent_kb_actions
+    from . import actions as web_actions
+
+    articles = list_articles()
+    pending = [a for a in articles if a["folder"] == "pending"]
+    approved = [a for a in articles if a["folder"] == "approved"]
+
+    # ── разделы со счётчиками ──
+    tabs = [("pending", f"🕐 Ждут одобрения ({len(pending)})")]
+    for kind, meta in sorted(ARTICLE_KINDS.items(), key=lambda kv: kv[1]["order"]):
+        count = sum(1 for a in approved if a["kind"] == kind)
+        if count:
+            tabs.append((kind, f'{meta["icon"]} {meta["name"]} ({count})'))
+    if not section:
+        section = "pending" if pending else (tabs[1][0] if len(tabs) > 1 else "pending")
+    tab_html = "".join(
+        (f'<span class="chip on">{esc(label)}</span>' if code == section
+         else f'<a class="chip" href="/kb?section={esc(code)}">{esc(label)}</a>')
+        for code, label in tabs)
+
+    # ── список статей раздела ──
+    if section == "pending":
+        shown = pending
+    else:
+        shown = [a for a in approved if a["kind"] == section]
+    rows = "".join(
+        f'<a class="urow" href="/kb?section={esc(section)}'
+        f'&open={esc(a["folder"])}/{esc(a["fname"])}">'
+        f'<div class="uname">{esc(a["title"])}</div>'
+        f'<div class="note">{esc(a["fname"])}</div></a>'
+        for a in shown)
+    list_html = (f'<div class="ulist">{rows}</div>' if rows
+                 else '<div class="rows"><div class="empty">в этом разделе пусто</div></div>')
+
+    # ── открытая статья ──
+    article_html = ""
+    if open_article and "/" in open_article:
+        folder, _, fname = open_article.partition("/")
+        # ⚠️ Текст статьи читаем ОТДЕЛЬНО от кнопок. Файла может не быть
+        # (удалили в другой вкладке, ошиблись папкой) — но вопрос «точно
+        # удалить?» и кнопка «Отмена» обязаны показаться всё равно, иначе
+        # страница молча превращается в тупик.
+        try:
+            _path, text = read_article(folder, fname)
+            body_html = f'<pre class="article">{esc(text)}</pre>'
+            meta = f'{len(text)} символов · {"ждёт одобрения" if folder == "pending" else "в базе"}'
+        except Exception as e:
+            body_html = (f'<div class="warnline">Текст не открывается: '
+                         f'{esc(e)}</div>')
+            meta = "файла нет на месте"
+        if True:
+            buttons = []
+            if folder == "pending":
+                buttons.append(_kbform(csrf, {"do": "approve", "fname": fname,
+                                              "section": section},
+                                       _btn("✅ Одобрить", "primary")))
+            if confirm == open_article:
+                buttons.append(_kbform(csrf, {"do": "delete", "folder": folder,
+                                              "fname": fname, "section": section,
+                                              "confirm": "1"},
+                                       _btn("Да, удалить насовсем", "danger")))
+                buttons.append(f'<a class="btn" href="/kb?section={esc(section)}'
+                               f'&open={esc(open_article)}">Отмена</a>')
+            else:
+                buttons.append(_kbform(csrf, {"do": "delete", "folder": folder,
+                                              "fname": fname, "section": section},
+                                       _btn("🗑 Удалить")))
+            article_html = (
+                f'<div class="pcard"><div class="phead">'
+                f'<h3>{esc(fname)}</h3>'
+                f'<span class="pmeta">{esc(meta)}</span></div>'
+                f'{body_html}'
+                f'<div class="pbtns">{"".join(buttons)}</div></div>'
+            )
+
+    # ── загрузка, пересборка, проверка поиска ──
+    upload = _kbform(csrf, {"do": "add", "section": section},
+                     '<input type="file" name="file" accept=".md,.txt" required>'
+                     + _btn("Загрузить статью", "primary"),
+                     "ctl pbtns", multipart=True)
+
+    job_html, job_running = _job_box(application,
+                                     web_actions.KB_REBUILD_LATCH,
+                                     "Пересборка указателя")
+    rebuild = _kbform(csrf, {"do": "rebuild", "section": section},
+                      _btn("🔄 Пересобрать указатель"))
+
+    search_form = _kbform(
+        csrf, {"do": "search", "section": section},
+        f'<input type="text" name="q" class="qinput" placeholder="Вопрос, '
+        f'как его задал бы человек" value="{esc(search)}">' + _btn("Найти"),
+        "ctl pbtns")
+    search_html = ""
+    if report is not None:
+        if report.get("error"):
+            search_html = f'<div class="warn-box">{esc(report["error"])}</div>'
+        else:
+            lines = []
+            for r in report["results"]:
+                mark = "✅" if r["passes"] else "▫️"
+                lex = f' (слова +{r["lex"] * 100:.0f}%)' if r.get("lex") else ""
+                why = "" if r["passes"] else f' — {r.get("reason", "")}'
+                lines.append(
+                    f'<div class="row"><div class="name">{mark} '
+                    f'{esc(r["similarity"] * 100)[:4]}%{esc(lex)} — '
+                    f'{esc(r["title"])}{esc(why)}</div></div>')
+            head = (f'Порог {int(round(report["threshold"] * 100))}% · '
+                    f'статей в ответ {report["top_k"]} · '
+                    f'полка {int(round(report.get("baseline", 0) * 100))}%')
+            tail = ("✅ — эти статьи уйдут модели вместе с вопросом."
+                    if any(r["passes"] for r in report["results"])
+                    else "⚠️ Ничего не прошло отбор — модель ответит без базы знаний.")
+            search_html = (f'<div class="note">{esc(head)}</div>'
+                           f'<div class="rows">{"".join(lines)}</div>'
+                           f'<div class="note">{esc(tail)}</div>')
+
+    # ── журнал ──
+    log_rows = "".join(
+        f'<div class="row"><div class="name">{esc(a["action"])}: '
+        f'{esc((a.get("article") or "")[:60])}</div></div>'
+        for a in get_recent_kb_actions(10))
+    log_html = (f'<div class="rows">{log_rows}</div>' if log_rows
+                else '<div class="rows"><div class="empty">журнал пуст</div></div>')
+
+    note = f'<div class="ok-box">{esc(message)}</div>' if message else ""
+    head = ('<header><h1>База знаний</h1>'
+            '<div class="ver"><a href="/">← к сводке</a></div></header>')
+    refresh = ('<meta http-equiv="refresh" content="10">' if job_running else "")
+
+    body = ("<div class=\"wrap\">" + head + note + job_html
+            + f'<div class="chips">{tab_html}</div>'
+            + list_html + article_html
+            + "<h2>Добавить статью</h2>"
+            + '<div class="pcard"><div class="note">Файл .md или .txt. '
+              'Загруженная вручную статья попадает СРАЗУ В БАЗУ, минуя очередь '
+              '— в очереди ждут только новости, которые бот принёс сам. '
+              'Чтобы она заработала в поиске, пересоберите указатель.'
+              '</div>' + upload + '</div>'
+            + "<h2>Поисковый указатель</h2>"
+            + '<div class="pcard"><div class="note">Пересборка считает вектора '
+              'заново по всем статьям. Идёт минутами, бот при этом работает.'
+              '</div><div class="pbtns">' + rebuild + '</div></div>'
+            + "<h2>Проверить поиск</h2>"
+            + '<div class="pcard"><div class="note">Что нашлось бы по такому '
+              'вопросу. Ничего не меняет.</div>' + search_form + search_html + '</div>'
+            + "<h2>Последние действия</h2>" + log_html
+            + '<footer><span><a href="/">← к сводке</a></span></footer></div>')
+    return _shell("База знаний — C4_Max", body).replace(
+        "</head>", refresh + "</head>")
+
+
+def page_quiz(application, csrf: str = "", mode: str = "draft",
+              confirm: str = "", message: str = "") -> str:
+    """Викторина: сводка, сборка вопросов, разбор черновиков, очистка."""
+    from database.history import (get_quiz_bank_counts, list_quiz_questions,
+                                  list_quiz_failures, get_all_quiz_stats,
+                                  get_setting)
+    from services import quiz_bank, quiz_daily
+    from . import actions as web_actions
+
+    counts = get_quiz_bank_counts()
+    kb = quiz_bank.stats()
+    seed = quiz_bank.seed_stats()
+    auto_on = get_setting(quiz_daily.ENABLED_KEY, "0") == "1"
+    players = len(get_all_quiz_stats() or {})
+
+    tiles = (
+        '<div class="grid">'
+        f'<div class="card"><div class="k">Черновики</div>'
+        f'<div class="v">{esc(counts["drafts"])}</div>'
+        f'<div class="sub">ждут одобрения</div></div>'
+        f'<div class="card"><div class="k">В игре</div>'
+        f'<div class="v">{esc(counts["approved"])}</div>'
+        f'<div class="sub">эти вопросы задаются людям</div></div>'
+        f'<div class="card"><div class="k">Статьи без вопросов</div>'
+        f'<div class="v">{esc(kb["articles_left"])}</div>'
+        f'<div class="sub">всего статей в базе: {esc(kb["articles_total"])}</div></div>'
+        f'<div class="card"><div class="k">Не вышло</div>'
+        f'<div class="v">{esc(kb["failed"])}</div>'
+        f'<div class="sub">статей, где сборка сорвалась</div></div>'
+        '</div>'
+    )
+
+    job_html, job_running = _job_box(application, web_actions.QUIZ_GEN_LATCH,
+                                     "Сборка вопросов")
+
+    auto_state = "on" if auto_on else "off"
+    auto = _kbform(csrf, {"do": "auto"},
+                   f'<button type="submit" class="switch {auto_state}">'
+                   f'<span class="knob"></span><span class="lbl">'
+                   f'{"включён" if auto_on else "выключен"}</span></button>',
+                   "ctl sw", action="/quiz")
+    controls = [(f'🕛 Вопрос дня {quiz_daily.hours_label()}',
+                 "бот сам задаёт вопрос в группе по расписанию", auto)]
+    controls.append(("🧠 Собрать вопросы",
+                     "по статьям, у которых вопросов ещё нет; идёт минутами",
+                     _kbform(csrf, {"do": "gen"}, _btn("Собрать", "primary"),
+                             "ctl", action="/quiz")))
+    if kb["failed"]:
+        controls.append(("🔁 Повторить неудачные",
+                         f'статей в очереди: {kb["failed"]}',
+                         _kbform(csrf, {"do": "retry"}, _btn("Повторить"),
+                                 "ctl", action="/quiz")
+                         + _kbform(csrf, {"do": "forget"}, _btn("Забыть список"),
+                                   "ctl", action="/quiz")))
+    if seed["questions"]:
+        controls.append(("📥 Мои вопросы в черновики",
+                         f'написаны вручную, в файле их {seed["questions"]}',
+                         _kbform(csrf, {"do": "seed"}, _btn("Загрузить"),
+                                 "ctl", action="/quiz")))
+
+    # ── опасные кнопки: каждая со своим вопросом ──
+    danger = []
+    for code, title, hint, cond in (
+        ("wipe", "Очистить черновики", "неодобренные вопросы будут стёрты",
+         counts["drafts"]),
+        ("nuke", "Стереть ВСЕ вопросы", "и черновики, и те, что в игре",
+         counts["approved"] or counts["drafts"]),
+        ("zero", "Обнулить статистику игроков",
+         "вопросы не тронет — стираются заслуги людей", players),
+    ):
+        if not cond:
+            continue
+        if confirm == code:
+            control = ('<div class="warn-btns">'
+                       + _kbform(csrf, {"do": code, "confirm": "1"},
+                                 _btn("Да, выполнить", "danger"), "ctl",
+                                 action="/quiz")
+                       + '<a class="btn" href="/quiz">Отмена</a></div>')
+        else:
+            control = _kbform(csrf, {"do": code}, _btn(title), "ctl", action="/quiz")
+        danger.append((title, hint, control))
+
+    # ── список вопросов ──
+    tabs = (f'<a class="chip{" on" if mode == "draft" else ""}" href="/quiz?mode=draft">'
+            f'📝 Черновики ({counts["drafts"]})</a>'
+            f'<a class="chip{" on" if mode == "live" else ""}" href="/quiz?mode=live">'
+            f'✅ В игре ({counts["approved"]})</a>')
+    questions = list_quiz_questions(approved=(mode == "live"), limit=50)
+    cards = []
+    for q in questions:
+        options = q.get("options") or []
+        # ⚠️ Ключ именно correct_idx (database/history.py::_row_to_question).
+        # С «correct» подсветка молча не работала бы — вопросы одобрялись бы
+        # вслепую, не видя, какой ответ считается верным.
+        opts = "".join(
+            f'<li class="{"right" if i == q.get("correct_idx") else ""}">{esc(o)}</li>'
+            for i, o in enumerate(options))
+        buttons = []
+        if mode == "draft":
+            buttons.append(_kbform(csrf, {"do": "ok", "qid": q["id"], "mode": mode},
+                                   _btn("✅ В игру", "primary"), "ctl", action="/quiz"))
+        buttons.append(_kbform(csrf, {"do": "del", "qid": q["id"], "mode": mode},
+                               _btn("🗑 Удалить"), "ctl", action="/quiz"))
+        cards.append(
+            f'<div class="pcard"><div class="phead"><h3>{esc(q["question"])}</h3>'
+            f'<span class="pmeta">#{esc(q["id"])} · {esc(q.get("article", ""))}</span>'
+            f'</div><ol class="opts">{opts}</ol>'
+            f'<div class="pbtns">{"".join(buttons)}</div></div>')
+    list_html = ("".join(cards) if cards
+                 else '<div class="rows"><div class="empty">здесь пусто</div></div>')
+
+    fails = list_quiz_failures(20)
+    fails_html = ""
+    if fails:
+        rows = "".join(
+            f'<div class="row"><div class="name">{esc(f["article"])}'
+            f'<div class="note">{esc(f.get("reason", ""))}</div></div></div>'
+            for f in fails)
+        fails_html = f'<h2>Что не вышло</h2><div class="rows">{rows}</div>'
+
+    note = f'<div class="ok-box">{esc(message)}</div>' if message else ""
+    head = ('<header><h1>Викторина</h1>'
+            '<div class="ver"><a href="/">← к сводке</a></div></header>')
+    refresh = ('<meta http-equiv="refresh" content="10">' if job_running else "")
+
+    body = ("<div class=\"wrap\">" + head + note + job_html + tiles
+            + "<h2>Управление</h2>" + _rows(controls)
+            + f'<h2>Вопросы</h2><div class="chips">{tabs}</div>' + list_html
+            + fails_html
+            + ("<h2>Очистка</h2>" + _rows(danger) if danger else "")
+            + '<footer><span><a href="/">← к сводке</a></span></footer></div>')
+    return _shell("Викторина — C4_Max", body).replace("</head>", refresh + "</head>")
+
+
 # ─── люди: список и карточка (этап 3) ───────────────────────────────
 #
 #  ⚠️ Всё, что показывает карточка, читается ТЕМИ ЖЕ функциями, что и карточка
@@ -832,6 +1153,8 @@ def page_summary(csrf: str = "") -> str:
     nav = ('<div class="nav">'
            '<a href="/prompts">⚙️ Промпты</a>'
            '<a href="/users">👥 Пользователи</a>'
+           '<a href="/kb">📚 База знаний</a>'
+           '<a href="/quiz">🎮 Викторина</a>'
            '</div>')
 
     body = ("<div class=\"wrap\">" + head + tiles + nav

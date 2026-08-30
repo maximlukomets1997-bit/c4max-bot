@@ -1,6 +1,6 @@
 # Структура: файл → что в нём объявлено
 
-Снимок от 2026-08-30 по коду версии v4.88: таблица пересобрана скриптом и
+Снимок от 2026-08-30 по коду версии v4.89: таблица пересобрана скриптом и
 сверена с кодом. Пересобрать:
 
 ```
@@ -14,7 +14,7 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 наружу. Имена с подчёркиванием тоже иногда зовут снаружи — проверяй
 скриптом `impact.py`, а не этим списком.
 
-Всего файлов с кодом: **66**. Отдельных тестовых файлов (`test_*.py`,
+Всего файлов с кодом: **67**. Отдельных тестовых файлов (`test_*.py`,
 `pytest`) по-прежнему **0** — но с 28.08.2026 у проекта есть `selftest.py`:
 проверки поведения в том же стиле, что `preflight.py`, без сторонних
 библиотек. Он не заменяет ручной прогон (проверяет функции по отдельности,
@@ -31,7 +31,7 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 | `utils_format.py` | 313 | 8 | `strip_thoughts`, `thoughts_enabled`, `build_text_and_entities`, `send_formatted`, `convert_md`, `fits_caption`, `reply_md` |
 | `logging_setup.py` | 248 | 3 | `archive_old_logs`, `setup_logging` |
 | `preflight.py` | 675 | 0 | `check_imports`, `check_models`, `check_providers`, `check_tables`, `check_ranks`, `check_callbacks`, `check_panels`, `check_handlers`, `check_web`, `main` |
-| `selftest.py` | 1900 | 0 | проверки ПОВЕДЕНИЯ (28.08.2026), 16 групп: `check_money`, `check_price_list`, `check_mute_tag`, `check_permissions`, `check_thoughts`, `check_long_answers`, `check_wait_budgets`, `check_album_not_flood`, `check_album_collect`, `check_time_keys`, `check_rag_pick`, `check_quiz_ranks`, `check_daily_report`, `check_settings_spec`, `check_prompts_spec`, `check_web_auth`, `main`. Отвечает на «правильно ли считает», тогда как `preflight.py` — на «запустится ли». Зовётся из `deploy.sh` и CI, красный откатывает выкатку |
+| `selftest.py` | 2019 | 0 | проверки ПОВЕДЕНИЯ (28.08.2026), 18 групп: `check_money`, `check_price_list`, `check_mute_tag`, `check_permissions`, `check_thoughts`, `check_long_answers`, `check_wait_budgets`, `check_album_not_flood`, `check_album_collect`, `check_time_keys`, `check_rag_pick`, `check_quiz_ranks`, `check_daily_report`, `check_settings_spec`, `check_prompts_spec`, `check_audit_codes`, `check_web_pages`, `check_web_auth`, `main`. Отвечает на «правильно ли считает», тогда как `preflight.py` — на «запустится ли». Зовётся из `deploy.sh` и CI, красный откатывает выкатку |
 | `reset_db.py` | 81 | 0 | `main` |
 | `watchdog_local.py` | 297 | 0 | `main` |
 
@@ -112,7 +112,7 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 | `jobs/rag.py` | 85 | `rag_catchup_loop` |
 | `jobs/web.py` | 71 | `web_loop` — поднимает сайт внутри процесса бота |
 
-## `web/` — веб-админка (30.08.2026, этапы 0–3)
+## `web/` — веб-админка (30.08.2026, этапы 0–4)
 
 Сайт живёт внутри процесса бота; как он подключён и почему именно так —
 `references/wiring.md`, раздел «Веб-админка».
@@ -120,10 +120,10 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 | файл | строк | публичные имена |
 |---|---:|---|
 | `web/__init__.py` | 21 | re-export `ROUTES`, `build_app` |
-| `web/routes.py` | 370 | `ROUTES` — единственный список адресов; `build_app`, `index`, `apply`, `prompts`, `users`, `user_card`, `enter`, `exit_`, `health` |
+| `web/routes.py` | 560 | `ROUTES` — единственный список адресов; `build_app`, `index`, `apply`, `prompts`, `kb`, `quiz`, `users`, `user_card`, `enter`, `exit_`, `health` |
 | `web/auth.py` | 263 | `check_webapp`, `check_widget`, `is_allowed`, `make_session`, `read_session`, `make_login_token`, `read_login_token`, `make_login_url`, `csrf_for`, `csrf_ok`, `current_user` |
-| `web/pages.py` | 845 | `esc`, `page_login`, `page_denied`, `page_summary`, `page_prompts`, `page_users`, `page_user_card` |
-| `web/actions.py` | 426 | `ActionError`, `apply_setting`, `apply_prompt`, `apply_model`, `apply_image_model`, `apply_thinking`, `user_adjust`, `user_toggle`, `user_reset_settings`, `user_reset_violations`, `user_clear_history`, `user_rank`, `user_role`, `user_perm`, `user_moderate` — правка с сайта делает ВСЁ то же, что нажатие кнопки |
+| `web/pages.py` | 1168 | `esc`, `page_login`, `page_denied`, `page_summary`, `page_prompts`, `page_users`, `page_user_card`, `page_kb`, `page_quiz` |
+| `web/actions.py` | 645 | `ActionError`, `apply_setting`, `apply_prompt`, `apply_model`, `apply_image_model`, `apply_thinking`, `user_adjust`, `user_toggle`, `user_reset_settings`, `user_reset_violations`, `user_clear_history`, `user_rank`, `user_role`, `user_perm`, `user_moderate`, `kb_add`, `kb_replace`, `kb_approve`, `kb_delete`, `kb_rebuild`, `kb_test_search`, `kb_clear_log`, `quiz_generate`, `quiz_approve`, `quiz_delete`, `quiz_forget_fails`, `quiz_seed`, `quiz_wipe_drafts`, `quiz_nuke`, `quiz_zero`, `quiz_auto_toggle` — правка с сайта делает ВСЁ то же, что нажатие кнопки |
 | `web/static/style.css` | — | оформление; ни одного адреса со стороны |
 
 ## Прочее

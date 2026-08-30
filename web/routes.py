@@ -151,6 +151,192 @@ async def prompts(request):
                            content_type="text/html")
 
 
+async def kb(request):
+    """
+    База знаний: GET показывает, POST выполняет одно действие.
+
+    ⚠️ Пересборка указателя уходит в фон под ОБЩЕЙ с ботом защёлкой — два
+    прогона по одним файлам дали бы половину указателя.
+    """
+    csrf = auth.csrf_for(request.cookies.get(WEB_COOKIE_NAME))
+    application = request.app.get("tg")
+
+    if request.method == "GET":
+        page = pages.page_kb(application, csrf,
+                             section=request.query.get("section", ""),
+                             open_article=request.query.get("open", ""))
+        return aioweb.Response(text=page, content_type="text/html")
+
+    form = await request.post()
+    if not auth.csrf_ok(request, str(form.get("csrf", ""))):
+        logger.warning("🌐 Действие с базой знаний отклонено: подпись формы не сошлась")
+        return aioweb.Response(text=pages.page_kb(application, csrf),
+                               content_type="text/html", status=403)
+
+    actor_id = auth.current_user(request)
+    do = str(form.get("do", ""))
+    section = str(form.get("section", ""))
+    open_article, confirm, search, report, message = "", "", "", None, ""
+    bad = False
+
+    try:
+        if do == "add":
+            field = form.get("file")
+            if field is None or not getattr(field, "filename", ""):
+                raise actions.ActionError("файл не выбран")
+            raw = field.file.read()
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                raise actions.ActionError("файл не в кодировке UTF-8")
+            fname = actions.kb_add(actor_id, field.filename, text)
+            # ⚠️ add_article кладёт файл СРАЗУ В ОДОБРЕННЫЕ (так же, как
+            # кнопка «➕ Добавить RAG» в боте): файл прислал сам владелец,
+            # ждать одобрения не у кого. В очереди ждут только новости,
+            # которые бот принёс с сайта сам.
+            message = (f"➕ Статья добавлена в базу: {fname}. "
+                       f"Чтобы она заработала в поиске — пересоберите указатель.")
+            section, open_article = "", f"approved/{fname}"
+
+        elif do == "approve":
+            fname = str(form.get("fname", ""))
+            actions.kb_approve(actor_id, fname)
+            message = f"✅ Статья одобрена: {fname}"
+
+        elif do == "delete":
+            folder = str(form.get("folder", ""))
+            fname = str(form.get("fname", ""))
+            if str(form.get("confirm", "")) != "1":
+                # Файл стирается насовсем — спрашиваем, как и кнопка в боте.
+                page = pages.page_kb(application, csrf, section=section,
+                                     open_article=f"{folder}/{fname}",
+                                     confirm=f"{folder}/{fname}")
+                return aioweb.Response(text=page, content_type="text/html")
+            actions.kb_delete(actor_id, folder, fname)
+            message = f"🗑 Статья удалена: {fname}"
+
+        elif do == "rebuild":
+            message = actions.kb_rebuild(actor_id, application)
+
+        elif do == "search":
+            search = str(form.get("q", "")).strip()
+            if not search:
+                raise actions.ActionError("вопрос пустой")
+            # Эмбеддинг запроса — сетевой вызов, уводим в рабочий поток:
+            # в цикле бота он заморозил бы ответы всем.
+            import asyncio
+            report = await asyncio.get_running_loop().run_in_executor(
+                None, actions.kb_test_search, search)
+            open_article = ""
+
+        elif do == "clearlog":
+            deleted = actions.kb_clear_log(actor_id)
+            message = f"🧹 Журнал очищен: {deleted} записей."
+
+        else:
+            raise actions.ActionError(f"неизвестное действие «{do}»")
+
+    except actions.ActionError as e:
+        message, bad = f"Не вышло: {e}", True
+        logger.warning("🌐 База знаний, действие «%s» не принято: %s", do, e)
+    except Exception as e:
+        message, bad = f"Не вышло: {e}", True
+        logger.error("🌐 База знаний, действие «%s» сорвалось: %s", do, e)
+
+    page = pages.page_kb(application, csrf, section=section,
+                         open_article=open_article, confirm=confirm,
+                         search=search, report=report,
+                         message="" if bad else message)
+    if bad:
+        page = page.replace('<div class="wrap">',
+                            f'<div class="wrap"><div class="warn-box">'
+                            f'{pages.esc(message)}</div>', 1)
+    return aioweb.Response(text=page, content_type="text/html",
+                           status=400 if bad else 200)
+
+
+# Действия викторины, которые стирают данные и потому спрашивают подтверждение.
+_QUIZ_CONFIRM = ("wipe", "nuke", "zero")
+
+
+async def quiz(request):
+    """Викторина: GET показывает, POST выполняет одно действие."""
+    csrf = auth.csrf_for(request.cookies.get(WEB_COOKIE_NAME))
+    application = request.app.get("tg")
+
+    if request.method == "GET":
+        page = pages.page_quiz(application, csrf,
+                               mode=request.query.get("mode", "draft"))
+        return aioweb.Response(text=page, content_type="text/html")
+
+    form = await request.post()
+    if not auth.csrf_ok(request, str(form.get("csrf", ""))):
+        logger.warning("🌐 Действие с викториной отклонено: подпись формы не сошлась")
+        return aioweb.Response(text=pages.page_quiz(application, csrf),
+                               content_type="text/html", status=403)
+
+    actor_id = auth.current_user(request)
+    do = str(form.get("do", ""))
+    mode = str(form.get("mode", "draft")) or "draft"
+
+    if do in _QUIZ_CONFIRM and str(form.get("confirm", "")) != "1":
+        page = pages.page_quiz(application, csrf, mode=mode, confirm=do)
+        return aioweb.Response(text=page, content_type="text/html")
+
+    message, bad = "", False
+    try:
+        message = _run_quiz_action(actor_id, do, form, application)
+    except actions.ActionError as e:
+        message, bad = f"Не вышло: {e}", True
+        logger.warning("🌐 Викторина, действие «%s» не принято: %s", do, e)
+    except Exception as e:
+        message, bad = f"Не вышло: {e}", True
+        logger.error("🌐 Викторина, действие «%s» сорвалось: %s", do, e)
+
+    page = pages.page_quiz(application, csrf, mode=mode,
+                           message="" if bad else message)
+    if bad:
+        page = page.replace('<div class="wrap">',
+                            f'<div class="wrap"><div class="warn-box">'
+                            f'{pages.esc(message)}</div>', 1)
+    return aioweb.Response(text=page, content_type="text/html",
+                           status=400 if bad else 200)
+
+
+def _run_quiz_action(actor_id: int, do: str, form, application) -> str:
+    """Одно действие викторины. Возвращает строку о том, что вышло."""
+    if do == "auto":
+        on = actions.quiz_auto_toggle(actor_id)
+        return f'🕛 Вопрос дня {"включён" if on else "выключен"}.'
+    if do == "gen":
+        return actions.quiz_generate(actor_id, application)
+    if do == "retry":
+        return actions.quiz_generate(actor_id, application, retry=True)
+    if do == "forget":
+        return f"🗑 Список неудачных очищен: {actions.quiz_forget_fails(actor_id)}."
+    if do == "seed":
+        result = actions.quiz_seed(actor_id)
+        return (f'📥 Загружено в черновики: {result.get("added", 0)}, '
+                f'пропущено повторов: {result.get("skipped", 0)}.')
+    if do in ("ok", "del"):
+        try:
+            qid = int(form.get("qid", ""))
+        except (TypeError, ValueError):
+            raise actions.ActionError("не понял, какой вопрос")
+        if do == "ok":
+            actions.quiz_approve(actor_id, qid)
+            return f"✅ Вопрос #{qid} ушёл в игру."
+        actions.quiz_delete(actor_id, qid)
+        return f"🗑 Вопрос #{qid} удалён."
+    if do == "wipe":
+        return f"🧹 Черновиков стёрто: {actions.quiz_wipe_drafts(actor_id)}."
+    if do == "nuke":
+        return f"🗑 Стёрто вопросов: {actions.quiz_nuke(actor_id)}."
+    if do == "zero":
+        return f"🧹 Обнулено игроков: {actions.quiz_zero(actor_id)}."
+    raise actions.ActionError(f"неизвестное действие «{do}»")
+
+
 async def users(request):
     """Список всех, кого знает бот."""
     csrf = auth.csrf_for(request.cookies.get(WEB_COOKIE_NAME))
@@ -326,6 +512,10 @@ ROUTES = (
     ("POST", "/set",     apply,   "owner"),
     ("GET",  "/prompts", prompts, "owner"),
     ("POST", "/prompts", prompts, "owner"),
+    ("GET",  "/kb",      kb,      "owner"),
+    ("POST", "/kb",      kb,      "owner"),
+    ("GET",  "/quiz",    quiz,    "owner"),
+    ("POST", "/quiz",    quiz,    "owner"),
     ("GET",  "/users",   users,   "owner"),
     ("GET",  "/users/{uid}", user_card, "owner"),
     ("POST", "/users/{uid}", user_card, "owner"),

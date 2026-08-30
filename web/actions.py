@@ -373,6 +373,225 @@ async def user_moderate(actor_id: int, target_id: int, act: str, chat_id: int,
     return done
 
 
+# ─── база знаний ────────────────────────────────────────────────────
+#
+#  ⚠️ Статьи — ФАЙЛЫ на сервере (папка knowledge/), а не строки в базе. Через
+#  GitHub они не ездят: новая статья появляется ТОЛЬКО там, где её добавили.
+#  Значит, добавленное с сайта живёт на сервере и в домашней копии не
+#  появится — так же, как у кнопки в боте.
+
+KB_REBUILD_LATCH = "kb_rebuild_running"
+
+
+def kb_add(actor_id: int, file_name: str, text: str) -> str:
+    """Новая статья из присланного файла. Возвращает имя, под которым легла."""
+    from services.knowledge_store import add_article
+    from database.history import add_kb_action
+    if not file_name.lower().endswith((".md", ".txt")):
+        raise ActionError("нужен файл .md или .txt")
+    if not text.strip():
+        raise ActionError("файл пустой")
+    fname = add_article(file_name, text)
+    add_kb_action("добавлена статья", fname, actor_id)
+    logger.info("🌐 Сайт: добавлена статья %s (админ %s)", fname, actor_id)
+    return fname
+
+
+def kb_replace(actor_id: int, folder: str, fname: str, text: str) -> None:
+    """Замена текста существующей статьи."""
+    from services.knowledge_store import replace_article
+    from database.history import add_kb_action
+    if not text.strip():
+        raise ActionError("пустым текстом статью не заменяют")
+    replace_article(folder, fname, text)
+    add_kb_action("заменена статья", fname, actor_id)
+    logger.info("🌐 Сайт: заменена статья %s (админ %s)", fname, actor_id)
+
+
+def kb_approve(actor_id: int, fname: str) -> str:
+    """Одобрение статьи: из очереди в базу."""
+    from services.knowledge_store import approve_article
+    from database.history import add_kb_action
+    new_path = approve_article(fname)
+    add_kb_action("одобрена статья", fname, actor_id)
+    logger.info("🌐 Сайт: одобрена статья %s (админ %s)", fname, actor_id)
+    return new_path
+
+
+def kb_delete(actor_id: int, folder: str, fname: str) -> None:
+    """Удаление статьи. Файл стирается насовсем — подтверждение спрашивает страница."""
+    from services.knowledge_store import delete_article
+    from database.history import add_kb_action
+    delete_article(folder, fname)
+    add_kb_action("удалена статья", fname, actor_id)
+    logger.info("🌐 Сайт: удалена статья %s/%s (админ %s)", folder, fname, actor_id)
+
+
+def kb_clear_log(actor_id: int) -> int:
+    """Очистка журнала действий базы знаний."""
+    from database.history import clear_kb_log
+    deleted = clear_kb_log()
+    logger.info("🌐 Сайт: очищен журнал базы знаний, %d записей (админ %s)",
+                deleted, actor_id)
+    return deleted
+
+
+def kb_rebuild(actor_id: int, application) -> str:
+    """
+    Полная пересборка поискового указателя, фоном.
+
+    ⚠️ Защёлка ОБЩАЯ с кнопкой в боте — два прогона разом дали бы половину
+    указателя. См. web/longjobs.py.
+    """
+    from . import longjobs
+    from services.rag import rebuild_knowledge_base
+    from database.history import add_kb_action
+
+    def describe(result):
+        if result is None or result[1] == 0:
+            return "⚠️ Не удалось пересобрать — база пуста или произошла ошибка."
+        indexed, total = result
+        add_kb_action("пересборка базы", f"проиндексировано {indexed} из {total}",
+                      actor_id)
+        if indexed >= total:
+            return f"✅ Указатель пересобран: {indexed} из {total}."
+        return (f"⚠️ Упёрлись в лимит Google: {indexed} из {total}. "
+                f"Недостающее бот доберёт сам или нажмите ещё раз позже.")
+
+    logger.info("🌐 Сайт: запущена пересборка базы знаний (админ %s)", actor_id)
+    return longjobs.start(application, KB_REBUILD_LATCH, rebuild_knowledge_base,
+                          describe)
+
+
+def kb_test_search(text: str) -> dict:
+    """
+    Проверка поиска: что нашлось бы по такому вопросу. Ничего не меняет.
+    Сетевой вызов (эмбеддинг запроса) — зовущий обязан увести его в поток.
+    """
+    from services import rag
+    return rag.test_search(text)
+
+
+# ─── викторина ──────────────────────────────────────────────────────
+
+QUIZ_GEN_LATCH = "quiz_gen_running"
+
+
+def quiz_generate(actor_id: int, application, retry: bool = False) -> str:
+    """
+    Сборка вопросов по статьям, фоном. retry=True — только те статьи, на
+    которых сборка раньше сорвалась.
+
+    ⚠️ Защёлка ОБЩАЯ с кнопкой в боте: два прогона разом дали бы вопросы-дубли.
+    """
+    from . import longjobs
+    from services import quiz_bank
+
+    kb = quiz_bank.stats()
+    todo = kb["failed"] if retry else kb["articles_left"]
+    if not todo:
+        return ("✅ Список неудачных пуст — повторять нечего." if retry else
+                "✅ По всем статьям вопросы уже собраны.")
+
+    def describe(result):
+        if result is None:
+            return "⚠️ Сборка сорвалась. Подробности в логе бота."
+        # В журнал — ПОСЛЕ завершения и тем же кодом, что у кнопки в боте:
+        # запись «собраны вопросы» до окончания работы была бы неправдой.
+        _staff_audit(actor_id, "quiz_retry" if retry else "quiz_generate", 0,
+                     f"статей {result.get('articles', 0)}, "
+                     f"вопросов {result.get('added', 0)}")
+        return (f"✅ Готово: статей {result.get('articles', 0)}, "
+                f"вопросов добавлено {result.get('added', 0)}, "
+                f"не вышло {result.get('failed', 0)}.")
+
+    logger.info("🌐 Сайт: запущена %s вопросов (статей %d, админ %s)",
+                "ПОВТОРНАЯ сборка" if retry else "сборка", todo, actor_id)
+    work = quiz_bank.retry_failed if retry else quiz_bank.generate_batch
+    return longjobs.start(application, QUIZ_GEN_LATCH, work, describe)
+
+
+def quiz_approve(actor_id: int, qid: int) -> None:
+    """Одобрение вопроса: черновик уходит в игру."""
+    from database.history import get_quiz_question, set_quiz_question_approved
+    if not get_quiz_question(qid):
+        raise ActionError(f"вопроса №{qid} нет")
+    set_quiz_question_approved(qid, True)
+    _staff_audit(actor_id, "quiz_approve", 0, f"вопрос #{qid}")
+    logger.info("🌐 Сайт: одобрен вопрос викторины №%s (админ %s)", qid, actor_id)
+
+
+def quiz_delete(actor_id: int, qid: int) -> None:
+    """Удаление вопроса — насовсем."""
+    from database.history import delete_quiz_question, get_quiz_question
+    if not get_quiz_question(qid):
+        raise ActionError(f"вопроса №{qid} нет")
+    delete_quiz_question(qid)
+    _staff_audit(actor_id, "quiz_delete", 0, f"вопрос #{qid}")
+    logger.info("🌐 Сайт: удалён вопрос викторины №%s (админ %s)", qid, actor_id)
+
+
+def quiz_forget_fails(actor_id: int) -> int:
+    """Забыть список статей, на которых сборка срывалась."""
+    from database.history import clear_quiz_failures
+    removed = clear_quiz_failures()
+    _staff_audit(actor_id, "quiz_forget_fails", 0, f"забыто статей: {removed}")
+    logger.info("🌐 Сайт: забыты неудачные статьи (%d, админ %s)", removed, actor_id)
+    return removed
+
+
+def quiz_seed(actor_id: int) -> dict:
+    """Загрузка эталонного набора вопросов В ЧЕРНОВИКИ (не сразу в игру)."""
+    from services import quiz_bank
+    result = quiz_bank.load_seed(approved=False)
+    _staff_audit(actor_id, "quiz_seed", 0, f"добавлено {result.get('added', 0)}")
+    logger.info("🌐 Сайт: загружен эталонный набор вопросов (%s, админ %s)",
+                result, actor_id)
+    return result
+
+
+def quiz_wipe_drafts(actor_id: int) -> int:
+    """Стереть все черновики вопросов."""
+    from database.history import delete_quiz_drafts
+    removed = delete_quiz_drafts()
+    _staff_audit(actor_id, "quiz_wipe", 0, f"черновиков удалено: {removed}")
+    logger.info("🌐 Сайт: стёрты черновики вопросов (%d, админ %s)", removed, actor_id)
+    return removed
+
+
+def quiz_nuke(actor_id: int) -> int:
+    """Стереть ВСЕ вопросы — и черновики, и те, что в игре."""
+    from database.history import delete_all_quiz_questions
+    removed = delete_all_quiz_questions()
+    _staff_audit(actor_id, "quiz_nuke", 0, f"стёрто вопросов: {removed}")
+    logger.info("🌐 Сайт: СТЁРТЫ ВСЕ вопросы викторины (%d, админ %s)",
+                removed, actor_id)
+    return removed
+
+
+def quiz_zero(actor_id: int) -> int:
+    """Обнулить статистику ИГРОКОВ. Вопросы не трогает."""
+    from database.history import reset_all_quiz_stats
+    removed = reset_all_quiz_stats()
+    _staff_audit(actor_id, "quiz_zero", 0, f"обнулено игроков: {removed}")
+    logger.info("🌐 Сайт: обнулена статистика игроков викторины (%d, админ %s)",
+                removed, actor_id)
+    return removed
+
+
+def quiz_auto_toggle(actor_id: int) -> bool:
+    """Тумблер «Вопрос дня». Возвращает новое состояние."""
+    from database.history import get_setting, set_setting
+    from services import quiz_daily
+    new_val = "0" if get_setting(quiz_daily.ENABLED_KEY, "0") == "1" else "1"
+    set_setting(quiz_daily.ENABLED_KEY, new_val)
+    _staff_audit(actor_id, "quiz_auto", 0,
+                 f"вопрос дня {'включён' if new_val == '1' else 'выключен'}")
+    logger.info("🌐 Сайт: вопрос дня %s (админ %s)",
+                "включён" if new_val == "1" else "выключен", actor_id)
+    return new_val == "1"
+
+
 # ─── выбор модели ───────────────────────────────────────────────────
 
 def apply_model(user_id: int, key: str) -> str:

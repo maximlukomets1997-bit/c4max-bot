@@ -349,3 +349,33 @@ textarea:focus { border-color: var(--accent); }
 
 /* Карточка человека длинная — заголовки разделов держим заметными. */
 .wrap h2 { margin-top: 30px; }
+
+/* ─── база знаний и викторина (этап 4) ─────────────────────────────── */
+
+.article {
+  max-height: 420px; overflow: auto;
+  background: var(--card-2); border: 1px solid var(--line);
+  border-radius: 10px; padding: 12px 14px; margin: 10px 0 0;
+  font: 13px/1.55 ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  white-space: pre-wrap; word-break: break-word;
+}
+
+.qinput {
+  flex: 1; min-width: 200px;
+  background: var(--card-2); color: var(--text);
+  border: 1px solid var(--line); border-radius: 10px;
+  padding: 9px 12px; font: inherit; font-size: 14px; outline: none;
+}
+.qinput:focus { border-color: var(--accent); }
+
+input[type="file"] {
+  color: var(--dim); font: inherit; font-size: 13px;
+  max-width: 100%;
+}
+
+/* Варианты ответа: верный подсвечен — иначе одобрять вопросы вслепую. */
+.opts { margin: 10px 0 0; padding-left: 22px; }
+.opts li { padding: 2px 0; color: var(--dim); }
+.opts li.right { color: var(--ok); font-weight: 620; }
+
+a.chip { text-decoration: none; }
