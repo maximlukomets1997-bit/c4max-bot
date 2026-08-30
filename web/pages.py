@@ -390,6 +390,182 @@ _CONTROLS_JS = """
 """
 
 
+# ─── деньги, отчёты, обслуживание (этап 5) ──────────────────────────
+
+def _sysform(csrf: str, fields: dict, inner: str, cls: str = "ctl") -> str:
+    hidden = f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+    for name, value in fields.items():
+        hidden += f'<input type="hidden" name="{esc(name)}" value="{esc(value)}">'
+    return f'<form method="post" action="/system" class="{cls}">{hidden}{inner}</form>'
+
+
+def _money_block(csrf: str) -> str:
+    """
+    Счета, счётчики «потрачено» и квоты токенов — каждое поле своим окошком.
+
+    ⚠️ Поля и разбор числа берутся из панели бота
+    (`panel_balance._balance_field`): второй разборщик «5,32» и «1 000 000»
+    разъехался бы с первым.
+    """
+    from handlers.admin.panel_balance import (_BALANCE_FIELDS, _COST_FIELDS,
+                                              _balance_field, _qwen_model_keys,
+                                              _value_str)
+
+    ids = [pid for pid in _BALANCE_FIELDS]
+    ids += [f"cost:{pid}" for pid in _COST_FIELDS]
+    ids += [f"qwen:{m}" for m in _qwen_model_keys()]
+
+    items = []
+    for field_id in ids:
+        info = _balance_field(field_id)
+        if not info:
+            continue
+        now = _value_str(info["key"], info["kind"], info["absent"])
+        # Разметку Telegram из значения убираем — здесь она не к месту.
+        now = now.replace("<b>", "").replace("</b>", "")
+        control = _sysform(
+            csrf, {"do": "money", "field": field_id},
+            f'<input type="text" name="value" class="qinput short" '
+            f'placeholder="{esc(info["example"])}">' + _btn("Записать"),
+            "ctl pbtns")
+        items.append((info["title"].title(), f'сейчас: {now} · «−» — {info["clear"]}',
+                      control))
+    return "<h2>💰 Счета и квоты</h2>" + _rows(items)
+
+
+def page_system(application, csrf: str = "", confirm: str = "",
+                report: str = "", report_text: str = "",
+                digest_chat: int = 0, digest_body: str = "",
+                message: str = "", bad: bool = False) -> str:
+    """Деньги, отчёты, логи, обновления, дайджест, копия базы, перезапуск."""
+    from database.history import get_known_chats
+    from services import backup, group_digest, update_log
+    from handlers.admin import common as adm_common
+    from handlers.admin.panel_users import _chat_title
+
+    note = ""
+    if message:
+        note = f'<div class="{"warn-box" if bad else "ok-box"}">{esc(message)}</div>'
+
+    # ── отчёты ──
+    rep_items = [
+        ("📊 Отчёт за вчера", "последний суточный отчёт о расходах",
+         _sysform(csrf, {"do": "report", "kind": "day"}, _btn("Показать"))),
+        ("📅 Отчёт за неделю", "последний недельный отчёт",
+         _sysform(csrf, {"do": "report", "kind": "week"}, _btn("Показать"))),
+    ]
+    rep_html = "<h2>📊 Отчёты</h2>" + _rows(rep_items)
+    if report_text:
+        rep_html += f'<div class="pcard"><pre class="article">{esc(report_text)}</pre></div>'
+    elif report:
+        rep_html += ('<div class="rows"><div class="empty">отчёта ещё нет — '
+                     'он появится после первой полуночи</div></div>')
+
+    # ── логи ──
+    _cur_path, cur_raw = adm_common._read_current_log()
+    _arc_path, arc_raw = adm_common._read_archive_log()
+    log_items = [
+        ("📜 Лог этого запуска", f'{backup.human_size(len(cur_raw))}',
+         f'<a class="btn" href="/download?what=log">Скачать</a>'),
+        ("🗄 Архив прошлых запусков",
+         f'{backup.human_size(len(arc_raw))} · '
+         f'запусков: {adm_common._count_archive_sessions(arc_raw)}',
+         f'<a class="btn" href="/download?what=archive">Скачать</a>'),
+    ]
+    log_html = "<h2>📜 Логи</h2>" + _rows(log_items)
+    if cur_raw:
+        tail = cur_raw.decode("utf-8", errors="replace").splitlines()[-40:]
+        log_html += (f'<div class="pcard"><div class="note">Последние 40 строк:'
+                     f'</div><pre class="article">{esc(chr(10).join(tail))}</pre></div>')
+
+    # ── обновления ──
+    upd_html = "<h2>⬇️ Обновления</h2>"
+    try:
+        items = update_log.recent(15) if update_log.available() else []
+    except Exception as e:
+        logger.debug("🌐 Не удалось прочитать историю обновлений: %s", e)
+        items = []
+    if items:
+        # ⚠️ Надпись собирает та же функция, что и кнопки в боте
+        # (`panel_updates._label`): она умеет не повторять номер версии дважды
+        # и подставлять её из git там, где в названии её нет. Своя сборка
+        # разъехалась бы с кнопками на первой же особенности.
+        from handlers.admin.panel_updates import _label
+        rows = "".join(
+            f'<div class="row"><div class="name">'
+            f'<a href="{esc(u.get("url", ""))}" target="_blank" '
+            f'rel="noopener noreferrer">{esc(_label(u))}</a></div></div>'
+            for u in items)
+        upd_html += f'<div class="rows">{rows}</div>'
+    else:
+        upd_html += ('<div class="rows"><div class="empty">история недоступна — '
+                     'git не отвечает или это не рабочая копия</div></div>')
+
+    # ── дайджест ──
+    dig_on = group_digest.is_enabled()
+    dig_items = [("📊 Еженедельный дайджест", "приходит владельцу в личку по понедельникам",
+                  _sysform(csrf, {"do": "digest_toggle"},
+                           f'<button type="submit" class="switch '
+                           f'{"on" if dig_on else "off"}"><span class="knob"></span>'
+                           f'<span class="lbl">{"включён" if dig_on else "выключен"}'
+                           f'</span></button>', "ctl sw"))]
+    chats = get_known_chats() or []
+    for chat in chats:
+        cid = chat["chat_id"]
+        controls = _sysform(csrf, {"do": "digest_show", "chat": cid}, _btn("Показать"))
+        if confirm == f"digest:{cid}":
+            controls += ('<div class="warn-btns">'
+                         + _sysform(csrf, {"do": "digest_send", "chat": cid,
+                                           "confirm": "1"},
+                                    _btn("Да, отправить в группу", "danger"))
+                         + '<a class="btn" href="/system">Отмена</a></div>')
+        else:
+            controls += _sysform(csrf, {"do": "digest_send", "chat": cid},
+                                 _btn("📤 В группу"))
+        dig_items.append((_chat_title(cid),
+                          "отправка увидят ВСЕ участники чата", controls))
+    dig_html = "<h2>📊 Дайджест недели</h2>" + _rows(dig_items)
+    if digest_body:
+        dig_html += (f'<div class="pcard"><div class="phead"><h3>'
+                     f'{esc(_chat_title(digest_chat))}</h3></div>'
+                     f'<pre class="article">{esc(digest_body)}</pre></div>')
+
+    # ── копия базы ──
+    copies = backup.list_backups()
+    copy_html = ("<h2>💾 Копия базы</h2>" + _rows([
+        ("Снять копию сейчас",
+         f'ночных копий на сервере: {len(copies)}',
+         _sysform(csrf, {"do": "backup"}, _btn("Снять и скачать", "primary"))),
+    ]))
+
+    # ── опасное ──
+    danger = []
+    for code, title, hint, label in (
+        ("wipe", "🧹 Очистить РАЗГОВОРЫ",
+         "бот забудет переписку во ВСЕХ группах сразу", "Очистить"),
+        ("restart", "🔄 Перезапустить бота",
+         "сайт живёт внутри бота и пропадёт на несколько секунд — "
+         "поднимется сам", "Перезапустить"),
+    ):
+        if confirm == code:
+            control = ('<div class="warn-btns">'
+                       + _sysform(csrf, {"do": code, "confirm": "1"},
+                                  _btn("Да, выполнить", "danger"))
+                       + '<a class="btn" href="/system">Отмена</a></div>')
+        else:
+            control = _sysform(csrf, {"do": code}, _btn(label))
+        danger.append((title, hint, control))
+    danger_html = "<h2>⚠️ Опасное</h2>" + _rows(danger)
+
+    head = ('<header><h1>Обслуживание</h1>'
+            '<div class="ver"><a href="/">← к сводке</a></div></header>')
+    body = ("<div class=\"wrap\">" + head + note
+            + _money_block(csrf) + rep_html + log_html + upd_html
+            + dig_html + copy_html + danger_html
+            + '<footer><span><a href="/">← к сводке</a></span></footer></div>')
+    return _shell("Обслуживание — C4_Max", body)
+
+
 # ─── база знаний и викторина (этап 4) ───────────────────────────────
 #
 #  ⚠️ Обе страницы САМИ ПЕРЕЧИТЫВАЮТСЯ, пока идёт долгая работа (пересборка
@@ -1157,6 +1333,7 @@ def page_summary(csrf: str = "") -> str:
            '<a href="/users">👥 Пользователи</a>'
            '<a href="/kb">📚 База знаний</a>'
            '<a href="/quiz">🎮 Викторина</a>'
+           '<a href="/system">⚙️ Обслуживание</a>'
            '</div>')
 
     body = ("<div class=\"wrap\">" + head + tiles + nav

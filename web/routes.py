@@ -151,6 +151,128 @@ async def prompts(request):
                            content_type="text/html")
 
 
+async def system(request):
+    """
+    Обслуживание: деньги, отчёты, логи, обновления, дайджест, копия базы,
+    очистка разговоров, перезапуск.
+
+    ⚠️ Три действия спрашивают подтверждение: отправка дайджеста В ГРУППУ
+    (её увидят все участники), очистка разговоров (общая на все чаты) и
+    перезапуск (он гасит сам сайт).
+    """
+    csrf = auth.csrf_for(request.cookies.get(WEB_COOKIE_NAME))
+    application = request.app.get("tg")
+
+    if request.method == "GET":
+        return aioweb.Response(text=pages.page_system(application, csrf),
+                               content_type="text/html")
+
+    form = await request.post()
+    if not auth.csrf_ok(request, str(form.get("csrf", ""))):
+        logger.warning("🌐 Действие обслуживания отклонено: подпись формы не сошлась")
+        return aioweb.Response(text=pages.page_system(application, csrf),
+                               content_type="text/html", status=403)
+
+    actor_id = auth.current_user(request)
+    do = str(form.get("do", ""))
+    confirmed = str(form.get("confirm", "")) == "1"
+
+    # Что требует подтверждения. Дайджест — по каждому чату отдельно.
+    if do in ("wipe", "restart") and not confirmed:
+        return aioweb.Response(text=pages.page_system(application, csrf, confirm=do),
+                               content_type="text/html")
+    if do == "digest_send" and not confirmed:
+        page = pages.page_system(application, csrf,
+                                 confirm=f'digest:{form.get("chat", "")}')
+        return aioweb.Response(text=page, content_type="text/html")
+
+    message, bad = "", False
+    kwargs = {}
+    try:
+        if do == "money":
+            message = actions.balance_set(actor_id, str(form.get("field", "")),
+                                          str(form.get("value", "")))
+        elif do == "report":
+            kind = str(form.get("kind", "day"))
+            kwargs = {"report": kind, "report_text": actions.report_text(kind)}
+        elif do == "digest_toggle":
+            on = actions.digest_toggle(actor_id)
+            message = f'📊 Еженедельный дайджест {"включён" if on else "выключен"}.'
+        elif do == "digest_show":
+            chat_id = int(form.get("chat", ""))
+            # Сбор дайджеста читает архив группы — уводим в рабочий поток.
+            import asyncio
+            text, _title = await asyncio.get_running_loop().run_in_executor(
+                None, actions.digest_text, chat_id)
+            kwargs = {"digest_chat": chat_id, "digest_body": text}
+        elif do == "digest_send":
+            message = await actions.digest_send(actor_id, int(form.get("chat", "")),
+                                                application)
+        elif do == "backup":
+            path, size = actions.make_backup(actor_id)
+            from services import backup as bk
+            message = (f"💾 Копия снята: {os.path.basename(path)}, "
+                       f"{bk.human_size(size)}. Ссылка на скачивание — ниже.")
+            kwargs = {}
+            return aioweb.HTTPSeeOther("/download?what=backup")
+        elif do == "wipe":
+            message = actions.wipe_conversations(actor_id)
+        elif do == "restart":
+            message = await actions.restart_bot(actor_id, application)
+        else:
+            raise actions.ActionError(f"неизвестное действие «{do}»")
+    except actions.ActionError as e:
+        message, bad = f"Не вышло: {e}", True
+        logger.warning("🌐 Обслуживание, действие «%s» не принято: %s", do, e)
+    except Exception as e:
+        message, bad = f"Не вышло: {e}", True
+        logger.error("🌐 Обслуживание, действие «%s» сорвалось: %s", do, e)
+
+    page = pages.page_system(application, csrf, message=message, bad=bad, **kwargs)
+    return aioweb.Response(text=page, content_type="text/html",
+                           status=400 if bad else 200)
+
+
+# Что можно скачать и откуда это берётся. ⚠️ Список ЗАКРЫТЫЙ и путь наружу
+# не принимается: иначе адрес вида ?what=../../.env отдал бы ключи.
+_DOWNLOADS = ("log", "archive", "chatlog", "backup")
+
+
+async def download(request):
+    """Отдаёт файл: лог, архив логов, запись разговора или копию базы."""
+    what = request.query.get("what", "")
+    if what not in _DOWNLOADS:
+        raise aioweb.HTTPNotFound()
+
+    from handlers.admin import common as adm_common
+
+    if what == "log":
+        path, raw = adm_common._read_current_log()
+    elif what == "archive":
+        path, raw = adm_common._read_archive_log()
+    elif what == "chatlog":
+        from services import chat_log
+        path, raw = adm_common._read_file_bytes(chat_log.current_path())
+    else:
+        from services import backup
+        copies = backup.list_backups()
+        if not copies:
+            raise aioweb.HTTPNotFound()
+        newest = os.path.join(backup.backup_dir(), copies[0][0])
+        path, raw = adm_common._read_file_bytes(newest)
+
+    if not raw:
+        return aioweb.Response(text="Файла нет или он пуст.",
+                               content_type="text/plain", status=404)
+
+    name = os.path.basename(path or what)
+    logger.info("🌐 Сайт: скачан файл %s (%d байт)", name, len(raw))
+    return aioweb.Response(
+        body=raw,
+        headers={"Content-Disposition": f'attachment; filename="{name}"'},
+        content_type="application/octet-stream")
+
+
 async def kb(request):
     """
     База знаний: GET показывает, POST выполняет одно действие.
@@ -512,6 +634,9 @@ ROUTES = (
     ("POST", "/set",     apply,   "owner"),
     ("GET",  "/prompts", prompts, "owner"),
     ("POST", "/prompts", prompts, "owner"),
+    ("GET",  "/system",  system,  "owner"),
+    ("POST", "/system",  system,  "owner"),
+    ("GET",  "/download", download, "owner"),
     ("GET",  "/kb",      kb,      "owner"),
     ("POST", "/kb",      kb,      "owner"),
     ("GET",  "/quiz",    quiz,    "owner"),

@@ -592,6 +592,178 @@ def quiz_auto_toggle(actor_id: int) -> bool:
     return new_val == "1"
 
 
+# ─── деньги, отчёты, обслуживание (этап 5) ──────────────────────────
+
+def balance_set(actor_id: int, field_id: str, raw: str) -> str:
+    """
+    Правка остатка на счету, счётчика «потрачено» или квоты токенов.
+
+    ⚠️ Разбор числа и описание полей взяты ИЗ ПАНЕЛИ БОТА
+    (`panel_balance._balance_field`, `_parse_number`) — второй разборщик
+    «5,32», «$ 5.32» и «1 000 000» разъехался бы с первым.
+
+    ⚠️ ПРОЧЕРК УБИРАЕТ ЗНАЧЕНИЕ СОВСЕМ, а не обнуляет. Разница
+    принципиальная: пока ключа нет, вычитание расхода его не находит и ничего
+    не портит, а с нулём остаток ушёл бы в минус с первого же запроса.
+    """
+    from handlers.admin.panel_balance import (_balance_field, _money_str,
+                                              _parse_number, _tokens_str,
+                                              _value_str)
+    from database.history import delete_setting
+
+    info = _balance_field(field_id)
+    if not info:
+        raise ActionError(f"неизвестное поле «{field_id}»")
+
+    was = _value_str(info["key"], info["kind"], info["absent"])
+    raw = (raw or "").strip()
+
+    if raw in ("-", "–", "—"):
+        delete_setting(info["key"])
+        _staff_audit(actor_id, "balance", 0, f"{info['short']}: убрано")
+        logger.info("🌐 Сайт: убрано значение %s (было %s, админ %s)",
+                    info["key"], was, actor_id)
+        return f"{info['short']}: было {was} → стало «{info['absent']}»"
+
+    value, err = _parse_number(raw, info["kind"])
+    if value is None:
+        raise ActionError(err)
+
+    set_setting(info["key"],
+                str(int(value)) if info["kind"] == "tokens" else f"{value:.6f}")
+    shown = _tokens_str(value) if info["kind"] == "tokens" else _money_str(value)
+    _staff_audit(actor_id, "balance", 0, f"{info['short']}: стало {shown}")
+    logger.info("🌐 Сайт: %s = %s (было %s, админ %s)",
+                info["key"], value, was, actor_id)
+    return f"{info['short']}: было {was} → стало {shown}"
+
+
+def report_text(kind: str) -> str:
+    """
+    Сохранённый текст отчёта: «вчера» или «неделя». Разметку Telegram убираем —
+    страница показывает обычный текст.
+    """
+    from services import daily_report
+    import re as _re
+    text = (daily_report.last_report_text() if kind == "day"
+            else daily_report.last_weekly_text()) or ""
+    return _re.sub(r"</?[a-zA-Z][^>]*>", "", text)
+
+
+def make_backup(actor_id: int) -> tuple:
+    """
+    Свежая копия базы. Возвращает (путь, размер).
+
+    ⚠️ Снимается ЧЕРЕЗ sqlite3.Connection.backup (services/backup.py), а не
+    копированием файла: база в режиме WAL, и часть свежих записей лежит в
+    журнале — простой `cp` дал бы неполную копию.
+    """
+    from services import backup
+    path, size = backup.make_backup()
+    logger.info("🌐 Сайт: снята копия базы %s (%s, админ %s)",
+                path, backup.human_size(size), actor_id)
+    return path, size
+
+
+def digest_text(chat_id: int) -> tuple:
+    """Текст недельного дайджеста группы. Возвращает (текст, название группы)."""
+    from services import group_digest
+    from handlers.admin.panel_users import _chat_title
+    title = _chat_title(chat_id)
+    data = group_digest.collect(chat_id)
+    return group_digest.render(data, title), title
+
+
+async def digest_send(actor_id: int, chat_id: int, application) -> str:
+    """
+    Отправка дайджеста В ГРУППУ.
+
+    ⚠️ Это ПУБЛИЧНОЕ сообщение всем участникам чата от имени бота —
+    подтверждение спрашивает страница, как и кнопка в боте.
+    """
+    if application is None:
+        raise ActionError("нет доступа к боту — дайджест не отправлен")
+    from telegram.constants import ParseMode
+    text, title = digest_text(chat_id)
+    await application.bot.send_message(chat_id=chat_id, text=text,
+                                       parse_mode=ParseMode.HTML)
+    _staff_audit(actor_id, "digest", 0, f"отправлен в {title}")
+    logger.info("🌐 Сайт: дайджест отправлен в %s (админ %s)", title, actor_id)
+    return f"📤 Дайджест отправлен в «{title}»."
+
+
+def digest_toggle(actor_id: int) -> bool:
+    """Тумблер понедельничной отправки дайджеста владельцу."""
+    from services import group_digest
+    new_val = "0" if group_digest.is_enabled() else "1"
+    set_setting(group_digest.ENABLED_KEY, new_val)
+    _staff_audit(actor_id, "digest", 0,
+                 f"еженедельный дайджест {'включён' if new_val == '1' else 'выключен'}")
+    logger.info("🌐 Сайт: еженедельный дайджест %s (админ %s)",
+                "включён" if new_val == "1" else "выключен", actor_id)
+    return new_val == "1"
+
+
+def wipe_conversations(actor_id: int) -> str:
+    """
+    «Очистить РАЗГОВОРЫ» — бот забывает переписку во ВСЕХ группах.
+
+    ⚠️ ЗДЕСЬ ТРИ ШАГА, И НИ ОДИН НЕ ЛИШНИЙ (сверено с
+    handlers/admin/panel_prompts.py::_handle_proactive_wipe):
+      1. черта в базе — с неё бот начинает считать разговор заново;
+      2. сброс счётчиков В ПАМЯТИ — без него проверка сработает по уже
+         пустой стенограмме;
+      3. закрытие файла записи разговора — текущий уезжает в архив, чтобы
+         запись совпадала с той памятью, которая у бота осталась.
+    Пропустишь любой — очистка будет неполной и молча.
+    """
+    from database.history import set_proactive_reset_mark
+    from services.proactive import forget_conversations
+    from services import chat_log
+
+    mark = set_proactive_reset_mark()
+    forget_conversations()
+    chat_log.close_session()   # тихий шаг: не переложилось — очистка всё равно была
+    _staff_audit(actor_id, "proactive_wipe", 0, "бот забыл разговоры во всех группах")
+    logger.info("🌐 Сайт: бот забыл разговоры во всех группах (черта %s UTC, админ %s)",
+                mark, actor_id)
+    return "🧹 Готово: бот забыл разговоры во всех группах."
+
+
+async def restart_bot(actor_id: int, application) -> str:
+    """
+    Перезапуск бота.
+
+    ⚠️ САЙТ ЖИВЁТ ВНУТРИ БОТА и умрёт вместе с ним — страница обязана об этом
+    предупредить до нажатия. Через несколько секунд бот поднимется, и сайт
+    вернётся сам.
+    ⚠️ Пометка `shutdown_reason` обязательна: по ней хук остановки не шлёт
+    «остановлен вручную», а main.py поднимает новую копию.
+    """
+    if application is None:
+        raise ActionError("нет доступа к боту — перезапуск невозможен")
+    import asyncio
+
+    application.bot_data["shutdown_reason"] = "restart"
+    # ⚠️ В журнал персонала перезапуск НЕ пишется — его не пишет туда и кнопка
+    # «🔄 ПЕРЕЗАПУСК» в боте (сверено по handlers/admin/router.py). Завести
+    # запись «заодно» значит сделать так, что одно и то же действие оставляет
+    # след из одного места и не оставляет из другого.
+    logger.info("🌐 Сайт: запрошен перезапуск бота (админ %s)", actor_id)
+
+    async def _stop():
+        # Даём странице уйти к человеку до того, как процесс остановится.
+        await asyncio.sleep(1.5)
+        try:
+            application.stop_running()
+        except Exception as e:
+            logger.error("⚠️ Не удалось остановить бота для перезапуска: %s", e)
+
+    application.create_task(_stop())
+    return ("🔄 Перезапускаюсь. Сайт сейчас пропадёт на несколько секунд — "
+            "это нормально, он поднимется сам.")
+
+
 # ─── выбор модели ───────────────────────────────────────────────────
 
 def apply_model(user_id: int, key: str) -> str:

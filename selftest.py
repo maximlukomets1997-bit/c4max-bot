@@ -1770,6 +1770,19 @@ def check_web_pages():
     card = asyncio.run(pages.page_user_card(None, 999000111, "подпись"))
     expect("карточка участника не собралась", "Персональные настройки" in card)
 
+    # ── обслуживание: все разделы на месте ──
+    sys_html = pages.page_system(None, "подпись")
+    for title in ("Счета и квоты", "Отчёты", "Логи", "Обновления",
+                  "Дайджест недели", "Копия базы", "Опасное"):
+        expect(f"на странице обслуживания нет раздела «{title}»",
+               title in sys_html)
+
+    # ⚠️ Список скачиваемого ЗАКРЫТЫЙ. Открой его для произвольного пути — и
+    # адрес вида ?what=../../.env отдал бы ключи от всех нейросетей.
+    from web.routes import _DOWNLOADS
+    expect(f"в список скачивания попало лишнее: {_DOWNLOADS}",
+           set(_DOWNLOADS) == {"log", "archive", "chatlog", "backup"})
+
     # ── чужой текст экранируется ──
     # ⚠️ Имя, заголовок статьи и текст вопроса приходят от людей. Символ «<»
     # в них не должен доезжать до страницы как разметка.
@@ -1781,7 +1794,8 @@ def check_web_pages():
     for q in hist.list_quiz_questions(approved=False, limit=5):
         hist.delete_quiz_question(q["id"])
 
-    return problems, f"{done} проверок: викторина, база знаний, промпты, люди, экранирование"
+    return problems, (f"{done} проверок: викторина, база знаний, промпты, "
+                      f"люди, обслуживание, экранирование")
 
 
 def check_web_auth():

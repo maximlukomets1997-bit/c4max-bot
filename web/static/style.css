@@ -379,3 +379,7 @@ input[type="file"] {
 .opts li.right { color: var(--ok); font-weight: 620; }
 
 a.chip { text-decoration: none; }
+
+/* ─── обслуживание (этап 5) ─────────────────────────────────────────── */
+.qinput.short { min-width: 120px; max-width: 160px; flex: 0 0 auto; }
+.rows .row a.btn { white-space: nowrap; }
