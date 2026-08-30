@@ -17,8 +17,10 @@
 #  однажды подставят чужой текст, находится само.
 # ───────────────────────────────────────────────
 
+import hashlib
 import html
 import logging
+import os
 
 from config import (AUTO_UPDATE_ENABLED_DEFAULT, AVAILABLE_IMAGE_MODELS,
                     AVAILABLE_MODELS, BOT_VERSION, BOT_VERSION_URL,
@@ -30,6 +32,48 @@ logger = logging.getLogger(__name__)
 
 def esc(value) -> str:
     return html.escape(str(value), quote=True)
+
+
+# ─── версия файла оформления ────────────────────────────────────────
+#
+#  ⚠️ ЗАЧЕМ ЭТО ЕСТЬ. 30.08.2026 Максим сообщил: выбрана тёмная тема, а сайт
+#  показывает светлую. Сервер при этом отдавал всё верно — в настройке стояло
+#  «dark», на странице не было пометки светлой темы, файл оформления был
+#  свежий. Показывал светлую БРАУЗЕР: у него лежала утренняя копия
+#  style.css — та, что ещё подстраивалась под систему. Заголовка про кэш у
+#  файла не было вовсе, адрес не менялся, и браузер имел полное право держать
+#  старую копию сколько угодно.
+#
+#  Лечение из двух частей, обе нужны:
+#   • в адресе файла стоит его ОТПЕЧАТОК — поменялось содержимое, поменялся
+#     адрес, и старая копия просто не подходит;
+#   • ответы на /static/ помечены «перепроверяй» (см. web/routes.py).
+#
+#  Отпечаток пересчитывается, когда у файла меняется время правки или размер:
+#  один stat() на отрисовку страницы, зато правка оформления видна сразу и
+#  без перезапуска бота.
+
+_CSS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "static", "style.css")
+_css_stamp = {"key": None, "version": "0"}
+
+
+def css_version() -> str:
+    """Короткий отпечаток файла оформления — им помечается его адрес."""
+    try:
+        info = os.stat(_CSS_PATH)
+        key = (info.st_mtime_ns, info.st_size)
+    except OSError:
+        return _css_stamp["version"]
+    if key != _css_stamp["key"]:
+        try:
+            with open(_CSS_PATH, "rb") as f:
+                data = f.read()
+        except OSError:
+            return _css_stamp["version"]
+        _css_stamp["key"] = key
+        _css_stamp["version"] = hashlib.md5(data).hexdigest()[:10]
+    return _css_stamp["version"]
 
 
 def plain(text: str) -> str:
@@ -90,7 +134,7 @@ def _shell(title: str, body: str) -> str:
         f"<meta name=\"color-scheme\" content=\"{theme}\">"
         f"<meta name=\"theme-color\" content=\"{bar}\">"
         f"<title>{esc(title)}</title>"
-        "<link rel=\"stylesheet\" href=\"/static/style.css\">"
+        f"<link rel=\"stylesheet\" href=\"/static/style.css?v={css_version()}\">"
         "</head><body>" + body + "</body></html>"
     )
 

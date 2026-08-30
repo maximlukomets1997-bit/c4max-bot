@@ -719,6 +719,33 @@ def _guard(handler):
     return wrapped
 
 
+@aioweb.middleware
+async def _cache_headers(request, handler):
+    """
+    Говорит браузеру, как обращаться с тем, что мы отдали.
+
+    ⚠️ ЭТО НЕ ОПТИМИЗАЦИЯ, А ИСПРАВЛЕНИЕ ОШИБКИ. 30.08.2026 сайт показывал
+    светлую тему при выбранной тёмной: у браузера лежала утренняя копия
+    style.css, а заголовка про кэш у неё не было вовсе — и он имел полное
+    право её не перепроверять.
+
+      • /static/ — «no-cache»: держи копию, но КАЖДЫЙ раз спрашивай, не
+        устарела ли. Спрос дешёвый: сервер отвечает «не менялось» без тела.
+      • страницы админки — «no-store»: не храни вовсе. Они собираются из
+        живых данных, и показанная из кэша страница врала бы о положении
+        тумблеров. Заодно админка не остаётся в памяти браузера после выхода.
+    """
+    response = await handler(request)
+    try:
+        if request.path.startswith("/static/"):
+            response.headers["Cache-Control"] = "no-cache"
+        else:
+            response.headers["Cache-Control"] = "no-store"
+    except Exception as e:      # у некоторых ответов заголовки уже отправлены
+        logger.debug("🌐 Не удалось выставить заголовок кэша: %s", e)
+    return response
+
+
 def build_app(application=None):
     """
     Собирает aiohttp-приложение по ROUTES. Отдельной функцией — чтобы то же
@@ -728,7 +755,7 @@ def build_app(application=None):
     группам при выключении «Сам в разговор». Без него (в проверках) сайт
     работает, объявление молча пропускается с записью в лог.
     """
-    app = aioweb.Application()
+    app = aioweb.Application(middlewares=[_cache_headers])
     app["tg"] = application
     for method, path, handler, access in ROUTES:
         app.router.add_route(method, path,

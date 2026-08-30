@@ -1932,6 +1932,62 @@ def check_web_pages():
             problems.append(f"возврат по адресу {raw!r} дал {_safe_back(raw)!r}, "
                             f"а должен {want!r}")
 
+    # ── браузер не может показать устаревшее оформление ──
+    # ⚠️ ЭТО НЕ ТЕОРИЯ. 30.08.2026 сайт показывал светлую тему при выбранной
+    # тёмной: сервер отдавал всё верно, а браузер держал утреннюю копию
+    # style.css — заголовка про кэш у неё не было вовсе, адрес не менялся.
+    # Поэтому проверяются ОБЕ части лечения: отпечаток в адресе и заголовок.
+    import asyncio as _a
+    import hashlib as _hl
+
+    import aiohttp as _ah
+    from aiohttp import web as _aw
+
+    from web import build_app
+
+    page = pages.page_summary("подпись")
+    done += 1
+    if "/static/style.css?v=" not in page:
+        problems.append("адрес оформления без отпечатка — браузер вправе "
+                        "показывать старую копию сколько угодно")
+
+    # Отпечаток обязан считаться ПО СОДЕРЖИМОМУ: иначе он не сменится, когда
+    # оформление поправят, и старая копия так и останется у браузера.
+    real = _hl.md5(pathlib.Path(ROOT, "web", "static",
+                                "style.css").read_bytes()).hexdigest()[:10]
+    done += 1
+    if f"style.css?v={real}" not in page:
+        problems.append(f"отпечаток в адресе оформления не совпал с самим "
+                        f"файлом (ждали {real})")
+
+    async def _headers():
+        runner = _aw.AppRunner(build_app(None), access_log=None)
+        await runner.setup()
+        site = _aw.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = runner.addresses[0][1]
+        out = {}
+        try:
+            async with _ah.ClientSession() as s:
+                async with s.get(f"http://127.0.0.1:{port}/static/style.css") as r:
+                    out["static"] = r.headers.get("Cache-Control", "")
+                async with s.get(f"http://127.0.0.1:{port}/health") as r:
+                    out["page"] = r.headers.get("Cache-Control", "")
+        finally:
+            await runner.cleanup()
+        return out
+
+    got = _a.run(_headers())
+    done += 1
+    if got.get("static") != "no-cache":
+        problems.append(f"оформление отдаётся с Cache-Control "
+                        f"{got.get('static')!r} — браузер не будет "
+                        f"перепроверять, не устарело ли")
+    done += 1
+    if got.get("page") != "no-store":
+        problems.append(f"страницы отдаются с Cache-Control {got.get('page')!r} — "
+                        f"из кэша покажется устаревшее положение тумблеров")
+
     # ── чужой текст экранируется ──
     # ⚠️ Имя, заголовок статьи и текст вопроса приходят от людей. Символ «<»
     # в них не должен доезжать до страницы как разметка.
