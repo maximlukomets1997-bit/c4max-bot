@@ -79,8 +79,10 @@ async def apply(request):
         logger.warning("🌐 Правка не принята: %s", e)
         return _answer(request, {"ok": False, "error": str(e)}, 400)
 
-    # Выбор из ряда кнопок меняет подсветку соседей — проще перерисовать всё.
-    return _answer(request, {"ok": True, "reload": True})
+    # Выбор из ряда кнопок меняет подсветку соседей — проще перерисовать всё,
+    # вернувшись на ТУ ЖЕ страницу (поле back верхней полосы).
+    return _answer(request, {"ok": True, "reload": True},
+                   back=form.get("back"))
 
 
 def _setting_answer(key: str, shown: str) -> dict:
@@ -100,11 +102,34 @@ def _setting_answer(key: str, shown: str) -> dict:
     return answer
 
 
-def _answer(request, payload: dict, status: int = 200):
-    """JSON — сценарию страницы, переброс на главную — обычной форме."""
+def _safe_back(raw) -> str:
+    """
+    Куда вернуть человека после правки. Пускаем ТОЛЬКО свой путь.
+
+    ⚠️ Без этой проверки поле формы стало бы дырой: адрес вида
+    `back=https://чужой.сайт` увёл бы владельца с админки на чужую страницу,
+    и выглядело бы это как обычное нажатие своей же кнопки. Отсюда три
+    условия: путь начинается с одной косой черты (не с двух — «//чужой.сайт»
+    браузер считает чужим адресом) и без двоеточия, чтобы не проехало
+    «javascript:».
+    """
+    path = str(raw or "")
+    if path.startswith("/") and not path.startswith("//") and ":" not in path:
+        return path
+    return "/"
+
+
+def _answer(request, payload: dict, status: int = 200, back=None):
+    """
+    JSON — сценарию страницы, переброс — обычной форме.
+
+    back нужен кнопкам, которые стоят НЕ на сводке (выбор темы в верхней
+    полосе): без него смена темы со страницы промптов выбрасывала бы оттуда
+    на главную.
+    """
     if "application/json" in request.headers.get("Accept", ""):
         return aioweb.json_response(payload, status=status)
-    return aioweb.HTTPSeeOther("/")
+    return aioweb.HTTPSeeOther(_safe_back(back))
 
 
 async def prompts(request):

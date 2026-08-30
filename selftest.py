@@ -1858,6 +1858,80 @@ def check_web_pages():
     finally:
         _h.set_setting(pages.THEME_SETTING_KEY, saved_theme)
 
+    # ── верхняя полоса есть на КАЖДОЙ странице и ведёт во все разделы ──
+    # ⚠️ Полоса собирается в каждой странице отдельным вызовом. Забудешь её
+    # в новой странице — с неё будет некуда уйти, кроме как «назад» браузером,
+    # и заметишь это только руками. Поэтому проверяем каждую поимённо.
+    import asyncio as _aio
+
+    made = {
+        "/":        lambda: pages.page_summary("подпись"),
+        "/prompts": lambda: pages.page_prompts("подпись"),
+        "/users":   lambda: pages.page_users("подпись"),
+        "/kb":      lambda: pages.page_kb(None, "подпись"),
+        "/quiz":    lambda: pages.page_quiz(None, "подпись"),
+        "/system":  lambda: pages.page_system(None, "подпись"),
+    }
+    for where, build in made.items():
+        html_page = build()
+        done += 1
+        if 'class="topbar"' not in html_page:
+            problems.append(f"на странице {where} нет верхней полосы")
+            continue
+        for href, _label in pages.NAV:
+            if href == where:
+                # Свой раздел подсвечен и не нажимается.
+                done += 1
+                if f'<span class="navlink on">' not in html_page:
+                    problems.append(f"на {where} свой раздел не подсвечен")
+            elif f'href="{href}"' not in html_page:
+                problems.append(f"на странице {where} нет кнопки раздела {href}")
+        done += 1
+        if "Вид" not in html_page:
+            problems.append(f"на странице {where} нет выбора темы")
+
+    # ⚠️ СПИСОК РАЗДЕЛОВ СВЕРЯЕТСЯ С АДРЕСАМИ САЙТА, а не сам с собой. Иначе
+    # убранный из списка раздел просто исчезает со всех страниц, а проверка,
+    # берущая ожидания из того же списка, этого не замечает (поймано подломом).
+    from web.routes import ROUTES
+    # Страницы с навигацией — это все владельческие GET-адреса, кроме
+    # действий (выход, скачивание) и подстраниц с номером в адресе.
+    page_routes = {p for m, p, _h, a in ROUTES
+                   if m == "GET" and a == "owner"
+                   and "{" not in p and p not in ("/exit", "/download")}
+    nav_hrefs = {href for href, _ in pages.NAV}
+    done += 1
+    for extra in sorted(page_routes - nav_hrefs):
+        problems.append(f"страница {extra} есть, а кнопки раздела к ней нет")
+    for orphan in sorted(nav_hrefs - page_routes):
+        problems.append(f"в полосе есть кнопка {orphan}, а такой страницы нет")
+
+    # ⚠️ Кнопка темы несёт адрес возврата: без него смена темы с любой
+    # страницы, кроме сводки, выбрасывала бы на сводку.
+    kb_page = pages.page_kb(None, "подпись")
+    done += 1
+    if 'name="back" value="/kb"' not in kb_page:
+        problems.append("кнопка темы на странице базы знаний не помнит, "
+                        "куда вернуться")
+
+    # ── возврат пускает только свой путь ──
+    # ⚠️ Поле формы задаёт адрес перехода. Пропусти чужой — и владельца уведёт
+    # с админки на чужую страницу по нажатию собственной кнопки.
+    from web.routes import _safe_back
+    for raw, want in (
+        ("/kb", "/kb"),
+        ("/users/123", "/users/123"),
+        ("https://чужой.сайт", "/"),
+        ("//чужой.сайт", "/"),
+        ("javascript:alert(1)", "/"),
+        ("", "/"),
+        (None, "/"),
+    ):
+        done += 1
+        if _safe_back(raw) != want:
+            problems.append(f"возврат по адресу {raw!r} дал {_safe_back(raw)!r}, "
+                            f"а должен {want!r}")
+
     # ── чужой текст экранируется ──
     # ⚠️ Имя, заголовок статьи и текст вопроса приходят от людей. Символ «<»
     # в них не должен доезжать до страницы как разметка.

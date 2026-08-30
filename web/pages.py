@@ -210,16 +210,59 @@ def _neighbour(key: str, steps: int):
     return int(value)
 
 
-def _chips(csrf: str, what: str, options: list, current) -> str:
-    """Ряд взаимоисключающих кнопок: активная подсвечена и не нажимается."""
+def _chips(csrf: str, what: str, options: list, current, back: str = "") -> str:
+    """
+    Ряд взаимоисключающих кнопок: активная подсвечена и не нажимается.
+
+    back — куда вернуть человека после нажатия. Нужен кнопкам, которые стоят
+    НЕ на главной: без него `/set` уводит на сводку, и смена темы со страницы
+    промптов выбрасывала бы оттуда.
+    """
     out = []
     for key, label in options:
         if key == current:
             out.append(f'<span class="chip on">{esc(label)}</span>')
         else:
+            extra = (f'<input type="hidden" name="back" value="{esc(back)}">'
+                     if back else "")
             out.append(_form(csrf, what, key, "1", "chipform",
+                             extra +
                              f'<button type="submit" class="chip">{esc(label)}</button>'))
     return '<div class="chips">' + "".join(out) + "</div>"
+
+
+# ─── верхняя полоса: разделы и вид ──────────────────────────────────
+#
+#  ⚠️ ОДИН СПИСОК РАЗДЕЛОВ НА ВЕСЬ САЙТ. Раньше кнопки разделов стояли только
+#  на сводке и только посреди страницы: с «Промптов» на «Пользователей» было
+#  не перейти, не вернувшись назад. Теперь полоса рисуется на КАЖДОЙ странице
+#  (просьба Максима 30.08.2026). Новый раздел дописывать сюда — и он появится
+#  сразу везде.
+
+NAV = (
+    ("/",        "📊 Сводка"),
+    ("/prompts", "⚙️ Промпты"),
+    ("/users",   "👥 Пользователи"),
+    ("/kb",      "📚 База знаний"),
+    ("/quiz",    "🎮 Викторина"),
+    ("/system",  "🛠 Обслуживание"),
+)
+
+
+def _topbar(csrf: str, active: str = "") -> str:
+    """
+    Полоса под заголовком: кнопки разделов слева, выбор темы справа.
+    active — адрес текущей страницы, её кнопка подсвечена и не нажимается.
+    """
+    links = "".join(
+        (f'<span class="navlink on">{esc(label)}</span>' if href == active
+         else f'<a class="navlink" href="{href}">{esc(label)}</a>')
+        for href, label in NAV)
+    theme = _chips(csrf, "theme", [(code, label) for code, label, _ in THEMES],
+                   current_theme(), back=active or "/")
+    return (f'<div class="topbar"><nav class="nav">{links}</nav>'
+            f'<div class="themepick"><span class="note">Вид</span>{theme}</div>'
+            f'</div>')
 
 
 def _rows(items) -> str:
@@ -249,14 +292,6 @@ def _models_block(csrf: str) -> str:
             + _chips(csrf, "model", text_options, active)
             + "<h2>Модель картинок</h2>"
             + _chips(csrf, "image", img_options, active_img))
-
-
-def _theme_block(csrf: str) -> str:
-    """Переключатель темы. Тем же рядом кнопок, что и выбор модели."""
-    return ("<h2>Вид</h2>"
-            + _chips(csrf, "theme",
-                     [(code, label) for code, label, _ in THEMES],
-                     current_theme()))
 
 
 def _thinking_block(csrf: str) -> str:
@@ -624,7 +659,7 @@ def page_system(application, csrf: str = "", confirm: str = "",
 
     head = ('<header><h1>Обслуживание</h1>'
             '<div class="ver"><a href="/">← к сводке</a></div></header>')
-    body = ("<div class=\"wrap\">" + head + note
+    body = ("<div class=\"wrap\">" + head + _topbar(csrf, "/system") + note
             + _money_block(csrf) + rep_html + log_html + upd_html
             + dig_html + copy_html + danger_html
             + '<footer><span><a href="/">← к сводке</a></span></footer></div>')
@@ -826,7 +861,7 @@ def page_kb(application, csrf: str = "", section: str = "",
             '<div class="ver"><a href="/">← к сводке</a></div></header>')
     refresh = ('<meta http-equiv="refresh" content="10">' if job_running else "")
 
-    body = ("<div class=\"wrap\">" + head + note + job_html
+    body = ("<div class=\"wrap\">" + head + _topbar(csrf, "/kb") + note + job_html
             + f'<div class="chips">{tab_html}</div>'
             + list_html + article_html
             + "<h2>Добавить статью</h2>"
@@ -973,7 +1008,7 @@ def page_quiz(application, csrf: str = "", mode: str = "draft",
             '<div class="ver"><a href="/">← к сводке</a></div></header>')
     refresh = ('<meta http-equiv="refresh" content="10">' if job_running else "")
 
-    body = ("<div class=\"wrap\">" + head + note + job_html + tiles
+    body = ("<div class=\"wrap\">" + head + _topbar(csrf, "/quiz") + note + job_html + tiles
             + "<h2>Управление</h2>" + _rows(controls)
             + f'<h2>Вопросы</h2><div class="chips">{tabs}</div>' + list_html
             + fails_html
@@ -1034,7 +1069,7 @@ def page_users(csrf: str = "") -> str:
 
     head = ("<header><h1>Пользователи</h1>"
             "<div class=\"ver\"><a href=\"/\">← к сводке</a></div></header>")
-    body = ("<div class=\"wrap\">" + head
+    body = ("<div class=\"wrap\">" + head + _topbar(csrf, "/users")
             + f'<div class="note" style="margin-bottom:14px">Бот знает '
               f'{len(users)} человек. Нажмите на строку — откроется карточка.</div>'
             + '<div class="ulist">' + "".join(rows) + '</div>'
@@ -1298,7 +1333,7 @@ async def page_user_card(bot, target_id: int, csrf: str = "",
         note = (f'<div class="{"warn-box" if bad else "ok-box"}">'
                 f'{esc(message)}</div>')
 
-    body = ("<div class=\"wrap\">" + head + note
+    body = ("<div class=\"wrap\">" + head + _topbar(csrf, "/users") + note
             + _user_facts(membership, target_id)
             + _user_settings_block(csrf, target_id)
             + _user_rank_block(csrf, target_id)
@@ -1399,7 +1434,8 @@ def page_prompts(csrf: str = "", confirm: str = "", saved: str = "") -> str:
     foot = ('<footer><span><a href="/">← к сводке</a></span>'
             '<span><a href="/exit">выйти</a></span></footer>')
 
-    body = "<div class=\"wrap\">" + head + intro + "".join(cards) + foot + "</div>"
+    body = ("<div class=\"wrap\">" + head + _topbar(csrf, "/prompts")
+            + intro + "".join(cards) + foot + "</div>")
     return _shell("Промпты — C4_Max", body)
 
 
@@ -1421,17 +1457,8 @@ def page_summary(csrf: str = "") -> str:
             '<span><a href="/">обновить</a></span>'
             '<span><a href="/exit">выйти</a></span></footer>')
 
-    nav = ('<div class="nav">'
-           '<a href="/prompts">⚙️ Промпты</a>'
-           '<a href="/users">👥 Пользователи</a>'
-           '<a href="/kb">📚 База знаний</a>'
-           '<a href="/quiz">🎮 Викторина</a>'
-           '<a href="/system">⚙️ Обслуживание</a>'
-           '</div>')
-
-    body = ("<div class=\"wrap\">" + head + tiles + nav
+    body = ("<div class=\"wrap\">" + head + _topbar(csrf, "/") + tiles
             + _models_block(csrf)
-            + _theme_block(csrf)
             + _thinking_block(csrf)
             + _spec_blocks(csrf)
             + "<h2>Вызовы по моделям</h2>"

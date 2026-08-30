@@ -269,15 +269,34 @@ footer {
 /* ─── страница промптов (этап 2) ───────────────────────────────────
    Ни строчки JavaScript: правка редкая и крупная, обычная форма надёжнее. */
 
-.nav { margin: 4px 0 22px; }
-.nav a {
-  display: inline-block; padding: 11px 16px; border-radius: 12px;
-  background: var(--card); border: 1px solid var(--line);
-  color: var(--text); text-decoration: none; font-weight: 620; font-size: 14px;
-  box-shadow: var(--shadow);
-  transition: border-color .15s, color .15s;
+/* ─── верхняя полоса: разделы слева, вид справа ─── */
+
+.topbar {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  margin: 2px 0 20px; padding-bottom: 14px;
+  border-bottom: 1px solid var(--line);
 }
-.nav a:hover { border-color: var(--accent); color: var(--accent); }
+.nav { display: flex; gap: 8px; flex-wrap: wrap; }
+.navlink {
+  display: inline-block; padding: 8px 13px; border-radius: 10px;
+  background: var(--card); border: 1px solid var(--line);
+  color: var(--text); text-decoration: none;
+  font-size: 13.5px; font-weight: 620; white-space: nowrap;
+  transition: border-color .15s, color .15s, background .15s;
+}
+.navlink:hover { border-color: var(--accent); color: var(--accent); }
+.navlink.on {
+  background: color-mix(in srgb, var(--accent) 16%, var(--card));
+  border-color: var(--accent); color: var(--accent); cursor: default;
+}
+
+/* Выбор темы прижат вправо; на узком экране уезжает под кнопки разделов. */
+.themepick { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.themepick .chips { margin-bottom: 0; }
+.themepick .chip { padding: 6px 10px; font-size: 13px; }
+@media (max-width: 560px) {
+  .themepick { margin-left: 0; width: 100%; }
+}
 
 .pcard {
   background: var(--card); border: 1px solid var(--line);
