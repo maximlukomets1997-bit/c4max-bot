@@ -50,7 +50,12 @@ _SKIP_MODULES = {"preflight", "main", "reset_db", "watchdog_local"}
 # ⚠️ Пакет `data` УДАЛЁН 2026-08-05 вместе с последним своим файлом
 # (data/quiz_questions.py — 12 вопросов викторины, зашитых в код). Вопросы
 # теперь живут в базе, собираются по статьям базы знаний панелью /quizadm.
-_PACKAGES = ("services", "handlers", "database", "jobs")
+# ⚠️ Папку `web` (сайт-админка) сюда забыли добавить, когда её завели
+# 30.08.2026 — и `web/longjobs.py` не проверялся ВООБЩЕ: его импортируют
+# изнутри функций, то есть в момент нажатия кнопки на сайте. Список кормит
+# и сбор кнопок (`_source_files` → `_callback_literals`), но кнопок Telegram
+# в папке сайта нет, поэтому их счётчик от этой папки не меняется.
+_PACKAGES = ("services", "handlers", "database", "jobs", "web")
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
