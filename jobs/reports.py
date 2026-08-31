@@ -121,8 +121,13 @@ async def daily_report_loop(application):
         except Exception as e:
             logger.error("⚠️ Вопрос дня не отправлен: %s", e)
 
+        # ⚠️ СПИМ ДО НАЧАЛА СЛЕДУЮЩЕГО ЧАСА, А НЕ «РОВНО ЧАС» (31.08.2026).
+        # Пауза в 3600 секунд привязывала все проверки к минуте запуска бота:
+        # поднялся в 06:46 — вопрос дня, назначенный на 12:00, уходил в 12:47.
+        # Бот перезапускается на каждой выкатке, поэтому опоздание всякий раз
+        # было новым. Подробности расчёта — daily_report.seconds_to_next_hour.
         try:
-            delay = min(daily_report.seconds_to_next_midnight(), 3600)
+            delay = daily_report.seconds_to_next_hour()
         except Exception:
             delay = 3600
         await asyncio.sleep(delay)
