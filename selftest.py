@@ -3805,6 +3805,135 @@ def check_web_auth():
                       f"кука, ссылка, подпись формы, чужие буквы")
 
 
+def check_update_notice():
+    """
+    Уведомление «⬇️ Обновился сам…» само уходит из лички через свой срок
+    (03.09.2026, просьба Максима: «пусть удаляется через 10 минут»).
+
+    ⚠️ Ради чего проверка существует. Уведомление отправляется ПРЯМО ПЕРЕД
+    перезапуском, поэтому обычный отложенный удалитель (utils.schedule_delete)
+    для него не годится — задача умерла бы вместе со старым процессом. Срок
+    считает УЖЕ ДРУГОЙ процесс по времени, записанному в след. Значит ошибиться
+    можно двумя тихими способами: забыть время при записи следа (уведомление
+    повиснет навсегда) или зашить срок числом мимо config (он разъедется с
+    тем, что обещано человеку). Проверка закрывает оба.
+
+    Всё считается без Телеграма и без сети: бот подделан, база временная.
+    """
+    import asyncio
+    import time
+    import config as cfg
+    from jobs import update as upd
+
+    problems = []
+    done = 0
+
+    def expect(title, got, want):
+        nonlocal done
+        done += 1
+        if got != want:
+            problems.append(f"{title}: ожидалось {want!r}, вышло {got!r}")
+
+    # ── 1. Расчёт срока ──
+    now = 1_000_000.0
+    ttl = cfg.UPDATE_NOTICE_TTL_SEC
+    expect("свежее не трогаем", upd.notice_expired(now - 1, now), False)
+    expect("за секунду до срока живо", upd.notice_expired(now - ttl + 1, now), False)
+    expect("ровно на сроке — убираем", upd.notice_expired(now - ttl, now), True)
+    expect("давно отвисело — убираем", upd.notice_expired(now - ttl * 10, now), True)
+
+    # ⚠️ Время НЕИЗВЕСТНО (старый формат следа) — по сроку не трогаем никогда:
+    # гадать о возрасте чужого сообщения нельзя.
+    expect("время неизвестно (ноль) — не трогаем", upd.notice_expired(0, now), False)
+    expect("время неизвестно (None) — не трогаем", upd.notice_expired(None, now), False)
+
+    # ── 2. Срок берётся ИЗ CONFIG, а не зашит числом ──
+    # Тот же приём, что у ссылки входа: двигаем константу и требуем, чтобы
+    # поведение поехало за ней. Зашитые 600 эту проверку не прошли бы.
+    saved_ttl = cfg.UPDATE_NOTICE_TTL_SEC
+    try:
+        cfg.UPDATE_NOTICE_TTL_SEC = 60
+        expect("срок укоротили — старое отвисело", upd.notice_expired(now - 120, now), True)
+        cfg.UPDATE_NOTICE_TTL_SEC = 100_000
+        expect("срок удлинили — то же самое ещё живо",
+               upd.notice_expired(now - 120, now), False)
+    finally:
+        cfg.UPDATE_NOTICE_TTL_SEC = saved_ttl
+
+    # ── 3. След: запись и чтение, все три формата ──
+    from database.history import set_setting
+    from config import UPDATE_NOTICE_MSGS_KEY
+
+    upd._save_notice("abc123", [[42, 777]], 555.0)
+    build, msgs, sent_at = upd._load_notice()
+    done += 1
+    if (build, msgs, sent_at) != ("abc123", [[42, 777]], 555.0):
+        problems.append(f"след не пережил запись-чтение: {(build, msgs, sent_at)!r}")
+
+    # Старый формат 2026-08-05 (без времени) — читается, время нулевое.
+    set_setting(UPDATE_NOTICE_MSGS_KEY, '{"build": "old", "msgs": [[1, 2]]}')
+    expect("формат без времени: время нулевое", upd._load_notice()[2], 0.0)
+    expect("формат без времени: сообщения на месте", upd._load_notice()[1], [[1, 2]])
+
+    # Самый старый формат (голый список пар) — тоже читается.
+    set_setting(UPDATE_NOTICE_MSGS_KEY, '[[3, 4]]')
+    expect("древний формат: сообщения на месте", upd._load_notice()[1], [[3, 4]])
+    expect("древний формат: время нулевое", upd._load_notice()[2], 0.0)
+
+    # Мусор в базе не роняет разбор.
+    set_setting(UPDATE_NOTICE_MSGS_KEY, "не json вовсе")
+    expect("мусор в следе не роняет", upd._load_notice(), ("", [], 0.0))
+
+    # ── 4. Само удаление: что убрали и что осталось в следе ──
+    deleted = []
+
+    class _Bot:
+        @staticmethod
+        async def delete_message(chat_id, message_id):
+            deleted.append((chat_id, message_id))
+
+    class _App:
+        bot = _Bot()
+
+    # Отвисевшее — убираем и след снимаем.
+    upd._save_notice("abc123", [[42, 777], [43, 778]], time.time() - ttl - 5)
+    asyncio.run(upd.drop_expired_notice(_App()))
+    expect("отвисевшее удалено", deleted, [(42, 777), (43, 778)])
+    expect("след снят", upd._load_notice()[1], [])
+
+    # Свежее — не трогаем.
+    deleted.clear()
+    upd._save_notice("abc123", [[42, 999]], time.time())
+    asyncio.run(upd.drop_expired_notice(_App()))
+    expect("свежее не удалено", deleted, [])
+    expect("след свежего на месте", upd._load_notice()[1], [[42, 999]])
+
+    # Время неизвестно — не трогаем (иначе снесли бы чужое сообщение вслепую).
+    deleted.clear()
+    set_setting(UPDATE_NOTICE_MSGS_KEY, '{"build": "old", "msgs": [[5, 6]]}')
+    asyncio.run(upd.drop_expired_notice(_App()))
+    expect("след без времени не удаляем", deleted, [])
+
+    # Следа нет — не падаем и в Телеграм не ходим.
+    deleted.clear()
+    upd._save_notice("abc123", [])
+    asyncio.run(upd.drop_expired_notice(_App()))
+    expect("пустой след не роняет", deleted, [])
+
+    # ── 5. Отправка кладёт в след ВРЕМЯ ──
+    # Забыть его — самая тихая из возможных ошибок: уведомление повиснет
+    # навсегда, и никто этого не заметит. Поэтому смотрим сам вызов в коде.
+    src = pathlib.Path(ROOT, "jobs", "update.py").read_text(encoding="utf-8")
+    save_at_send = re.search(r"_save_notice\(read_build_mark\(\)[^)]*\)", src)
+    done += 1
+    if not save_at_send or "time.time()" not in save_at_send.group(0):
+        problems.append("отправка уведомления не кладёт в след время — "
+                        "сообщение повиснет навсегда")
+
+    return problems, (f"{done} проверок: расчёт срока, срок из config, три формата "
+                      f"следа, удаление и его отсутствие")
+
+
 CHECKS = (
     ("деньги — расчёт стоимости запросов", check_money),
     ("деньги — сам прайс не менялся", check_price_list),
@@ -3836,6 +3965,7 @@ CHECKS = (
     ("сайт: цифры и кнопки не разъехались с источником", check_web_wiring),
     ("ссылка входа исчезает вместе со своим сроком", check_login_link_message),
     ("вход в веб-админку — подпись и срок", check_web_auth),
+    ("уведомление об обновлении уходит по сроку", check_update_notice),
 )
 
 

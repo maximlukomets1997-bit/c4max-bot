@@ -26,7 +26,8 @@ from .cleanup import cleanup_loop, _monthly_stats_reset
 from .reports import (daily_report_loop, nightly_backup, weekly_group_digest,
                       daily_quiz)
 from .rag import rag_catchup_loop
-from .update import auto_update_loop, forget_update_notice
+from .update import (auto_update_loop, forget_update_notice,
+                     drop_expired_notice, notice_expired)
 from .watchdog import watchdog_loop
 from .web import web_loop
 
@@ -35,5 +36,6 @@ __all__ = [
     "cleanup_loop", "_monthly_stats_reset",
     "daily_report_loop", "nightly_backup", "weekly_group_digest", "daily_quiz",
     "rag_catchup_loop", "auto_update_loop", "forget_update_notice",
+    "drop_expired_notice", "notice_expired",
     "watchdog_loop", "web_loop",
 ]

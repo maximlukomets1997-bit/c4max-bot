@@ -23,39 +23,58 @@ logger = logging.getLogger(__name__)
 # ниже и в карте проекта (`references/dependencies-runtime.md`).
 
 
-def _load_notice() -> tuple[str, list]:
+def _load_notice() -> tuple[str, list, float]:
     """
-    Достаёт из settings след прошлого уведомления: («метка сборки», [[чат, id]…]).
+    Достаёт из settings след прошлого уведомления:
+    («метка сборки», [[чат, id]…], время отправки).
 
-    В базе лежит JSON `{"build": "…", "msgs": [[чат, id], …]}`. Формат
-    2026-08-05; до него писался голый список пар без метки сборки — он ещё
-    может лежать в базе боевого сервера, поэтому разбирается тоже (метка при
-    этом пустая, то есть «неизвестно, к какому коду относилось»).
+    В базе лежит JSON `{"build": "…", "msgs": [[чат, id], …], "sent_at": …}`.
+    Форматов набралось три, и разбираются все — база боевого сервера помнит
+    старые:
+      • голый список пар (до 2026-08-05) — метки нет, времени нет;
+      • {"build", "msgs"} (2026-08-05) — времени нет;
+      • {"build", "msgs", "sent_at"} (03.09.2026) — время отправки, unix.
+
+    Времени нет (0.0) означает «когда отправлено — неизвестно». Такой след
+    по сроку НЕ убирается: гадать о возрасте сообщения нельзя, а прежняя
+    уборка (новое стирает старое, протухшее снимается при запуске) для него
+    работает как работала.
     """
     from config import UPDATE_NOTICE_MSGS_KEY
     from database.history import get_setting
 
     raw = get_setting(UPDATE_NOTICE_MSGS_KEY, "")
     if not raw:
-        return "", []
+        return "", [], 0.0
     try:
         data = json.loads(raw)
     except (TypeError, ValueError):
-        return "", []
+        return "", [], 0.0
     if isinstance(data, list):          # старый формат: только список пар
-        return "", data
+        return "", data, 0.0
     if isinstance(data, dict):
-        return str(data.get("build") or ""), list(data.get("msgs") or [])
-    return "", []
+        try:
+            sent_at = float(data.get("sent_at") or 0)
+        except (TypeError, ValueError):
+            sent_at = 0.0
+        return str(data.get("build") or ""), list(data.get("msgs") or []), sent_at
+    return "", [], 0.0
 
 
-def _save_notice(build: str, msgs: list) -> None:
-    """Запоминает след уведомления. Пустой список тоже пишем — это «следа нет»."""
+def _save_notice(build: str, msgs: list, sent_at: float = 0.0) -> None:
+    """
+    Запоминает след уведомления. Пустой список тоже пишем — это «следа нет».
+
+    sent_at — время отправки (unix). По нему уведомление убирается через
+    config.UPDATE_NOTICE_TTL_SEC; ноль означает «время неизвестно, по сроку
+    не трогать». При снятии следа время не нужно и остаётся нулём.
+    """
     from config import UPDATE_NOTICE_MSGS_KEY
     from database.history import set_setting
 
     set_setting(UPDATE_NOTICE_MSGS_KEY,
-                json.dumps({"build": build, "msgs": msgs}, ensure_ascii=False))
+                json.dumps({"build": build, "msgs": msgs, "sent_at": sent_at},
+                           ensure_ascii=False))
 
 
 async def forget_update_notice(application, stale_only: bool = False) -> None:
@@ -99,7 +118,7 @@ async def forget_update_notice(application, stale_only: bool = False) -> None:
     """
     from config import BOT_BUILD
 
-    build, msgs = _load_notice()
+    build, msgs, _sent_at = _load_notice()
     if not msgs:
         return
     if stale_only:
@@ -118,6 +137,74 @@ async def forget_update_notice(application, stale_only: bool = False) -> None:
                            pair, e)
     # След снимаем В ЛЮБОМ случае, даже если удалить не вышло: иначе бот будет
     # ломиться в то же сообщение при каждом запуске до скончания века.
+    _save_notice(BOT_BUILD, [])
+
+
+def notice_expired(sent_at: float, now: float | None = None) -> bool:
+    """
+    Пора ли убирать уведомление: прошло ли UPDATE_NOTICE_TTL_SEC с отправки.
+
+    Отдельной функцией — чтобы расчёт можно было проверить без Телеграма и
+    без базы (selftest::check_update_notice). Само удаление — в
+    drop_expired_notice ниже.
+
+    Ноль (и всё, что меньше) означает «время отправки неизвестно» — старый
+    формат следа. Такой след по сроку НЕ убираем: гадать о возрасте
+    сообщения нельзя, а прежняя уборка для него работает как работала.
+    """
+    from config import UPDATE_NOTICE_TTL_SEC
+
+    if not sent_at or sent_at <= 0:
+        return False
+    if now is None:
+        now = time.time()
+    return (now - sent_at) >= UPDATE_NOTICE_TTL_SEC
+
+
+async def drop_expired_notice(application) -> None:
+    """
+    Убирает уведомление «⬇️ Обновился сам…», если оно провисело дольше
+    UPDATE_NOTICE_TTL_SEC (03.09.2026, просьба Максима: «пусть удаляется
+    через 10 минут»).
+
+    ⚠️ ПОЧЕМУ НЕ utils.schedule_delete, КАК У ОСТАЛЬНЫХ СЛУЖЕБНЫХ СООБЩЕНИЙ.
+    Тот держит отложенное удаление в памяти процесса, а это уведомление
+    отправляется ПРЯМО ПЕРЕД перезапуском: задача умерла бы вместе со старым
+    процессом, и сообщение осталось бы висеть навсегда. Поэтому время отправки
+    лежит в следе (settings), а убирает сообщение уже НОВЫЙ процесс — вот эта
+    функция.
+
+    Зовут её двое, и оба нужны:
+      • цикл самообновления на каждом шаге (раз в AUTO_UPDATE_TICK_SEC) —
+        обычный случай, бот работает и сам за собой прибирает;
+      • main.post_init при запуске — если бот простоял выключенным дольше
+        десяти минут, уведомление устарело ещё до его пробуждения.
+
+    ⚠️ НЕ ПУТАТЬ с forget_update_notice: та убирает уведомление ПРОШЛОЙ
+    сборки (новое стирает старое) и о сроках ничего не знает. Эта убирает
+    уведомление про ТЕКУЩИЙ код, просто потому что оно провисело своё. Друг
+    другу они не мешают: обе снимают след, и кто сработал первым, тот и снял.
+
+    Тихая: сообщение мог удалить сам владелец, чат мог пропасть, а старше 48
+    часов Telegram ботам удалять не даёт — всё это штатные случаи, в лог идут
+    предупреждением, но работу не рвут.
+    """
+    from config import BOT_BUILD
+
+    _build, msgs, sent_at = _load_notice()
+    if not msgs or not notice_expired(sent_at):
+        return
+
+    logger.info("⬇️ Убираю уведомление об обновлении: провисело своё")
+    for pair in msgs:
+        try:
+            chat_id, message_id = pair
+            await application.bot.delete_message(chat_id=chat_id, message_id=message_id)
+        except Exception as e:
+            logger.warning("⚠️ Не удалось убрать уведомление об обновлении %s: %s",
+                           pair, e)
+    # След снимаем В ЛЮБОМ случае — по той же причине, что и в
+    # forget_update_notice: иначе бот будет ломиться в то же сообщение вечно.
     _save_notice(BOT_BUILD, [])
 
 
@@ -182,12 +269,25 @@ async def auto_update_loop(application):
         # уведомление протухшим и снесёт его через секунду после отправки.
         # ⚠️ ЗАПИСЫВАЕМ ДО ПЕРЕЗАПУСКА — вызывающий код останавливает бота
         # сразу после этой строки, и всё несохранённое пропадёт.
-        _save_notice(read_build_mark(), sent)
+        # ⚠️ ВРЕМЯ — time.time() (стенные часы), а НЕ time.monotonic(): срок
+        # жизни уведомления считает уже ДРУГОЙ процесс, поднявшийся после
+        # перезапуска, а monotonic у каждого процесса свой и начинается заново.
+        _save_notice(read_build_mark(), sent, time.time())
 
     last_check = time.monotonic()
     while True:
         await asyncio.sleep(AUTO_UPDATE_TICK_SEC)
         try:
+            # Уборка отвисевшего уведомления — СВОИМ try и ДО тумблера
+            # самообновления. Своим — потому что сорвавшееся удаление не должно
+            # мешать самим обновлениям. До тумблера — потому что уведомление
+            # уже отправлено, и выключенное самообновление не повод оставлять
+            # его в личке навсегда.
+            try:
+                await drop_expired_notice(application)
+            except Exception as e:
+                logger.warning("⚠️ Не удалось прибрать уведомление об обновлении: %s", e)
+
             if get_setting("auto_update_enabled", AUTO_UPDATE_ENABLED_DEFAULT) != "1":
                 continue
             if time.monotonic() - last_check < AUTO_UPDATE_INTERVAL_SEC:
