@@ -142,40 +142,119 @@ async def prompts(request):
     боте на это же место поставлено подтверждение кнопкой.
     """
     csrf = auth.csrf_for(request.cookies.get(WEB_COOKIE_NAME))
+    viewer = auth.current_user(request)
     if request.method == "GET":
-        return aioweb.Response(text=pages.page_prompts(csrf),
+        return aioweb.Response(text=pages.page_prompts(csrf, viewer_id=viewer),
                                content_type="text/html")
 
     form = await request.post()
     if not auth.csrf_ok(request, str(form.get("csrf", ""))):
         logger.warning("🌐 Правка промпта отклонена: подпись формы не сошлась")
-        return aioweb.Response(text=pages.page_prompts(csrf),
+        return aioweb.Response(text=pages.page_prompts(csrf, viewer_id=viewer),
                                content_type="text/html", status=403)
 
     user_id = auth.current_user(request)
+
+    # Личный тумблер промпта — единственное действие этой страницы, которое
+    # не правит текст (этап 7). Подтверждения не требует: обратимо одним же
+    # нажатием и на других людей не влияет.
+    #
+    # ⚠️ Ветка написана именно как `do == "..."`: в этом виде её видит
+    # проверка «каждая нарисованная кнопка имеет обработчик» (selftest,
+    # check_web_wiring). Свернёшь условие в одну строку с form.get — кнопка
+    # выпадет из проверки и её пропажу никто не заметит.
+    do = str(form.get("do", ""))
+    if do == "myprompt":
+        actions.toggle_personal_prompt(user_id)
+        return aioweb.Response(text=pages.page_prompts(csrf, viewer_id=viewer),
+                               content_type="text/html")
+
     key = str(form.get("key", ""))
     text = str(form.get("text", ""))
 
     from services import prompts_spec
     if key not in prompts_spec.BY_KEY:
         logger.warning("🌐 Правка промпта не принята: неизвестный ключ «%s»", key)
-        return aioweb.Response(text=pages.page_prompts(csrf),
+        return aioweb.Response(text=pages.page_prompts(csrf, viewer_id=viewer),
                                content_type="text/html", status=400)
 
     stirring = not text.strip() and prompts_spec.read(key)
     if stirring and str(form.get("confirm", "")) != "1":
-        return aioweb.Response(text=pages.page_prompts(csrf, confirm=key),
+        return aioweb.Response(text=pages.page_prompts(csrf, confirm=key,
+                                                       viewer_id=viewer),
                                content_type="text/html")
 
     try:
         actions.apply_prompt(user_id, key, text)
     except actions.ActionError as e:
         logger.warning("🌐 Правка промпта не принята: %s", e)
-        return aioweb.Response(text=pages.page_prompts(csrf),
+        return aioweb.Response(text=pages.page_prompts(csrf, viewer_id=viewer),
                                content_type="text/html", status=400)
 
-    return aioweb.Response(text=pages.page_prompts(csrf, saved=key),
+    # ⚠️ viewer_id передаётся во ВСЕХ семи сборках этой страницы. Пропусти
+    # хоть одну — личный тумблер промпта пропадал бы после сохранения текста,
+    # и выглядело бы это как «кнопка сама исчезла».
+    return aioweb.Response(text=pages.page_prompts(csrf, saved=key,
+                                                   viewer_id=viewer),
                            content_type="text/html")
+
+
+async def journal(request):
+    """
+    Журналы: модерация с уликами и персонал, обе очистки (01.09.2026).
+
+    ⚠️ Улики открываются GET-ссылкой `?evidence=<номер>`, а не формой: показ —
+    чтение, и городить ради него отправку формы незачем. Обе ОЧИСТКИ, наоборот,
+    идут только POST-ом с подписью формы и подтверждением: они необратимы.
+    """
+    csrf = auth.csrf_for(request.cookies.get(WEB_COOKIE_NAME))
+
+    if request.method == "GET":
+        try:
+            evidence = int(request.query.get("evidence", "") or 0)
+        except (TypeError, ValueError):
+            evidence = 0
+        return aioweb.Response(text=pages.page_journal(csrf, evidence=evidence),
+                               content_type="text/html")
+
+    form = await request.post()
+    if not auth.csrf_ok(request, str(form.get("csrf", ""))):
+        logger.warning("🌐 Очистка журнала отклонена: подпись формы не сошлась")
+        return aioweb.Response(text=pages.page_journal(csrf),
+                               content_type="text/html", status=403)
+
+    actor_id = auth.current_user(request)
+    do = str(form.get("do", ""))
+
+    # Обе очистки необратимы — сначала вопрос, как у «Стереть ВСЕ вопросы».
+    if do in ("modclear", "staffclear") and str(form.get("confirm", "")) != "1":
+        return aioweb.Response(text=pages.page_journal(csrf, confirm=do),
+                               content_type="text/html")
+
+    message, bad = "", False
+    try:
+        if do == "modclear":
+            n = actions.clear_moderation_journal(actor_id)
+            message = f"🧹 Журнал модерации очищен: {n} записей (вместе с уликами)."
+        elif do == "staffclear":
+            n = actions.clear_staff_journal(actor_id)
+            message = f"🧹 Журнал персонала очищен: {n} записей."
+        else:
+            raise actions.ActionError(f"неизвестное действие «{do}»")
+    except actions.ActionError as e:
+        message, bad = f"Не вышло: {e}", True
+        logger.warning("🌐 Журналы, действие «%s» не принято: %s", do, e)
+    except Exception as e:
+        message, bad = f"Не вышло: {e}", True
+        logger.error("🌐 Журналы, действие «%s» сорвалось: %s", do, e)
+
+    page = pages.page_journal(csrf, message="" if bad else message)
+    if bad:
+        page = page.replace('<div class="wrap">',
+                            f'<div class="wrap"><div class="warn-box">'
+                            f'{pages.esc(message)}</div>', 1)
+    return aioweb.Response(text=page, content_type="text/html",
+                           status=400 if bad else 200)
 
 
 async def system(request):
@@ -191,7 +270,13 @@ async def system(request):
     application = request.app.get("tg")
 
     if request.method == "GET":
-        return aioweb.Response(text=pages.page_system(application, csrf),
+        # Листание истории обновлений — GET-параметром: это чтение.
+        try:
+            upd_page = int(request.query.get("upd", "") or 0)
+        except (TypeError, ValueError):
+            upd_page = 0
+        return aioweb.Response(text=pages.page_system(application, csrf,
+                                                      upd_page=upd_page),
                                content_type="text/html")
 
     form = await request.post()
@@ -493,6 +578,12 @@ def _run_quiz_action(actor_id: int, do: str, form, application) -> str:
         result = actions.quiz_seed(actor_id)
         return (f'📥 Загружено в черновики: {result.get("added", 0)}, '
                 f'пропущено повторов: {result.get("skipped", 0)}.')
+    if do == "reseed":
+        result = actions.quiz_reseed(actor_id)
+        if not result.get("changed"):
+            return "✅ Файл и банк и так сошлись — обновлять нечего."
+        return (f'♻️ Обновлено вопросов: {result.get("updated", 0)} — варианты, '
+                f'верный ответ и разбор. Статус «в игре / черновик» не менялся.')
     if do in ("ok", "del"):
         try:
             qid = int(form.get("qid", ""))
@@ -694,6 +785,8 @@ ROUTES = (
     ("POST", "/kb",      kb,      "owner"),
     ("GET",  "/quiz",    quiz,    "owner"),
     ("POST", "/quiz",    quiz,    "owner"),
+    ("GET",  "/journal", journal, "owner"),
+    ("POST", "/journal", journal, "owner"),
     ("GET",  "/users",   users,   "owner"),
     ("GET",  "/users/{uid}", user_card, "owner"),
     ("POST", "/users/{uid}", user_card, "owner"),

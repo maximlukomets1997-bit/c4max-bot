@@ -976,7 +976,746 @@ def check_album_collect():
 
 
 # ───────────────────────────────────────────────
-#  9. КЛЮЧИ СУТОК, СРОКОВ И НЕДЕЛЬ
+#  9. ФИЛЬТР ССЫЛОК: БЕЛЫЙ СПИСОК И МУТ ЗА ПОВТОРЫ
+# ─────────────────────────────────────────────
+
+def check_link_filter():
+    """
+    Фильтр ссылок: кого пропускает, что удаляет и когда мутит (02.09.2026).
+
+    ⚠️ РАДИ ЧЕГО. У проверки домена по белому списку есть классическая дыра:
+    сверять «содержит» вместо «это он или его поддомен». Тогда `wtmobile.com`
+    в белом списке пропускает и `evil-wtmobile.com`, и `wtmobile.com.evil.ru` —
+    то есть фильтр перестаёт быть фильтром, а выглядит рабочим.
+
+    ⚠️ Вторая тихая половина — МУТ ЗА ПОВТОРЫ. Он считается по памяти
+    процесса; сломанный счётчик либо не наказывает никогда, либо наказывает
+    с первой ссылки. И то, и другое замечает не админ, а живой человек в чате.
+
+    Ветка зовётся ЦЕЛИКОМ, с поддельными ботом и сообщением: проверяем
+    поведение, а не текст исходника. Сеть и Telegram не участвуют.
+    """
+    import asyncio
+
+    from config import LINKFILTER_MUTE_COUNT, LINKFILTER_WHITELIST
+    from database import history as hist
+    from services import antispam
+
+    problems = []
+    done = 0
+    CHAT, STRANGER = -100777, 900001
+
+    def expect(title, ok):
+        nonlocal done
+        done += 1
+        if not ok:
+            problems.append(title)
+
+    # ── 1. Белый список: свой домен и поддомен против похожего чужого ──
+    good = LINKFILTER_WHITELIST[0]
+    for url, want, why in (
+        (f"https://{good}/news", True, "сам домен из белого списка не признан своим"),
+        (f"https://news.{good}/x", True, "поддомен своего домена не признан своим"),
+        (f"http://evil-{good}/x", False,
+         f"«evil-{good}» принят за свой домен — чужая ссылка пройдёт фильтр"),
+        (f"https://{good}.evil.ru/x", False,
+         f"«{good}.evil.ru» принят за свой — так маскируют чужие ссылки"),
+        (f"https://user@{good}:443/x", True,
+         "логин@ и :порт сбили разбор домена — своя ссылка удалилась бы"),
+        ("https://совсем.чужой.сайт/x", False, "чужой домен принят за свой"),
+    ):
+        expect(f"{why} ({url})", antispam._is_whitelisted(url) is want)
+
+    # ── 2. Ссылки достаются и из текста, и из подписи, и из-под текста ──
+    class _Ent:
+        def __init__(self, kind, url=""):
+            self.type = kind
+            self.url = url
+
+    class _Msg:
+        """Сообщение Telegram ровно в том объёме, который читает фильтр."""
+        def __init__(self, text=None, caption=None, ents=None, cap_ents=None,
+                     photo=False, message_id=555):
+            self.text = text
+            self.caption = caption
+            self.photo = photo
+            self.message_id = message_id
+            self._ents = ents or {}
+            self._cap = cap_ents or {}
+
+        def parse_entities(self, types=None):
+            return self._ents
+
+        def parse_caption_entities(self, types=None):
+            return self._cap
+
+    plain = _Msg(text="смотри https://чужой.сайт/раз",
+                 ents={_Ent("url"): "https://чужой.сайт/раз"})
+    expect("явная ссылка в тексте не найдена",
+           antispam._extract_links(plain) == ["https://чужой.сайт/раз"])
+
+    hidden = _Msg(text="смотри тут",
+                  ents={_Ent("text_link", "https://чужой.сайт/два"): "тут"})
+    expect("ссылка, спрятанная под текст, не найдена — так их и маскируют",
+           antispam._extract_links(hidden) == ["https://чужой.сайт/два"])
+
+    capt = _Msg(caption="фото https://чужой.сайт/три", photo=True,
+                cap_ents={_Ent("url"): "https://чужой.сайт/три"})
+    expect("ссылка в подписи к фото не найдена",
+           antispam._extract_links(capt) == ["https://чужой.сайт/три"])
+
+    # ── 3. Ветка целиком: что удаляется, что нет, когда мут ──
+    class _Sent:
+        message_id = 999
+
+    class _Bot:
+        id = 111222
+        def __init__(self):
+            self.deleted = []
+            self.muted = []
+            self.said = []
+
+        async def get_chat_member(self, chat_id, user_id):
+            class _M:
+                status = "member"
+            return _M()
+
+        async def delete_message(self, chat_id, message_id):
+            self.deleted.append(message_id)
+
+        async def send_message(self, chat_id, text):
+            self.said.append(text)
+            return _Sent()
+
+        async def restrict_chat_member(self, **kw):
+            self.muted.append(kw.get("user_id"))
+            return True
+
+    class _User:
+        def __init__(self, uid):
+            self.id = uid
+            self.first_name = "Чужак"
+            self.username = None
+
+    def foreign_msg(mid=555):
+        return _Msg(text="держи https://чужой.сайт/раз", message_id=mid,
+                    ents={_Ent("url"): "https://чужой.сайт/раз"})
+
+    def run(bot, uid, msg):
+        return asyncio.run(antispam.check_and_delete_links(bot, CHAT,
+                                                           _User(uid), msg))
+
+    saved_flag = hist.get_setting("linkfilter_enabled", "0")
+    saved_strikes = dict(antispam._link_strikes)
+    try:
+        # Тумблер выключен — фильтр не трогает ничего.
+        hist.set_setting("linkfilter_enabled", "0")
+        bot = _Bot()
+        expect("при выключенном фильтре сообщение всё равно удалено",
+               run(bot, STRANGER, foreign_msg()) is False and not bot.deleted)
+
+        hist.set_setting("linkfilter_enabled", "1")
+
+        # Своя ссылка — не трогаем.
+        antispam._link_strikes.clear()
+        bot = _Bot()
+        own = _Msg(text=f"наша новость https://{good}/news",
+                   ents={_Ent("url"): f"https://{good}/news"})
+        expect("ссылка на свой домен удалена — фильтр съедает собственные "
+               "новости бота", run(bot, STRANGER, own) is False and not bot.deleted)
+
+        # Чужая ссылка — удаляем, пишем в журнал, сохраняем улику.
+        antispam._link_strikes.clear()
+        bot = _Bot()
+        before = len(hist.get_recent_moderation_actions(50))
+        expect("чужая ссылка не удалена", run(bot, STRANGER, foreign_msg()) is True)
+        expect("сообщение со ссылкой не удалено у Telegram", bot.deleted == [555])
+        expect("человеку не сказали, почему сообщение исчезло",
+               bool(bot.said) and "ссылки" in bot.said[0].lower())
+        log = hist.get_recent_moderation_actions(50)
+        # ⚠️ Ищем запись ПО ВИДУ, а не «последнюю»: если фильтр заодно выдаст
+        # мут, последней окажется он, и проверка ругалась бы не на то.
+        linkdel = [r for r in log if r["action"] == "linkdel"]
+        expect(f"удаление ссылки не записано в журнал модерации видом "
+               f"«linkdel» (записей стало {len(log)} против {before}, "
+               f"из них linkdel — {len(linkdel)})", len(linkdel) == 1)
+        expect("текст удалённого сообщения не сохранён — улики будут пустыми",
+               bool(linkdel) and bool(hist.get_mute_evidence(linkdel[0]["id"])))
+
+        # Мут за повторы: ровно на LINKFILTER_MUTE_COUNT-м удалении, не раньше.
+        antispam._link_strikes.clear()
+        antispam._muted_until.clear()
+        bot = _Bot()
+        for i in range(1, LINKFILTER_MUTE_COUNT + 1):
+            run(bot, STRANGER, foreign_msg(600 + i))
+            if i < LINKFILTER_MUTE_COUNT:
+                expect(f"мут выдан на {i}-й ссылке, а порог — "
+                       f"{LINKFILTER_MUTE_COUNT}", not bot.muted)
+        expect(f"после {LINKFILTER_MUTE_COUNT} удалённых ссылок мут не выдан — "
+               f"повторы остаются безнаказанными", bot.muted == [STRANGER])
+
+        # Личное разрешение «ссылки можно» — не трогаем вовсе.
+        antispam._link_strikes.clear()
+        hist.set_user_settings(STRANGER, links_allowed=1)
+        from services import user_settings
+        user_settings.refresh(STRANGER)
+        bot = _Bot()
+        expect("у человека с личным разрешением ссылка всё равно удалена",
+               run(bot, STRANGER, foreign_msg()) is False and not bot.deleted)
+
+    finally:
+        hist.set_setting("linkfilter_enabled", saved_flag)
+        try:
+            hist.set_user_settings(STRANGER, links_allowed=None)
+            from services import user_settings
+            user_settings.refresh(STRANGER)
+        except Exception:
+            pass
+        antispam._link_strikes.clear()
+        antispam._link_strikes.update(saved_strikes)
+        antispam._muted_until.clear()
+        with hist._lock:
+            conn = hist._get_connection()
+            conn.execute("DELETE FROM moderation_log")
+            conn.execute("DELETE FROM mute_evidence")
+            conn.commit()
+
+    return problems, (f"{done} проверок: белый список против похожих доменов, "
+                      f"скрытые ссылки и подписи, удаление, журнал, мут за повторы")
+
+
+def check_greeter():
+    """
+    Приветствие новичков и проверка «я не бот» (02.09.2026).
+
+    ⚠️ РАДИ ЧЕГО. Здесь уже наступали, и поломка записана прямо в коде: бот
+    здоровался с человеком, которого САМ ЖЕ только что замутил. Мут меняет
+    статус участника на «ограничен», и если смотреть только на новый статус,
+    это неотличимо от «пришёл новый». Отсюда правило: событие — это ПЕРЕХОД,
+    и проверять надо пару «было → стало», а не одну её половину.
+
+    ⚠️ Вторая половина — кнопка «Я не бот». Она живёт ВНЕ гейта прав (её жмёт
+    обычный участник, не персонал), поэтому единственное, что отделяет её от
+    любого прохожего, — сверка «нажал тот, кому адресовано». Сломайся она —
+    спам-ботов пропускал бы кто угодно, и выглядело бы это как исправная
+    работа капчи.
+    """
+    import asyncio
+
+    from telegram.constants import ChatMemberStatus as _S
+
+    from database import history as hist
+    from services import greeter
+
+    problems = []
+    done = 0
+    CHAT, NEWBIE, STRANGER = -100888, 900777, 900778
+
+    def expect(title, ok):
+        nonlocal done
+        done += 1
+        if not ok:
+            problems.append(title)
+
+    class _M:
+        """Запись о членстве: статус и, у ограниченных, «всё ещё в группе?»."""
+        def __init__(self, status, is_member=False):
+            self.status = status
+            self.is_member = is_member
+
+    class _Upd:
+        def __init__(self, old, new):
+            self.old_chat_member = old
+            self.new_chat_member = new
+
+    LEFT = _M(_S.LEFT)
+    MEMBER = _M(_S.MEMBER)
+    MUTED = _M(_S.RESTRICTED, is_member=True)      # замучен, но в группе
+    GONE_RESTRICTED = _M(_S.RESTRICTED, is_member=False)  # ограничен и вышел
+
+    # ── 1. Переход «было → стало» ──
+    expect("вступление в группу не распознано",
+           greeter._joined(_Upd(LEFT, MEMBER)) is True)
+    expect("МУТ УЧАСТНИКА принят за вступление — бот поздоровается с тем, "
+           "кого сам только что наказал",
+           greeter._joined(_Upd(MEMBER, MUTED)) is False)
+    expect("снятие мута принято за вступление — бот здоровался бы повторно",
+           greeter._joined(_Upd(MUTED, MEMBER)) is False)
+    expect("уход из группы не распознан",
+           greeter._left(_Upd(MEMBER, LEFT)) is True)
+    expect("мут участника принят за уход — бот снял бы ожидание проверки",
+           greeter._left(_Upd(MEMBER, MUTED)) is False)
+    expect("замученный участник не считается состоящим в группе",
+           greeter._is_in(MUTED) is True)
+    expect("ограниченный и вышедший считается состоящим в группе",
+           greeter._is_in(GONE_RESTRICTED) is False)
+    expect("вступление ограниченного, но вернувшегося не распознано",
+           greeter._joined(_Upd(GONE_RESTRICTED, MEMBER)) is True)
+
+    # ── 2. Текст приветствия ──
+    class _FakeBot:
+        username = "C4_Max_bot"
+
+    text = greeter._welcome_text("Вася <хитрый>", NEWBIE, captcha=True,
+                                 seconds=300, bot=_FakeBot())
+    expect("имя новичка не экранировано — «<» в имени порвёт разметку и "
+           "приветствие не отправится вовсе", "Вася <хитрый>" not in text)
+    expect("экранированного имени в приветствии нет", "&lt;хитрый&gt;" in text)
+    expect("имя не сделано ссылкой на профиль по номеру",
+           f"tg://user?id={NEWBIE}" in text)
+    expect("при включённой проверке в тексте не сказано, сколько на неё "
+           "времени (300 секунд = 5 минут)", "5" in text)
+    plain_text = greeter._welcome_text("Вася", NEWBIE, captcha=False,
+                                       seconds=300, bot=_FakeBot())
+    expect("без проверки «я не бот» текст всё равно требует нажать кнопку",
+           len(plain_text) < len(text))
+    short = greeter._welcome_text("Вася", NEWBIE, captcha=True,
+                                  seconds=30, bot=_FakeBot())
+    expect("срок меньше минуты показан как «0 минут» — обещание, которого "
+           "не бывает", "0 мин" not in short)
+
+    # ── 3. Кнопку «Я не бот» жмёт только тот, кому она адресована ──
+    class _Answer:
+        def __init__(self):
+            self.said = []
+            self.edited = []
+
+    class _Bot:
+        id = 111222
+        def __init__(self, holder):
+            self.holder = holder
+            self.freed = []
+
+        async def get_chat(self, chat_id):
+            class _C:
+                permissions = None
+            return _C()
+
+        async def restrict_chat_member(self, **kw):
+            self.freed.append(kw.get("user_id"))
+            return True
+
+    class _Query:
+        def __init__(self, presser, holder):
+            self.data = f"join:ok:{CHAT}:{NEWBIE}"
+            self._bot = _Bot(holder)
+            self.holder = holder
+            self.message = None
+
+            class _U:
+                id = presser
+                first_name = "Кто-то"
+            self.from_user = _U()
+
+        def get_bot(self):
+            return self._bot
+
+        async def answer(self, text="", show_alert=False):
+            self.holder.said.append(text)
+
+        async def edit_message_text(self, *a, **kw):
+            self.holder.edited.append(a[0] if a else "")
+
+    saved_pending = dict(greeter._pending)
+    try:
+        # Чужой человек нажимает чужую кнопку.
+        holder = _Answer()
+        q = _Query(STRANGER, holder)
+        greeter._pending[(CHAT, NEWBIE)] = 42
+        asyncio.run(greeter.handle_join_callback(q, None, q.data))
+        expect("ЧУЖОЙ прошёл проверку за новичка — капчу пропускает любой "
+               "прохожий, и спам-боты проходят вместе с ним",
+               not q.get_bot().freed)
+        expect("чужому не сказали, что приветствие адресовано не ему",
+               bool(holder.said) and "не тебе" in holder.said[0])
+        expect("ожидание проверки снято чужим нажатием",
+               (CHAT, NEWBIE) in greeter._pending)
+
+        # Тот, кому адресовано.
+        holder = _Answer()
+        q = _Query(NEWBIE, holder)
+        asyncio.run(greeter.handle_join_callback(q, None, q.data))
+        expect("новичку не вернули права после проверки",
+               q.get_bot().freed == [NEWBIE])
+        expect("ожидание проверки осталось висеть после успешного нажатия — "
+               "отложенная проверка кикнет прошедшего",
+               (CHAT, NEWBIE) not in greeter._pending)
+        expect("прохождение проверки не записано в журнал вступлений",
+               hist.get_join_counts(1).get("ok", 0) > 0)
+
+        # Битые данные кнопки не роняют ветку.
+        holder = _Answer()
+        q = _Query(NEWBIE, holder)
+        asyncio.run(greeter.handle_join_callback(q, None, "join:ok:мусор"))
+        expect("битые данные кнопки не отбиты сообщением",
+               bool(holder.said) and "екоррект" in holder.said[0])
+
+    finally:
+        greeter._pending.clear()
+        greeter._pending.update(saved_pending)
+        with hist._lock:
+            conn = hist._get_connection()
+            conn.execute("DELETE FROM join_log WHERE chat_id = ?", (CHAT,))
+            conn.commit()
+
+    return problems, (f"{done} проверок: мут не считается вступлением, текст "
+                      f"и срок приветствия, капчу жмёт только адресат")
+
+
+def check_parsing():
+    """
+    Разбор статьи базы знаний и разбор вопроса викторины (02.09.2026).
+
+    ⚠️ РАДИ ЧЕГО. Обе ошибки ТИХИЕ и портят данные, а не роняют бота.
+    Статья разобралась не так — поиск отвечает мимо, и понять это можно
+    только по странным ответам. Вопрос прошёл негодным — опрос просто не
+    отправится в Telegram, уже в игре, при живых людях.
+
+    ⚠️ Разбор статьи проверяется в ОБОИХ режимах нарезки: рабочий сейчас
+    «1 файл = 1 чанк», но режим переключается переменной окружения, и
+    сломанная вторая ветка молчала бы до дня переключения.
+    """
+    import shutil as _shutil
+    import tempfile as _tempfile
+
+    from services import quiz_bank, rag
+
+    problems = []
+    done = 0
+
+    def expect(title, ok):
+        nonlocal done
+        done += 1
+        if not ok:
+            problems.append(title)
+
+    tmp = _tempfile.mkdtemp(prefix="c4max-selftest-parse-")
+    saved_mode = rag.RAG_CHUNK_MODE
+
+    def write(name, text):
+        path = os.path.join(tmp, name)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        return path
+
+    try:
+        full = write("Т-72Б3.md",
+                     "---\ntitle: Т-72Б3 «Урал»\nkind: tank\n---\n"
+                     "# Заголовок из текста\n"
+                     "Вступление статьи.\n"
+                     "## Броня\nЛоб корпуса 500 мм.\n"
+                     "## Вооружение\nПушка 125 мм.\n")
+
+        # ── 1. Режим «1 файл = 1 чанк» (рабочий) ──
+        rag.RAG_CHUNK_MODE = "file"
+        one = rag.parse_article_file(full)
+        expect(f"в режиме «файл» статья разобралась на {len(one)} кусков "
+               f"вместо одного", len(one) == 1)
+        expect("название статьи взято не из шапки — в шапке оно точнее, "
+               "чем заголовок в тексте",
+               bool(one) and one[0]["title"] == "Т-72Б3 «Урал»")
+        expect("в текст для поиска не подставлено название статьи — куски "
+               "разных машин перестанут различаться",
+               bool(one) and "Т-72Б3 «Урал»" in one[0]["full_text"])
+        expect("шапка-метаданные уехала в текст статьи вместе с содержимым",
+               bool(one) and "kind: tank" not in one[0]["content"])
+        expect("разделы статьи пропали из цельного куска — модель увидит "
+               "не всю статью", bool(one) and "Пушка 125 мм" in one[0]["content"])
+
+        # ── 2. Режим «по разделам» ──
+        rag.RAG_CHUNK_MODE = "sections"
+        many = rag.parse_article_file(full)
+        expect(f"в режиме «разделы» вышло {len(many)} кусков вместо трёх "
+               f"(вступление + два раздела)", len(many) == 3)
+        titles = [c["title"] for c in many]
+        expect(f"в названиях кусков нет имени статьи — разделы «Броня» из "
+               f"разных статей смешаются между собой: {titles}",
+               all("Т-72Б3" in t for t in titles))
+        expect("раздел не назван своим именем",
+               any("Броня" in t for t in titles))
+
+        # ── 3. Название: откат к имени файла ──
+        rag.RAG_CHUNK_MODE = "file"
+        bare = write("Ил-28.md", "Просто текст без заголовка и шапки.\n")
+        got = rag.parse_article_file(bare)
+        expect("без шапки и заголовка название не взято из имени файла — "
+               "статья осталась бы безымянной",
+               bool(got) and got[0]["title"] == "Ил-28")
+
+        empty = write("Пусто.md", "---\ntitle: Пусто\n---\n\n")
+        expect("пустая статья дала кусок — в поиск попал бы пустой вектор",
+               rag.parse_article_file(empty) == [])
+
+        # ── 4. Разбор вопроса викторины ──
+        from config import (QUIZ_EXPLANATION_MAX, QUIZ_OPTIONS_COUNT,
+                            QUIZ_QUESTION_MAX)
+
+        def q(**over):
+            item = {"question": "Какая броня у Т-72Б3?",
+                    "options": [f"вариант {i}" for i in range(QUIZ_OPTIONS_COUNT)],
+                    "correct_idx": 1, "explanation": "Разбор."}
+            item.update(over)
+            return quiz_bank._clean_question(item)
+
+        expect("годный вопрос забракован", q() is not None)
+        expect("вопрос без текста принят — опрос не отправится",
+               q(question="   ") is None)
+        expect(f"принято не {QUIZ_OPTIONS_COUNT} вариантов — Telegram такой "
+               f"опрос не примет", q(options=["раз", "два"]) is None)
+        dup = [f"вариант {i}" for i in range(QUIZ_OPTIONS_COUNT - 1)] + ["ВАРИАНТ 0"]
+        expect("два одинаковых варианта прошли проверку — у вопроса стало "
+               "два верных ответа", q(options=dup) is None)
+        expect("верный ответ строкой «2.» не разобран — модель регулярно так "
+               "отвечает, и вопрос терялся бы зря",
+               (q(correct_idx="2.") or {}).get("correct_idx") == 2)
+        expect("номер верного ответа за пределами списка принят — в игре "
+               "верного ответа не окажется вовсе", q(correct_idx=9) is None)
+        expect("вопрос длиннее лимита Telegram принят",
+               q(question="я" * (QUIZ_QUESTION_MAX + 1)) is None)
+        long_expl = q(explanation="э" * (QUIZ_EXPLANATION_MAX + 50))
+        expect("длинный разбор выбросил вопрос целиком — его положено "
+               "подрезать, а не терять", long_expl is not None)
+        expect(f"подрезанный разбор длиннее лимита "
+               f"({len((long_expl or {}).get('explanation', ''))} знаков)",
+               bool(long_expl)
+               and len(long_expl["explanation"]) <= QUIZ_EXPLANATION_MAX)
+
+    finally:
+        rag.RAG_CHUNK_MODE = saved_mode
+        _shutil.rmtree(tmp, ignore_errors=True)
+
+    return problems, (f"{done} проверок: оба режима нарезки статьи, название "
+                      f"и пустышки, отбраковка и подрезка вопросов")
+
+
+def check_report_render():
+    """
+    Сборка ТЕКСТА отчёта: ни один провайдер и ни один вызов не теряется
+    (02.09.2026).
+
+    ⚠️ ЧЕМ ЭТО ОТЛИЧАЕТСЯ ОТ check_daily_report. Тот проверяет АРИФМЕТИКУ —
+    расход за период, перенос после месячного обнуления, недельную копилку.
+    Здесь проверяется РИСОВАЛКА: те же верные цифры можно нарисовать так, что
+    блок провайдера пропадёт со страницы, и отчёт будет выглядеть исправным.
+
+    ⚠️ Поломка такого рода в проекте уже была и записана в самом коде: блоки
+    отчёта когда-то перечисляли руками, и забытый провайдер молча уезжал в
+    «прочие». Поэтому проверка берёт ожидания ИЗ РЕЕСТРА `config.PROVIDERS`,
+    а не из списка, переписанного сюда: список, сверяемый сам с собой, не
+    проверяет ничего.
+    """
+    from config import AVAILABLE_MODELS, PROVIDERS
+    from services import daily_report as rep
+
+    problems = []
+    done = 0
+
+    def expect(title, ok):
+        nonlocal done
+        done += 1
+        if not ok:
+            problems.append(title)
+
+    # По одной живой модели на каждого провайдера + вызовы модели, которой в
+    # реестре нет вовсе (её место — блок «Прочие вызовы»).
+    calls = {}
+    for pid in PROVIDERS:
+        for name, meta in AVAILABLE_MODELS.items():
+            if meta.get("provider") == pid:
+                calls[name] = 7
+                break
+    calls["выдуманная-модель-из-прошлого"] = 4
+
+    totals = {"calls": calls, "burned": {}, "qwen_reset": ()}
+    for pid, meta in PROVIDERS.items():
+        if meta["cost_key"]:
+            totals[f"{pid}_cost"] = 0.5
+    current = {f"{pid}_balance": 9.0 for pid in PROVIDERS}
+    current["qwen_tokens"] = {}
+
+    text = rep.render("📊 <b>РАСХОД</b>", "за сутки", "", totals, current)
+
+    # ── 1. Ни один провайдер не пропал ──
+    for pid, meta in PROVIDERS.items():
+        expect(f"провайдер «{pid}» пропал из отчёта — его вызовы и деньги "
+               f"стали невидимы", meta["calls_label"] in text)
+        if meta["cost_key"]:
+            expect(f"у провайдера «{pid}» нет строки расхода",
+                   meta["money_label"] in text)
+        if meta["balance_key"]:
+            expect(f"у провайдера «{pid}» пропал остаток на счету",
+                   "Остаток на счету" in text)
+
+    # ── 2. Особенности реестра доезжают до текста ──
+    approx = [pid for pid, m in PROVIDERS.items() if m["report_approx"]]
+    expect(f"расход {approx} расчётный по прайсу, но знака «≈» в отчёте нет — "
+           f"цифра читается как точная", not approx or "≈$" in text)
+
+    # ── 3. Модель вне реестра не теряется ──
+    expect("вызовы модели, которой нет в реестре, пропали из отчёта — "
+           "деньги за них никуда не попадут", "Прочие вызовы" in text)
+    expect("модель вне реестра не названа по имени",
+           "выдуманная-модель-из-прошлого" in text)
+
+    # ── 4. Пометка «счётчик правили вручную» ──
+    paid = next((pid for pid, m in PROVIDERS.items() if m["cost_key"]), None)
+    if paid:
+        manual = dict(totals)
+        manual[f"{paid}_manual"] = True
+        expect("правку счётчика вручную в отчёте не видно — цифра выглядит "
+               "измеренной", "правили вручную"
+               in rep.render("📊", "за сутки", "", manual, current))
+        expect("пометка «правили вручную» стоит там, где счётчик не правили",
+               "правили вручную" not in text)
+
+    # ── 5. Пустой период не притворяется работой ──
+    zero = rep.render("📊", "за сутки", "", {"calls": {}, "burned": {}}, current)
+    expect("на пустом периоде отчёт не собрался вовсе", bool(zero.strip()))
+    expect("на пустом периоде появился блок «Прочие вызовы»",
+           "Прочие вызовы" not in zero)
+
+    return problems, (f"{done} проверок: все {len(PROVIDERS)} провайдеров на "
+                      f"месте, модель вне реестра не теряется, пометки")
+
+
+def check_news_send():
+    """
+    Рассылка новости в чат: текст не пропадает ни в одной из веток
+    (02.09.2026).
+
+    ⚠️ ЧЕГО ЗДЕСЬ НЕТ И НЕ БУДЕТ. Получение новостей с сайта — это СЕТЬ, и
+    проверка, падающая из-за чужого сервера, однажды откатит совершенно
+    исправное обновление. Проверяется только отправка: она вся наша.
+
+    ⚠️ РАДИ ЧЕГО. У Telegram подпись к альбому ограничена 1024 знаками, и
+    поэтому отправка ветвится: короткий текст уходит подписью к картинкам,
+    длинный — ОТДЕЛЬНЫМ сообщением следом. В такой развилке текст теряется
+    целиком и молча: картинки в чате есть, новость выглядит доставленной, а
+    прочитать её нельзя.
+
+    Проверяется поддельным ботом, который просто записывает, что его просили
+    отправить. Ни сети, ни Telegram.
+    """
+    import asyncio
+
+    from jobs import news
+
+    problems = []
+    done = 0
+    GROUP = -100999
+
+    def expect(title, ok):
+        nonlocal done
+        done += 1
+        if not ok:
+            problems.append(title)
+
+    class _Sent:
+        message_id = 1
+
+    class _Bot:
+        id = 111222
+        username = "C4_Max_bot"
+        first_name = "C4_Max"
+
+        def __init__(self):
+            self.albums = []     # списки media
+            self.photos = []     # одиночные фото
+            self.texts = []      # отдельные текстовые сообщения
+            self.ents = []       # выделения: в них живут адреса ссылок
+
+        async def send_media_group(self, chat_id, media):
+            self.albums.append(media)
+            for m in media:
+                self.ents.extend(getattr(m, "caption_entities", None) or [])
+            return [_Sent()]
+
+        async def send_photo(self, chat_id, photo, caption=None, **kw):
+            self.photos.append((photo, caption))
+            self.ents.extend(kw.get("caption_entities") or [])
+            return _Sent()
+
+        async def send_message(self, chat_id, text=None, **kw):
+            self.texts.append(text or "")
+            self.ents.extend(kw.get("entities") or [])
+            return _Sent()
+
+    URL = "https://wtmobile.com/news/1"
+    SHORT = "Вышло обновление. Коротко и по делу."
+    LONG = "Очень длинная новость. " * 80          # заведомо больше 1024
+
+    def send(text, images):
+        bot = _Bot()
+        asyncio.run(news.send_news_to_chat(bot, GROUP, text, images[0] if images else "",
+                                           URL, images[1:] if len(images) > 1 else None))
+        return bot
+
+    def said(bot):
+        """
+        Всё, что бот отправил текстом — подписями и сообщениями.
+
+        ⚠️ Адреса ссылок сюда добавляются ОТДЕЛЬНО: разметка превращает
+        «[Читать на сайте](адрес)» в текст без адреса плюс выделение, в
+        котором адрес и лежит. Искать адрес в одном тексте — значит не найти
+        его никогда и решить, что ссылка потеряна.
+        """
+        return " ".join(bot.texts + [c or "" for _, c in bot.photos]
+                        + [m.caption or "" for al in bot.albums for m in al]
+                        + [getattr(e, "url", "") or "" for e in bot.ents])
+
+    # ── 1. Две картинки + короткий текст: один альбом с подписью ──
+    bot = send(SHORT, ["https://x/1.jpg", "https://x/2.jpg"])
+    expect(f"две картинки ушли не альбомом (альбомов {len(bot.albums)}, "
+           f"одиночных фото {len(bot.photos)})", len(bot.albums) == 1)
+    expect("короткий текст не ушёл подписью к альбому, а значит новость "
+           "пришла отдельным сообщением там, где могла быть одним",
+           not bot.texts)
+    expect("текст новости пропал из подписи", SHORT[:20] in said(bot))
+
+    # ── 2. Две картинки + ДЛИННЫЙ текст: альбом плюс сообщение ──
+    bot = send(LONG, ["https://x/1.jpg", "https://x/2.jpg"])
+    expect("длинные новости с альбомом больше не отправляются альбомом",
+           len(bot.albums) == 1)
+    expect("ДЛИННЫЙ ТЕКСТ НОВОСТИ ПРОПАЛ: подпись альбома его не вмещает, а "
+           "отдельным сообщением он не ушёл — в чате остались одни картинки",
+           bool(bot.texts))
+    expect("подпись к альбому длиннее лимита Telegram — альбом не отправится",
+           all(len(m.caption or "") <= 1024 for al in bot.albums for m in al))
+
+    # ── 3. Одна картинка ──
+    bot = send(SHORT, ["https://x/1.jpg"])
+    expect("одна картинка ушла альбомом", not bot.albums and len(bot.photos) == 1)
+    expect("текст не ушёл подписью к единственной картинке",
+           bool(bot.photos) and bool(bot.photos[0][1]))
+
+    bot = send(LONG, ["https://x/1.jpg"])
+    expect("при длинном тексте и одной картинке текст не ушёл отдельно",
+           bool(bot.texts))
+
+    # ── 4. Без картинок ──
+    bot = send(SHORT, [])
+    expect("новость без картинок не отправлена вовсе",
+           bool(bot.texts) and not bot.albums and not bot.photos)
+
+    # ── 5. Лимит Telegram на альбом ──
+    bot = send(SHORT, [f"https://x/{i}.jpg" for i in range(14)])
+    expect(f"в альбом попало {len(bot.albums[0]) if bot.albums else 0} "
+           f"картинок — Telegram принимает не больше десяти",
+           bool(bot.albums) and len(bot.albums[0]) <= 10)
+
+    # ── 6. Ссылка «читать на сайте» есть во всех случаях ──
+    for label, images in (("без картинок", []),
+                          ("одна картинка", ["https://x/1.jpg"]),
+                          ("альбом", ["https://x/1.jpg", "https://x/2.jpg"])):
+        expect(f"ссылка на сайт пропала из новости ({label}) — читать целиком "
+               f"человеку негде", URL in said(send(SHORT, images)))
+
+    return problems, (f"{done} проверок: альбом и подпись, длинный текст не "
+                      f"теряется, лимит картинок, ссылка на сайт")
+
+
+# ───────────────────────────────────────────────
+#  10. КЛЮЧИ СУТОК, СРОКОВ И НЕДЕЛЬ
 # ─────────────────────────────────────────────
 
 def check_time_keys():
@@ -1278,7 +2017,203 @@ def check_quiz_ranks():
 
 
 # ───────────────────────────────────────────────
-#  12. СУТОЧНЫЙ ОТЧЁТ: РАСХОД ЗА ПЕРИОД
+#  12. ВИКТОРИНА: ФАЙЛ ВОПРОСОВ ПРОТИВ БАНКА
+# ─────────────────────────────────────────────
+
+def check_quiz_seed_sync():
+    """
+    Сверка эталонного файла с банком видит расхождение — и чинит его.
+
+    ⚠️ РАДИ ЧЕГО ПРОВЕРКА СУЩЕСТВУЕТ. Кнопка «📥 Мои вопросы в черновики»
+    пропускает вопрос, который в банке уже есть, ЦЕЛИКОМ: сверяет только пару
+    «статья + текст вопроса». Значит правка ВАРИАНТОВ, ВЕРНОГО ОТВЕТА или
+    РАЗБОРА в файле обычной отправкой кода не доезжает в игру НИКАК, и увидеть
+    это нельзя ничем — файл в репозитории новый, у людей старый. Так и вышло
+    21.08.2026: «Рапорт Полковника:» вычищали прямо в боевой базе руками.
+
+    Проверка идёт по настоящему пути: пишет свой файл вопросов, заливает его
+    кнопкой, ломает файл тремя разными способами и требует, чтобы сверка
+    назвала КАЖДОЕ расхождение своим именем, а обновление их вылечило.
+
+    ⚠️ Отдельно проверяется то, ЧЕГО делать нельзя: обновление не смеет
+    трогать вопросы, которых в файле нет (машинная сборка), сбрасывать статус
+    «в игре» и обнулять счётчик показов. Иначе одна кнопка тихо вернула бы в
+    черновики всё, что Максим уже одобрил.
+    """
+    import json as _json
+    import shutil as _shutil
+    import tempfile as _tempfile
+
+    from database import history as hist
+    from services import quiz_bank
+
+    problems = []
+    done = 0
+
+    def expect(title, ok):
+        nonlocal done
+        done += 1
+        if not ok:
+            problems.append(title)
+
+    def write_seed(items):
+        with open(seed_path, "w", encoding="utf-8") as f:
+            _json.dump(items, f, ensure_ascii=False)
+
+    def wipe_bank():
+        for q in hist.list_all_quiz_questions():
+            hist.delete_quiz_question(q["id"])
+
+    base = [
+        {"article": "проверка-1.md", "question": "Первый проверочный вопрос?",
+         "options": ["раз", "два", "три", "четыре"], "correct_idx": 0,
+         "explanation": "Разбор первого."},
+        {"article": "проверка-2.md", "question": "Второй проверочный вопрос?",
+         "options": ["раз", "два", "три", "четыре"], "correct_idx": 1,
+         "explanation": "Разбор второго."},
+        {"article": "проверка-3.md", "question": "Третий проверочный вопрос?",
+         "options": ["раз", "два", "три", "четыре"], "correct_idx": 2,
+         "explanation": "Разбор третьего."},
+    ]
+
+    tmp_dir = _tempfile.mkdtemp(prefix="c4max-selftest-seed-")
+    seed_path = os.path.join(tmp_dir, "questions.json")
+    saved_path = quiz_bank.SEED_PATH
+    quiz_bank.SEED_PATH = seed_path
+
+    try:
+        wipe_bank()
+        write_seed(base)
+
+        # ── 1. Пустой банк: всё «не залито», расхождений нет ──
+        diff = quiz_bank.seed_diff()
+        expect(f"на пустом банке сверка не увидела файл: {diff}", diff["file_ok"])
+        expect(f"в файле 3 вопроса, сверка насчитала {diff['total']}", diff["total"] == 3)
+        expect(f"на пустом банке «не залито» должно быть 3, а не {diff['missing']}",
+               diff["missing"] == 3)
+        expect(f"на пустом банке не может быть совпадений, а их {diff['same']}",
+               diff["same"] == 0 and diff["changed"] == 0 and diff["extra"] == 0)
+
+        # ── 2. Залили кнопкой — расхождений не осталось ──
+        loaded = quiz_bank.load_seed(approved=False)
+        expect(f"загрузка добавила {loaded['added']} вопросов вместо 3",
+               loaded["added"] == 3)
+        diff = quiz_bank.seed_diff()
+        expect(f"сразу после загрузки всё обязано сойтись, а вышло {diff}",
+               diff["same"] == 3 and diff["changed"] == 0
+               and diff["missing"] == 0 and diff["extra"] == 0)
+
+        # Один вопрос отправляем в игру и отмечаем показ: дальше проверим,
+        # что обновление ни того, ни другого не тронуло.
+        bank = {q["question"]: q for q in hist.list_all_quiz_questions()}
+        live_id = bank["Первый проверочный вопрос?"]["id"]
+        hist.set_quiz_question_approved(live_id, True)
+        hist.note_quiz_question_asked(live_id)
+
+        # ── 3. Ломаем файл ТРЕМЯ разными способами ──
+        broken = _json.loads(_json.dumps(base))
+        broken[0]["explanation"] = "Разбор первого, переписанный."
+        broken[1]["correct_idx"] = 3
+        broken[2]["options"] = ["раз", "два", "три", "пять"]
+        write_seed(broken)
+
+        diff = quiz_bank.seed_diff()
+        expect(f"после трёх правок файла сверка насчитала расхождений "
+               f"{diff['changed']} вместо 3", diff["changed"] == 3)
+        expect(f"правки не заводят новых вопросов, а сверка увидела "
+               f"{diff['missing']} не залитых и {diff['extra']} лишних",
+               diff["missing"] == 0 and diff["extra"] == 0)
+
+        named = {i["question"]: i["what"] for i in diff["items"]}
+        expect(f"у первого вопроса разошёлся разбор, а сверка говорит "
+               f"«{named.get('Первый проверочный вопрос?')}»",
+               named.get("Первый проверочный вопрос?") == "разбор")
+        expect(f"у второго вопроса разошёлся верный ответ, а сверка говорит "
+               f"«{named.get('Второй проверочный вопрос?')}»",
+               named.get("Второй проверочный вопрос?") == "ВЕРНЫЙ ОТВЕТ")
+        expect(f"у третьего вопроса разошлись варианты, а сверка говорит "
+               f"«{named.get('Третий проверочный вопрос?')}»",
+               named.get("Третий проверочный вопрос?") == "варианты ответа")
+
+        # ── 4. ГЛАВНОЕ: кнопка загрузки этого НЕ чинит ──
+        # Если однажды она научится чинить сама — эта проверка покраснеет, и
+        # разбираться придётся не с молчаливой пропажей правок, а с проверкой.
+        loaded = quiz_bank.load_seed(approved=False)
+        expect(f"кнопка загрузки добавила {loaded['added']} вопросов там, где "
+               f"добавлять нечего — она обязана пропускать знакомые",
+               loaded["added"] == 0 and loaded["skipped"] == 3)
+        after_load = quiz_bank.seed_diff()["changed"]
+        expect(f"после кнопки загрузки расхождений осталось {after_load} из 3: "
+               f"либо она их вылечила сама (тогда кнопка обновления не нужна), "
+               f"либо сверка перестала их видеть",
+               after_load == 3)
+
+        # ── 5. Обновление лечит ──
+        applied = quiz_bank.seed_apply()
+        expect(f"обновление поправило {applied['updated']} из 3",
+               applied["updated"] == 3 and applied["changed"] == 3)
+        diff = quiz_bank.seed_diff()
+        expect(f"после обновления всё обязано сойтись, а вышло {diff}",
+               diff["changed"] == 0 and diff["same"] == 3)
+
+        # ── 6. Обновление не тронуло статус и счётчик показов ──
+        live = hist.get_quiz_question(live_id)
+        expect("обновление вернуло в черновики вопрос, который был в игре",
+               live["approved"] is True)
+        expect(f"обновление сбило счётчик показов: {live['asked_count']} вместо 1",
+               live["asked_count"] == 1)
+        expect(f"разбор не догнал файл: «{live['explanation']}»",
+               live["explanation"] == "Разбор первого, переписанный.")
+
+        # ── 7. Машинный вопрос: его в файле нет, трогать нельзя ──
+        own_id = hist.add_quiz_question("проверка-4.md", "Собранный моделью вопрос?",
+                                        ["раз", "два", "три", "четыре"], 0, "Свой разбор.")
+        diff = quiz_bank.seed_diff()
+        expect(f"вопрос вне файла обязан считаться «в банке своё», а вышло "
+               f"extra={diff['extra']}", diff["extra"] == 1)
+        expect("вопрос вне файла попал в расхождения — обновление затрёт "
+               "машинную сборку", diff["changed"] == 0)
+        quiz_bank.seed_apply()
+        own = hist.get_quiz_question(own_id)
+        expect("обновление переписало вопрос, которого в файле нет",
+               own["explanation"] == "Свой разбор.")
+
+        # ── 8. Правка САМОГО ТЕКСТА вопроса — это другой вопрос ──
+        # Такую сверка обязана показать как «не залито» + «в банке своё», а не
+        # чинить молча: угадывать, какая старая запись кем заменяется, нельзя.
+        renamed = _json.loads(_json.dumps(broken))
+        renamed[0]["question"] = "Первый проверочный вопрос, переписанный?"
+        write_seed(renamed)
+        diff = quiz_bank.seed_diff()
+        expect(f"переписанный текст вопроса обязан быть «не залито 1», а вышло "
+               f"{diff['missing']}", diff["missing"] == 1)
+        expect(f"старая запись обязана остаться видимой как «в банке своё» "
+               f"(машинная 1 + осиротевшая 1 = 2), а вышло {diff['extra']}",
+               diff["extra"] == 2)
+
+        # ── 9. Битый файл не роняет ни сверку, ни обновление ──
+        with open(seed_path, "w", encoding="utf-8") as f:
+            f.write("{ это не JSON")
+        diff = quiz_bank.seed_diff()
+        expect("на битом файле сверка обязана сказать «файла нет», а не "
+               "показать расхождения", not diff["file_ok"] and diff["changed"] == 0)
+        expect("обновление на битом файле что-то переписало",
+               quiz_bank.seed_apply()["updated"] == 0)
+
+    finally:
+        quiz_bank.SEED_PATH = saved_path
+        _shutil.rmtree(tmp_dir, ignore_errors=True)
+        try:
+            wipe_bank()
+        except Exception:
+            pass
+
+    return problems, (f"{done} проверок: сверка файла с банком, три вида "
+                      f"расхождений, загрузка их не чинит, обновление чинит")
+
+
+# ───────────────────────────────────────────────
+#  13. СУТОЧНЫЙ ОТЧЁТ: РАСХОД ЗА ПЕРИОД
 # ─────────────────────────────────────────────
 
 def check_daily_report():
@@ -1948,6 +2883,7 @@ def check_web_pages():
         "/users":   lambda: pages.page_users("подпись"),
         "/kb":      lambda: pages.page_kb(None, "подпись"),
         "/quiz":    lambda: pages.page_quiz(None, "подпись"),
+        "/journal": lambda: pages.page_journal("подпись"),
         "/system":  lambda: pages.page_system(None, "подпись"),
     }
     for where, build in made.items():
@@ -2077,8 +3013,350 @@ def check_web_pages():
     for q in hist.list_quiz_questions(approved=False, limit=5):
         hist.delete_quiz_question(q["id"])
 
+    # ── листание истории обновлений (этап 8, 01.09.2026) ──
+    # ⚠️ Ради чего. До этого сайт показывал 15 последних правок и дальше пути
+    # не было. Листалка, которая рисуется, но всегда показывает одно и то же —
+    # ровно та поломка, которую глазами не отличить от рабочей.
+    from services import update_log
+    history_len = len(update_log.recent()) if update_log.available() else 0
+    from handlers.admin.panel_updates import _PAGE_SIZE as _UPD_PAGE
+    paging = "истории git нет — листание не проверено"
+    if history_len > _UPD_PAGE:
+        first = pages.page_system(None, "подпись", upd_page=0)
+        second = pages.page_system(None, "подпись", upd_page=1)
+        expect("на первой странице обновлений нет кнопки «Раньше»",
+               "upd=1" in first)
+        expect("на первой странице есть «Позже» — уходить некуда, она первая",
+               "Позже" not in first)
+        expect("со второй страницы нет возврата к свежим",
+               "upd=0" in second and "Позже" in second)
+        # Настоящее листание: наборы правок на страницах обязаны различаться.
+        newest = update_log.recent()[0]
+        from handlers.admin.panel_updates import _label
+        expect("вторая страница показывает те же правки, что первая — "
+               "листалка нарисована, но не листает",
+               _label(newest) in first and _label(newest) not in second)
+        # Номер страницы за пределом не роняет страницу и не отдаёт пустоту.
+        far = pages.page_system(None, "подпись", upd_page=999)
+        expect("номер страницы за пределом отдал пустой список",
+               "история недоступна" not in far)
+        paging = f"листание обновлений на {history_len} правках"
+
     return problems, (f"{done} проверок: викторина, база знаний, промпты, "
-                      f"люди, обслуживание, экранирование")
+                      f"люди, обслуживание, экранирование, {paging}")
+
+
+def check_journal_page():
+    """
+    Страница журналов показывает то, ради чего её открывают, и не показывает
+    лишнего (этап 6, 01.09.2026).
+
+    ⚠️ РАДИ ЧЕГО. Это первая страница сайта, где лежит ЧУЖАЯ ПЕРЕПИСКА —
+    тексты сообщений, удалённых ботом. Две ошибки здесь тихие и обе дорогие:
+    улики не показались (страница бесполезна, а выглядит рабочей) или имя
+    участника доехало до страницы разметкой (символ «<» ломает вёрстку — ровно
+    на этом уже наступали в панели бота).
+
+    ⚠️ Отдельно проверяется, что улики НЕ показываются, пока их не открыли.
+    Без этой половины проверку прошла бы страница, вываливающая переписку всех
+    наказанных сразу.
+    """
+    from database import history as hist
+    from web import pages
+
+    problems = []
+    done = 0
+
+    def expect(title, ok):
+        nonlocal done
+        done += 1
+        if not ok:
+            problems.append(title)
+
+    def wipe():
+        with hist._lock:
+            conn = hist._get_connection()
+            conn.execute("DELETE FROM moderation_log")
+            conn.execute("DELETE FROM mute_evidence")
+            conn.execute("DELETE FROM staff_log")
+            conn.commit()
+
+    SECRET = "секретное слово из удалённого сообщения"
+    try:
+        wipe()
+
+        # ── 1. Пустые журналы — это не поломка ──
+        empty = pages.page_journal("подпись")
+        expect("пустой журнал модерации не объясняет себя",
+               "бот никого не наказывал" in empty)
+        expect("пустой журнал персонала не объясняет себя",
+               "персонал ничего не делал" in empty)
+
+        # ── 2. Улики видно только после того, как их открыли ──
+        mute_id = hist.log_moderation_action("mute", -100, 555, "Вася <хитрый>")
+        hist.save_mute_evidence(mute_id, [{"text": SECRET, "has_photo": False},
+                                          {"text": "", "has_photo": True}])
+        link_id = hist.log_moderation_action("linkdel", -100, 556, "Петя")
+        kick_id = hist.log_moderation_action("kick", -100, 557, "Спамер",
+                                             admin_name="Максим")
+
+        closed = pages.page_journal("подпись")
+        expect("чужая переписка показана на странице, хотя улики не открывали",
+               SECRET not in closed)
+        opened = pages.page_journal("подпись", evidence=mute_id)
+        expect("улики открыли, а текста удалённого сообщения на странице нет",
+               SECRET in opened)
+        expect("сообщение без текста показано пустой строкой вместо пометки",
+               "фото/медиа" in opened)
+
+        # ── 3. Кнопка улик — только там, где улики бывают ──
+        expect("у мута нет кнопки улик", f"evidence={mute_id}" in closed)
+        expect("у удалённой ссылки нет кнопки улик", f"evidence={link_id}" in closed)
+        expect("у кика есть кнопка улик — улик у него не бывает, "
+               "нажатие показало бы пустоту", f"evidence={kick_id}" not in closed)
+
+        # ── 4. Имя участника — чужой текст ──
+        expect("имя участника доехало до страницы разметкой",
+               "Вася <хитрый>" not in closed)
+        expect("имя участника не экранировано", "&lt;хитрый&gt;" in closed)
+
+        # ── 5. Виды записей журнала и счётчик сводки не разъехались ──
+        # ⚠️ Ради чего. 20.07.2026 завели новый вид мута и забыли вписать его
+        # в счётчик: в списке действий он был, а в строке «за 7 дней» пропадал,
+        # и панель занижала цифру. Теперь названия видов лежат одним словарём,
+        # и проверка требует, чтобы счётчик знал ровно те же виды.
+        from handlers.admin.panel_mod import MOD_ACTION_TITLES
+        # ⚠️ ИЩЕМ ПО ВСЕМУ ПАКЕТУ database/, А НЕ В ОДНОМ ФАЙЛЕ (02.09.2026).
+        # Раньше здесь был жёстко прописан путь database/history.py. Этот файл
+        # режется на части, функция уехала в database/moderation.py — и
+        # проверка честно покраснела «нашёл set()». Краснеть на переезде она не
+        # должна: её предмет — СОДЕРЖИМОЕ функции, а не то, в каком файле та
+        # лежит. Обход всего пакета переживёт и оставшиеся переезды.
+        db_src = "\n".join(p.read_text(encoding="utf-8")
+                           for p in sorted(pathlib.Path(ROOT, "database").glob("*.py")))
+        counts_src = re.search(r"def get_moderation_counts(.|\n)*?return counts", db_src)
+        counted = set(re.findall(r'r\["action"\] (?:==|in) \(?([^)\n:]+)',
+                                 counts_src.group(0))) if counts_src else set()
+        counted = {w.strip().strip('"').strip("'")
+                   for chunk in counted for w in chunk.split(",") if w.strip()}
+        expect(f"не разобрал, какие виды записей считает сводка (нашёл {counted})",
+               len(counted) >= 5)
+        for kind in sorted(set(MOD_ACTION_TITLES) - counted):
+            problems.append(f"вид записи «{kind}» показывается в журнале, но "
+                            f"сводка «за N дней» его не считает — цифра занижена")
+            done += 1
+        for kind in sorted(counted - set(MOD_ACTION_TITLES)):
+            problems.append(f"вид записи «{kind}» считается сводкой, но названия "
+                            f"у него нет — в журнале он будет «❔ {kind}»")
+            done += 1
+
+    finally:
+        wipe()
+
+    return problems, (f"{done} проверок: улики видно только открытыми, чужой "
+                      f"текст экранирован, виды записей сведены со счётчиком")
+
+
+def check_journal_clears():
+    """
+    Очистки журналов с сайта оставляют ТЕ ЖЕ следы, что кнопки бота, и не
+    срабатывают с первого нажатия (этап 6, 01.09.2026).
+
+    ⚠️ РАДИ ЧЕГО. Обе очистки необратимы, и обе тихие: сработавшая без
+    подтверждения выглядит как «страница перезагрузилась».
+
+    ⚠️ И ещё одно, менее очевидное. Очистка журнала МОДЕРАЦИИ обязана
+    оставить надзорную запись «кто стёр улики» — тем же кодом `modlog_clear`,
+    что у кнопки бота. А очистка журнала ПЕРСОНАЛА обязана НЕ писать ничего:
+    запись легла бы в только что стёртый журнал и осталась бы там
+    единственной строкой. Разойдись это с ботом — один и тот же поступок
+    оставлял бы разные следы в зависимости от места нажатия.
+
+    Ветка зовётся целиком, с поддельным запросом: проверяем поведение, а не
+    текст исходника. Вход подменён намеренно — его проверяет check_web_auth.
+    """
+    import asyncio
+
+    from database import history as hist
+    from web import auth, routes
+
+    problems = []
+    done = 0
+    OWNER = 4242
+
+    def expect(title, ok):
+        nonlocal done
+        done += 1
+        if not ok:
+            problems.append(title)
+
+    class _Request:
+        """Поддельный запрос: ровно то, что читает ветка журналов."""
+        def __init__(self, method="GET", form=None, query=None):
+            self.method = method
+            self.cookies = {}
+            self.query = query or {}
+            self._form = form or {}
+
+        async def post(self):
+            return self._form
+
+    saved_ok, saved_user = auth.csrf_ok, auth.current_user
+    auth.csrf_ok = lambda request, given: True
+    auth.current_user = lambda request: OWNER
+
+    def wipe():
+        with hist._lock:
+            conn = hist._get_connection()
+            conn.execute("DELETE FROM moderation_log")
+            conn.execute("DELETE FROM mute_evidence")
+            conn.execute("DELETE FROM staff_log")
+            conn.commit()
+
+    def fill():
+        mid = hist.log_moderation_action("mute", -100, 555, "Вася")
+        hist.save_mute_evidence(mid, [{"text": "улика", "has_photo": False}])
+        hist.log_moderation_action("kick", -100, 556, "Петя", admin_name="Максим")
+        hist.log_staff_action(OWNER, "Максим", "quiz_seed", 0, "проверка")
+        return mid
+
+    def post(do, confirm=False):
+        form = {"csrf": "x", "do": do}
+        if confirm:
+            form["confirm"] = "1"
+        return asyncio.run(routes.journal(_Request("POST", form)))
+
+    try:
+        # ── 1. Первое нажатие только спрашивает ──
+        wipe()
+        mid = fill()
+        answer = post("modclear")
+        expect("после первого нажатия не показан вопрос «Да, выполнить»",
+               "Да, выполнить" in answer.text)
+        expect("журнал модерации стёрся с ПЕРВОГО нажатия, без подтверждения",
+               len(hist.get_recent_moderation_actions(10)) == 2)
+        expect("улики стёрлись с первого нажатия",
+               len(hist.get_mute_evidence(mid)) == 1)
+
+        answer = post("staffclear")
+        expect("журнал персонала стёрся с ПЕРВОГО нажатия, без подтверждения",
+               len(hist.get_recent_staff_actions(10)) == 1)
+
+        # ── 2. Очистка модерации: стирает и ОСТАВЛЯЕТ надзорный след ──
+        before = len(hist.get_recent_staff_actions(50))
+        post("modclear", confirm=True)
+        expect("журнал модерации не стёрся после подтверждения",
+               not hist.get_recent_moderation_actions(10))
+        expect("улики пережили очистку журнала", not hist.get_mute_evidence(mid))
+        staff = hist.get_recent_staff_actions(50)
+        expect(f"очистка журнала модерации не оставила следа в журнале персонала "
+               f"(было {before}, стало {len(staff)})", len(staff) == before + 1)
+        expect(f"след очистки записан кодом «{staff[0]['action'] if staff else '—'}», "
+               f"а кнопка бота пишет «modlog_clear» — журнал назовёт одно "
+               f"действие двумя именами",
+               bool(staff) and staff[0]["action"] == "modlog_clear")
+        expect("в следе очистки не сказано, сколько записей стёрли",
+               bool(staff) and any(ch.isdigit() for ch in (staff[0].get("details") or "")))
+
+        # ── 3. Очистка персонала: стирает и НЕ пишет о себе ──
+        post("staffclear", confirm=True)
+        expect("журнал персонала не стёрся после подтверждения",
+               not hist.get_recent_staff_actions(10))
+
+    finally:
+        auth.csrf_ok, auth.current_user = saved_ok, saved_user
+        wipe()
+
+    return problems, (f"{done} проверок: первое нажатие спрашивает, очистка "
+                      f"модерации оставляет след, очистка персонала — нет")
+
+
+def check_prompts_extras():
+    """
+    Личный тумблер промпта и экран участия на странице промптов (этап 7).
+
+    ⚠️ РАДИ ЧЕГО ТУМБЛЕР. Настройка `admin_no_prompt_<id>` хранится НАОБОРОТ:
+    "1" означает «промпт ВЫКЛЮЧЕН». Тумблер показывает состояние промпта, то
+    есть перевёрнутое значение. Забыть про переворот — значит нарисовать
+    кнопку, врущую в обе стороны сразу, и заметить это можно только по
+    поведению бота в личке, то есть очень нескоро.
+
+    ⚠️ И второе: настройка ЛИЧНАЯ, ключ несёт id админа. Общая на всех
+    отключила бы промпт сразу всем, кто входит на сайт.
+
+    ⚠️ РАДИ ЧЕГО УЧАСТИЕ. Половина этого экрана считается в памяти и
+    обнуляется перезапуском. Без предупреждения об этом цифры выглядят
+    противоречиво («за неделю 300 проверок, отсеяно 12») — и на экране бота
+    предупреждение есть.
+    """
+    from database import history as hist
+    from web import actions, pages
+
+    problems = []
+    done = 0
+    ME, OTHER = 4242, 4343
+
+    def expect(title, ok):
+        nonlocal done
+        done += 1
+        if not ok:
+            problems.append(title)
+
+    try:
+        # ── 1. Состояние тумблера против перевёрнутого хранения ──
+        hist.delete_setting(f"admin_no_prompt_{ME}")
+        page = pages.page_prompts("подпись", viewer_id=ME)
+        expect("без настройки промпт обязан считаться включённым",
+               "применяется" in page and "не применяется" not in page)
+
+        hist.set_setting(f"admin_no_prompt_{ME}", "1")
+        page = pages.page_prompts("подпись", viewer_id=ME)
+        expect('в настройке "1" — промпт ВЫКЛЮЧЕН, а тумблер показывает '
+               'обратное', "не применяется" in page)
+
+        # ── 2. Нажатие переключает, и в обе стороны ──
+        now_on = actions.toggle_personal_prompt(ME)
+        expect(f"нажатие вернуло {now_on}, а промпт был выключен — ждали True",
+               now_on is True)
+        expect('после включения в настройке должно лежать "0"',
+               hist.get_setting(f"admin_no_prompt_{ME}", "0") == "0")
+        expect("второе нажатие не выключило промпт обратно",
+               actions.toggle_personal_prompt(ME) is False)
+
+        # ── 3. Тумблер ЛИЧНЫЙ ──
+        hist.delete_setting(f"admin_no_prompt_{OTHER}")
+        actions.toggle_personal_prompt(ME)
+        expect("переключение у одного админа задело настройку другого",
+               hist.get_setting(f"admin_no_prompt_{OTHER}", "0") == "0")
+        expect("страница другого админа показывает чужое состояние",
+               "не применяется" not in pages.page_prompts("подпись",
+                                                          viewer_id=OTHER))
+
+        # ── 4. Участие: цифры из журнала доезжают до страницы ──
+        for _ in range(3):
+            hist.log_proactive_check(-100999, "reply", "модель", 1.5, 10, "text")
+        hist.log_proactive_check(-100999, "silent", "модель", 0.5, 0, "photo")
+        page = pages.page_prompts("подпись", viewer_id=ME)
+        expect("на странице нет раздела участия в разговоре",
+               "Участие в разговоре" in page)
+        expect("проверки из журнала не доехали до страницы (ждали 4)",
+               ">4<" in page)
+        expect("исход «промолчал» не показан, хотя он есть в журнале",
+               "промолчал" in page)
+        expect("не сказано, что отсев живёт в памяти и обнуляется "
+               "перезапуском — цифры выглядели бы противоречиво",
+               "обнуляются перезапуском" in page)
+
+    finally:
+        for uid in (ME, OTHER):
+            hist.delete_setting(f"admin_no_prompt_{uid}")
+        with hist._lock:
+            conn = hist._get_connection()
+            conn.execute("DELETE FROM proactive_log WHERE chat_id = ?", (-100999,))
+            conn.commit()
+
+    return problems, (f"{done} проверок: перевёрнутое хранение тумблера, "
+                      f"он личный, цифры участия и оговорка про память")
 
 
 def check_web_wiring():
@@ -2150,6 +3428,18 @@ def check_web_wiring():
         _hist.set_quiz_question_approved(draft[0]["id"], True)
     _hist.add_quiz_question("Проверка проводки", "Второй вопрос-черновик?",
                             ["раз", "два"], 0, "")
+    # ⚠️ Кнопка «♻️ Обновить из файла» рисуется, ТОЛЬКО когда банк отстал от
+    # эталонного файла (2026-09-01). Чтобы она попала на страницу, кладём в
+    # банк первый вопрос файла с нарочно испорченным разбором. Без этого
+    # проверка «обработчик есть, а кнопки нет» краснела бы на исправном коде.
+    from services import quiz_bank as _qb
+    _seed_items = _qb._read_seed() or []
+    for _raw in _seed_items:
+        _c = _qb._clean_question(_raw) if isinstance(_raw, dict) else None
+        if _c and _raw.get("article"):
+            _hist.add_quiz_question(_raw["article"], _c["question"], _c["options"],
+                                    _c["correct_idx"], "разбор нарочно отстал")
+            break
     with _hist._lock:
         _conn = _hist._get_connection()
         _conn.execute("INSERT OR REPLACE INTO known_chats (chat_id, title, last_seen) "
@@ -2184,6 +3474,10 @@ def check_web_wiring():
                                open_article="pending/проверка.md")
         drawn += pages.page_quiz(None, "подпись", mode="draft")
         drawn += pages.page_quiz(None, "подпись", mode="live")
+        drawn += pages.page_journal("подпись")
+        # viewer_id обязателен: без него личный тумблер промпта не рисуется,
+        # и проверка «кнопка ↔ обработчик» не увидела бы его пропажу.
+        drawn += pages.page_prompts("подпись", viewer_id=777000111)
         drawn += pages.page_system(None, "подпись",
                                    digest_chat=-100999, digest_body="текст")
         drawn += _asyncio.run(pages.page_user_card(None, 777000111, "подпись"))
@@ -2521,15 +3815,24 @@ CHECKS = (
     ("потолки ожидания — перебор моделей", check_wait_budgets),
     ("антиспам — альбом не считается флудом", check_album_not_flood),
     ("копилка альбома — все кадры уходят модели", check_album_collect),
+    ("фильтр ссылок — белый список и мут за повторы", check_link_filter),
+    ("приветствие новичков и проверка «я не бот»", check_greeter),
+    ("разбор статей и вопросов викторины", check_parsing),
+    ("отчёт — ни один провайдер не теряется", check_report_render),
+    ("рассылка новостей — текст не пропадает", check_news_send),
     ("метки суток, сроков и недель", check_time_keys),
     ("шаг цикла расписания — начало часа", check_schedule_step),
     ("база знаний — пик против полки", check_rag_pick),
     ("звания викторины — лестница без дыр", check_quiz_ranks),
+    ("викторина — файл вопросов против банка", check_quiz_seed_sync),
     ("суточный отчёт — расход за период", check_daily_report),
     ("единый список настроек против читалок бота", check_settings_spec),
     ("список промптов против панели бота", check_prompts_spec),
     ("журнал персонала знает все коды действий", check_audit_codes),
     ("страницы сайта показывают то, что нужно", check_web_pages),
+    ("страница журналов: улики и чужой текст", check_journal_page),
+    ("очистки журналов оставляют верные следы", check_journal_clears),
+    ("личный тумблер промпта и цифры участия", check_prompts_extras),
     ("сайт: цифры и кнопки не разъехались с источником", check_web_wiring),
     ("ссылка входа исчезает вместе со своим сроком", check_login_link_message),
     ("вход в веб-админку — подпись и срок", check_web_auth),
@@ -2542,9 +3845,14 @@ def main() -> int:
     # ⚠️ ПЕРВЫМ ДЕЛОМ уводим базу во временную папку — как в preflight.py.
     # Сейчас ни одна проверка в базу не ходит, но следующая может, и лучше
     # пусть она с самого начала пишет в пустышку, а не в боевую history.db.
+    # ⚠️ ПОДМЕНЯЕМ config.DB_PATH, А НЕ history.DB_PATH (02.09.2026) — по той же
+    # причине, что и в preflight.py: соединение открывает database/_core.py и
+    # спрашивает путь у config в момент открытия. Со старой строкой проверки
+    # писали бы В БОЕВУЮ history.db, и заметить это было бы нечем.
     tmp_dir = tempfile.mkdtemp(prefix="c4max-selftest-")
+    import config
+    config.DB_PATH = os.path.join(tmp_dir, "selftest.db")
     from database import history as hist
-    hist.DB_PATH = os.path.join(tmp_dir, "selftest.db")
     # Схему создаём сразу: проверки потолков зовут настоящие ask_gemini_*,
     # а те по дороге читают историю переписки и настройки. Без таблиц они
     # падают на «no such table», и проверка краснеет не по делу.

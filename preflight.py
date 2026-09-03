@@ -240,7 +240,9 @@ def check_tables():
 
     problems = []
     hist.init_db()
-    with sqlite3.connect(hist.DB_PATH) as con:
+    # Путь берём из config — там же, где его увела main() (см. пояснение там).
+    import config
+    with sqlite3.connect(config.DB_PATH) as con:
         real = {r[0] for r in con.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
         )} - {"sqlite_sequence"}
@@ -631,9 +633,16 @@ def main() -> int:
 
     # ⚠️ ПЕРВЫМ ДЕЛОМ уводим базу во временную папку. Всё, что проверки пишут
     # и читают, происходит там; боевая history.db не открывается ни разу.
+    #
+    # ⚠️ ПОДМЕНЯЕМ config.DB_PATH, А НЕ history.DB_PATH (02.09.2026). Соединение
+    # с базой открывает database/_core.py и берёт путь из config в момент
+    # открытия — правка внутренностей history на него больше не влияет. Пока
+    # здесь стояло hist.DB_PATH, проверка честно покраснела «init_db не создаёт
+    # таблицы»; молчаливый исход был бы хуже — запись в боевую history.db.
     tmp_dir = tempfile.mkdtemp(prefix="c4max-preflight-")
-    from database import history as hist
-    hist.DB_PATH = os.path.join(tmp_dir, "preflight.db")
+    import config
+    config.DB_PATH = os.path.join(tmp_dir, "preflight.db")
+    from database import history as hist   # ниже: hist.close_db() при выходе
 
     # Логи проверок не нужны: они утопили бы вывод, а deploy.sh показывает
     # человеку последние строки. Оставляем только собственную печать.

@@ -553,6 +553,24 @@ def quiz_seed(actor_id: int) -> dict:
     return result
 
 
+def quiz_reseed(actor_id: int) -> dict:
+    """
+    Догнать банк до эталонного файла: переписать варианты, верный ответ и
+    разбор там, где они разошлись (2026-09-01).
+
+    ⚠️ Это НЕ «загрузить ещё раз». Загрузка добавляет новые вопросы и молча
+    пропускает знакомые; здесь чинится ровно то, что она пропускает.
+    """
+    from services import quiz_bank
+    result = quiz_bank.seed_apply()
+    if result["updated"]:
+        _staff_audit(actor_id, "quiz_reseed", 0,
+                     f"догнано до файла: {result['updated']}")
+    logger.info("🌐 Сайт: банк догнан до эталонного файла (%s, админ %s)",
+                result, actor_id)
+    return result
+
+
 def quiz_wipe_drafts(actor_id: int) -> int:
     """Стереть все черновики вопросов."""
     from database.history import delete_quiz_drafts
@@ -743,6 +761,64 @@ def wipe_conversations(actor_id: int) -> str:
     logger.info("🌐 Сайт: бот забыл разговоры во всех группах (черта %s UTC, админ %s)",
                 mark, actor_id)
     return "🧹 Готово: бот забыл разговоры во всех группах."
+
+
+def toggle_personal_prompt(actor_id: int) -> bool:
+    """
+    Личный тумблер «применять ли ко мне промпт» (этап 7, 01.09.2026).
+    Возвращает новое состояние ПРОМПТА (True — применяется).
+
+    ⚠️ НАСТРОЙКА ХРАНИТСЯ НАОБОРОТ: "1" значит «промпт выключен». Так же
+    в панели бота (`handlers/admin/router.py`, ветка `toggle_admin_prompt`),
+    и трогать это хранение ради красоты нельзя — у живых админов уже лежат
+    выставленные значения.
+
+    ⚠️ В журнал персонала НЕ пишется — кнопка бота тоже не пишет: настройка
+    личная и на других людей не влияет.
+    """
+    from database.history import get_setting, set_setting
+
+    off_now = get_setting(f"admin_no_prompt_{actor_id}", "0") == "1"
+    set_setting(f"admin_no_prompt_{actor_id}", "0" if off_now else "1")
+    logger.info("🌐 Сайт: личный промпт админа %s %s",
+                actor_id, "включён" if off_now else "выключен")
+    return off_now
+
+
+def clear_moderation_journal(actor_id: int) -> int:
+    """
+    Очистка журнала модерации — вместе с уликами (01.09.2026).
+
+    ⚠️ СЛЕД В ЖУРНАЛЕ ПЕРСОНАЛА ОБЯЗАТЕЛЕН И КОД У НЕГО ТОТ ЖЕ, что у кнопки
+    бота (`panel_mod::_handle_clearlog_callback` пишет `modlog_clear`). Это
+    надзорная запись: она отвечает на вопрос «кто стёр улики», и разойдись
+    коды — журнал начал бы называть одно и то же действие по-разному.
+    """
+    from database.history import clear_moderation_log
+
+    deleted = clear_moderation_log()
+    _staff_audit(actor_id, "modlog_clear", 0, f"журнал модерации: {deleted} записей")
+    logger.info("🌐 Сайт: очищен журнал модерации (%d записей, админ %s)",
+                deleted, actor_id)
+    return deleted
+
+
+def clear_staff_journal(actor_id: int) -> int:
+    """
+    Очистка журнала персонала (01.09.2026).
+
+    ⚠️ В ЖУРНАЛ НЕ ПИШЕТ НИЧЕГО — и это не забывчивость, а повторение кнопки
+    бота (`panel_users`, ветка `slogclear`): запись «журнал очищен» легла бы в
+    тот самый журнал, который только что стёрли, и осталась бы там
+    единственной строкой. Заводить её здесь значит развести следы одного
+    действия по месту нажатия.
+    """
+    from database.history import clear_staff_log
+
+    deleted = clear_staff_log()
+    logger.info("🌐 Сайт: очищен журнал персонала (%d записей, админ %s)",
+                deleted, actor_id)
+    return deleted
 
 
 async def restart_bot(actor_id: int, application) -> str:

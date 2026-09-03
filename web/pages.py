@@ -289,6 +289,7 @@ NAV = (
     ("/users",   "👥 Пользователи"),
     ("/kb",      "📚 База знаний"),
     ("/quiz",    "🎮 Викторина"),
+    ("/journal", "📋 Журналы"),
     ("/system",  "🛠 Обслуживание"),
 )
 
@@ -573,7 +574,7 @@ def _money_block(csrf: str) -> str:
 def page_system(application, csrf: str = "", confirm: str = "",
                 report: str = "", report_text: str = "",
                 digest_chat: int = 0, digest_body: str = "",
-                message: str = "", bad: bool = False) -> str:
+                message: str = "", bad: bool = False, upd_page: int = 0) -> str:
     """Деньги, отчёты, логи, обновления, дайджест, копия базы, перезапуск."""
     from database.history import get_known_chats
     from services import backup, group_digest, update_log
@@ -618,10 +619,19 @@ def page_system(application, csrf: str = "", confirm: str = "",
     # ── обновления ──
     upd_html = "<h2>⬇️ Обновления</h2>"
     try:
-        items = update_log.recent(15) if update_log.available() else []
+        items = update_log.recent() if update_log.available() else []
     except Exception as e:
         logger.debug("🌐 Не удалось прочитать историю обновлений: %s", e)
         items = []
+
+    # Листаем страницами по столько же, сколько в боте (`panel_updates`):
+    # до 01.09.2026 сайт показывал 15 последних и дальше пути не было.
+    # ⚠️ Размер страницы берётся ОТТУДА, а не своим числом — иначе «Раньше»
+    # на сайте и в боте пролистывали бы разное количество.
+    from handlers.admin.panel_updates import _PAGE_SIZE as _UPD_PAGE
+    upd_pages = max(1, (len(items) + _UPD_PAGE - 1) // _UPD_PAGE)
+    upd_page = max(0, min(upd_page, upd_pages - 1))
+    items = items[upd_page * _UPD_PAGE:(upd_page + 1) * _UPD_PAGE]
     if items:
         # ⚠️ Надпись собирает та же функция, что и кнопки в боте
         # (`panel_updates._label`): она умеет не повторять номер версии дважды
@@ -634,6 +644,16 @@ def page_system(application, csrf: str = "", confirm: str = "",
             f'rel="noopener noreferrer">{esc(_label(u))}</a></div></div>'
             for u in items)
         upd_html += f'<div class="rows">{rows}</div>'
+        # Листалка появляется, только когда листать есть что. Ссылками, а не
+        # формой: переход по страницам — чтение, менять им нечего.
+        if upd_pages > 1:
+            back = (f'<a class="btn" href="/system?upd={upd_page + 1}">← Раньше</a>'
+                    if upd_page + 1 < upd_pages else "")
+            fwd = (f'<a class="btn" href="/system?upd={upd_page - 1}">Позже →</a>'
+                   if upd_page > 0 else "")
+            upd_html += (f'<div class="warn-btns">{back}'
+                         f'<span class="note">страница {esc(upd_page + 1)} '
+                         f'из {esc(upd_pages)}</span>{fwd}</div>')
     else:
         upd_html += ('<div class="rows"><div class="empty">история недоступна — '
                      'git не отвечает или это не рабочая копия</div></div>')
@@ -708,6 +728,160 @@ def page_system(application, csrf: str = "", confirm: str = "",
             + dig_html + copy_html + danger_html
             + '<footer><span><a href="/">← к сводке</a></span></footer></div>')
     return _shell("Обслуживание — C4_Max", body)
+
+
+# ─── журналы: модерация и персонал (этап 6, 01.09.2026) ─────────────
+#
+#  ⚠️ ЗАЧЕМ ЭТА СТРАНИЦА. До неё сайт ПИСАЛ в журнал персонала на каждом
+#  действии, а прочитать его можно было только из Телеграма. Журнал модерации
+#  и улики (тексты удалённых сообщений) на сайте отсутствовали вовсе.
+#
+#  ⚠️ ЗДЕСЬ ЛЕЖИТ ЧУЖАЯ ПЕРЕПИСКА. Улики — это сообщения живых людей, удалённые
+#  ботом. Круг зрителей не расширился (на сайт пускает только владельца,
+#  модераторов здесь нет вовсе), но цена утечки ссылки входа выросла: по ней
+#  теперь открываются не только настройки. Любая новая строка на этой странице
+#  проверяется вопросом «что будет, если этот экран однажды увидит чужой».
+#
+#  ⚠️ ИМЕНА И ТЕКСТЫ ЗДЕСЬ — ЧУЖОЙ ВВОД. Экранировать обязательно: символ «<»
+#  в имени участника ломает разметку и страница перестаёт открываться. Ровно
+#  на этом уже наступали в панели бота.
+
+# Сколько строк журнала модерации показывает СТРАНИЦА. В боте их пять
+# (`panel_mod`) — но там потолок сообщения Telegram в 4096 знаков, а здесь его
+# нет. Переносить вместе с возможностью её ограничение незачем; панель бота
+# при этом не тронута, там по-прежнему пять.
+_MOD_LOG_LIMIT = 25
+
+
+def _jform(csrf: str, fields: dict, inner: str, cls: str = "ctl") -> str:
+    """Форма, отправляющая действие на страницу журналов."""
+    hidden = f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+    for name, value in fields.items():
+        hidden += f'<input type="hidden" name="{esc(name)}" value="{esc(value)}">'
+    return f'<form method="post" action="/journal" class="{cls}">{hidden}{inner}</form>'
+
+
+def _evidence_block(log_id: int) -> str:
+    """Развёрнутые улики одной записи: тексты удалённых сообщений."""
+    from services.antispam import get_evidence, MOD_STATS_DAYS
+
+    saved = get_evidence(log_id)
+    if saved:
+        items = []
+        for i, m in enumerate(saved, 1):
+            text = (m.get("text") or "").strip()
+            if not text:
+                # Пустой текст — не поломка: мутят и за поток картинок.
+                text = ("🖼 [фото/медиа — без текста]" if m.get("has_photo")
+                        else "[пусто]")
+            items.append(f'<li>{esc(text)}</li>')
+        inner = f'<ol class="opts">{"".join(items)}</ol>'
+    else:
+        inner = ('<div class="empty">тексты не сохранились — сообщения были '
+                 'без текста или запись уже очищена</div>')
+    return (f'<div class="pcard"><div class="phead">'
+            f'<h3>📜 Удалённые сообщения</h3>'
+            f'<span class="pmeta">хранятся {esc(MOD_STATS_DAYS)} дней · '
+            f'<a href="/journal">закрыть</a></span></div>{inner}</div>')
+
+
+def page_journal(csrf: str = "", confirm: str = "", evidence: int = 0,
+                 message: str = "") -> str:
+    """Журналы: модерация с уликами и персонал, обе очистки."""
+    from config import STAFF_LOG_DAYS
+    from database.history import (count_staff_actions, get_recent_moderation_actions,
+                                  get_recent_staff_actions)
+    from handlers.admin.common import _fmt_mod_time, _known_names, _staff_name
+    from handlers.admin.panel_mod import MOD_ACTION_TITLES, MOD_ACTIONS_WITH_EVIDENCE
+    from handlers.admin.panel_users import _ACTION_TITLES, _STAFF_LOG_LIMIT
+    from services.antispam import get_mute_stats, MOD_STATS_DAYS
+
+    # Имена собираем ОДНИМ проходом на всю страницу — как в панели бота:
+    # иначе на каждую из 25 строк шёл бы отдельный скан таблиц.
+    names = _known_names()
+
+    # ── журнал модерации ──
+    mod_rows = []
+    for a in get_recent_moderation_actions(_MOD_LOG_LIMIT):
+        icon, verb = MOD_ACTION_TITLES.get(a["action"], ("❔", a["action"]))
+        who = (a.get("name") or str(a.get("user_id") or ""))[:40]
+        note = ""
+        admin = a.get("admin_name")
+        if admin:
+            # У автоматики графа пуста; слово подбирается по виду действия,
+            # как в боте: размут и разбан «снял», остальное «админ».
+            word = "снял" if a["action"] in ("unmute", "unban") else "админ"
+            note = f'<div class="note">{esc(word)}: {esc(admin[:40])}</div>'
+        link = ""
+        if a["action"] in MOD_ACTIONS_WITH_EVIDENCE and a.get("id"):
+            link = (f'<a class="btn" href="/journal?evidence={esc(a["id"])}">'
+                    f'📜 улики</a>')
+        mod_rows.append(
+            f'<div class="row"><div class="name">'
+            f'{esc(icon)} {esc(_fmt_mod_time(a["ts"]))} {esc(verb)}: {esc(who)}'
+            f'{note}</div><div class="ctlbox">{link}</div></div>')
+        # Улики разворачиваются ПОД своей строкой, а не отдельной страницей:
+        # человек видит, к какой именно записи они относятся.
+        if evidence and a.get("id") == evidence:
+            mod_rows.append(_evidence_block(evidence))
+
+    stats = get_mute_stats(MOD_STATS_DAYS) or {}
+    mod_head = (f'<h2>🛡 Модерация</h2>'
+                f'<div class="note">за {esc(MOD_STATS_DAYS)} дней: мутов '
+                f'{esc(stats.get("mutes", 0))} · банов {esc(stats.get("bans", 0))} · '
+                f'показаны последние {esc(_MOD_LOG_LIMIT)}</div>')
+    mod_html = mod_head + (f'<div class="rows">{"".join(mod_rows)}</div>' if mod_rows
+                           else '<div class="rows"><div class="empty">'
+                                'пока пусто — бот никого не наказывал</div></div>')
+
+    # ── журнал персонала ──
+    staff_rows = []
+    for r in get_recent_staff_actions(_STAFF_LOG_LIMIT):
+        icon, verb = _ACTION_TITLES.get(r["action"], ("❔", r["action"]))
+        actor = (r.get("actor_name") or str(r["actor_id"]))[:40]
+        line = f'{esc(icon)} {esc(_fmt_mod_time(r["ts"]))} {esc(actor)} — {esc(verb)}'
+        if r.get("target_id"):
+            line += f' → {esc(_staff_name(r["target_id"], names)[:30])}'
+        note = (f'<div class="note">{esc(r["details"][:120])}</div>'
+                if r.get("details") else "")
+        staff_rows.append(f'<div class="row"><div class="name">{line}{note}'
+                          f'</div></div>')
+
+    staff_head = (f'<h2>📋 Персонал</h2>'
+                  f'<div class="note">действий за 7 дней: '
+                  f'{esc(count_staff_actions(7))} · хранится '
+                  f'{esc(STAFF_LOG_DAYS)} дней · показаны последние '
+                  f'{esc(_STAFF_LOG_LIMIT)}</div>')
+    staff_html = staff_head + (f'<div class="rows">{"".join(staff_rows)}</div>'
+                               if staff_rows else
+                               '<div class="rows"><div class="empty">'
+                               'пока пусто — персонал ничего не делал</div></div>')
+
+    # ── опасное: обе очистки, каждая со своим вопросом ──
+    danger = []
+    for code, title, hint in (
+        ("modclear", "🧹 Очистить журнал модерации",
+         "улики стираются вместе с ним — восстановить нечем"),
+        ("staffclear", "🧹 Очистить журнал персонала",
+         "записи о действиях админов пропадут навсегда"),
+    ):
+        if confirm == code:
+            control = ('<div class="warn-btns">'
+                       + _jform(csrf, {"do": code, "confirm": "1"},
+                                _btn("Да, выполнить", "danger"))
+                       + '<a class="btn" href="/journal">Отмена</a></div>')
+        else:
+            control = _jform(csrf, {"do": code}, _btn("Очистить"))
+        danger.append((title, hint, control))
+
+    note_html = f'<div class="ok-box">{esc(message)}</div>' if message else ""
+    head = ('<header><h1>Журналы</h1>'
+            '<div class="ver"><a href="/">← к сводке</a></div></header>')
+    body = ('<div class="wrap">' + head + _topbar(csrf, "/journal") + note_html
+            + mod_html + staff_html
+            + "<h2>⚠️ Опасное</h2>" + _rows(danger)
+            + '<footer><span><a href="/">← к сводке</a></span></footer></div>')
+    return _shell("Журналы — C4_Max", body)
 
 
 # ─── база знаний и викторина (этап 4) ───────────────────────────────
@@ -942,6 +1116,23 @@ def page_quiz(application, csrf: str = "", mode: str = "draft",
     auto_on = get_setting(quiz_daily.ENABLED_KEY, "0") == "1"
     players = len(get_all_quiz_stats() or {})
 
+    # 📄 Сверка эталонного файла с банком (2026-09-01) — та же, что в панели
+    # бота. ⚠️ Кнопка загрузки пропускает знакомый вопрос целиком, поэтому
+    # правка разбора или вариантов в файле сама собой в игру не доезжает;
+    # увидеть это можно только здесь.
+    diff = quiz_bank.seed_diff() if seed["questions"] else None
+    seed_tile = ""
+    if diff and diff["file_ok"]:
+        marks = []
+        if diff["changed"]:
+            marks.append(f'⚠️ разошлись {diff["changed"]}')
+        if diff["missing"]:
+            marks.append(f'не залито {diff["missing"]}')
+        seed_tile = (f'<div class="card"><div class="k">Файл вопросов</div>'
+                     f'<div class="v">{esc(diff["total"])}</div>'
+                     f'<div class="sub">{esc(" · ".join(marks)) if marks else "всё сошлось"}'
+                     f'</div></div>')
+
     tiles = (
         '<div class="grid">'
         f'<div class="card"><div class="k">Черновики</div>'
@@ -956,7 +1147,8 @@ def page_quiz(application, csrf: str = "", mode: str = "draft",
         f'<div class="card"><div class="k">Не вышло</div>'
         f'<div class="v">{esc(kb["failed"])}</div>'
         f'<div class="sub">статей, где сборка сорвалась</div></div>'
-        '</div>'
+        + seed_tile
+        + '</div>'
     )
 
     job_html, job_running = _job_box(application, web_actions.QUIZ_GEN_LATCH,
@@ -985,6 +1177,14 @@ def page_quiz(application, csrf: str = "", mode: str = "draft",
         controls.append(("📥 Мои вопросы в черновики",
                          f'написаны вручную, в файле их {seed["questions"]}',
                          _kbform(csrf, {"do": "seed"}, _btn("Загрузить"),
+                                 "ctl", action="/quiz")))
+    # ♻️ Показывается ТОЛЬКО когда есть расхождения: кнопка без работы врала бы
+    # о том, что банк отстал от файла.
+    if diff and diff["changed"]:
+        controls.append(("♻️ Обновить из файла",
+                         f'в банке отстали варианты, верный ответ или разбор '
+                         f'у {diff["changed"]} вопросов — загрузка их пропускает',
+                         _kbform(csrf, {"do": "reseed"}, _btn("Обновить", "primary"),
                                  "ctl", action="/quiz")))
 
     # ── опасные кнопки: каждая со своим вопросом ──
@@ -1398,13 +1598,168 @@ async def page_user_card(bot, target_id: int, csrf: str = "",
 #  оправдан — там десятки мелких правок подряд. Здесь правка одна и редкая:
 #  вставил текст, нажал «Сохранить». Обычная форма надёжнее и понятнее.
 
-def page_prompts(csrf: str = "", confirm: str = "", saved: str = "") -> str:
+def _pform(csrf: str, fields: dict, inner: str, cls: str = "ctl") -> str:
+    """Форма, отправляющая действие на страницу промптов."""
+    hidden = f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+    for name, value in fields.items():
+        hidden += f'<input type="hidden" name="{esc(name)}" value="{esc(value)}">'
+    return f'<form method="post" action="/prompts" class="{cls}">{hidden}{inner}</form>'
+
+
+def _personal_prompt_block(csrf: str, viewer_id: int) -> str:
+    """
+    Личный тумблер «⚙️ PROMPT» — применять ли личность C4_Max к разговору
+    с САМИМ владельцем в личке (этап 7, 01.09.2026).
+
+    ⚠️ НАСТРОЙКА ХРАНИТСЯ НАОБОРОТ: "1" в `admin_no_prompt_<id>` означает
+    «промпт ВЫКЛЮЧЕН». Тумблер показывает состояние промпта, а не настройки,
+    поэтому значение переворачивается — ровно как в панели бота. Забыть про
+    переворот значит нарисовать тумблер, врущий в обе стороны сразу.
+
+    ⚠️ Настройка ЛИЧНАЯ, у каждого админа своя: ключ несёт его id. Здесь
+    id берётся у того, кто вошёл на сайт.
+    """
+    from database.history import get_setting
+
+    if not viewer_id:
+        return ""
+    on = get_setting(f"admin_no_prompt_{viewer_id}", "0") != "1"
+    switch = _pform(csrf, {"do": "myprompt"},
+                    f'<button type="submit" class="switch {"on" if on else "off"}">'
+                    f'<span class="knob"></span>'
+                    f'<span class="lbl">{"применяется" if on else "не применяется"}'
+                    f'</span></button>', "ctl sw")
+    return "<h2>👤 Лично мне</h2>" + _rows([
+        ("⚙️ Промпт в разговоре со мной",
+         "выключишь — в личке с тобой бот отвечает без личности C4_Max; "
+         "на остальных не влияет",
+         switch),
+    ])
+
+
+def _proactive_block() -> str:
+    """
+    «📊 Участие в разговоре»: те же цифры, что на экране бота (этап 7).
+
+    ⚠️ ДВЕ ПОЛОВИНЫ ЖИВУТ ПО РАЗНЫМ ПРАВИЛАМ, и это сказано прямо на экране:
+    проверки берутся из журнала в базе и переживают перезапуск, отсев — из
+    счётчиков В ПАМЯТИ и обнуляется вместе с ботом. «Привести к общему виду»
+    нельзя: считать отсев в базе значит писать в неё на каждое сообщение
+    группы.
+
+    Все подписи и расчёты берутся у панели бота — вторая копия названий
+    исходов и триггеров разъехалась бы с первой.
+    """
+    import time as _time
+
+    from database.history import proactive_by_chat, proactive_by_day, proactive_stats
+    from handlers.admin.panel_prompts import (_OUTCOME_TITLES, _TRIGGER_TITLES,
+                                              _share, _utc_since)
+    from handlers.admin.panel_users import _chat_title
+    from services.proactive import skip_counts
+
+    day = proactive_stats(_utc_since(24))
+    week = proactive_stats(_utc_since(24 * 7))
+    day_replies = day["reply"] + day["reply_mute"]
+    week_replies = week["reply"] + week["reply_mute"]
+
+    think = ("секунд на ответ модели, в среднем за сутки"
+             if day.get("avg_sec") else "за сутки модель ещё не отвечала")
+    tiles = (
+        '<div class="grid">'
+        f'<div class="card"><div class="k">Проверок за сутки</div>'
+        f'<div class="v">{esc(day["checks"])}</div>'
+        f'<div class="sub">вступил {esc(day_replies)} '
+        f'({esc(_share(day_replies, day["checks"]))})</div></div>'
+        f'<div class="card"><div class="k">Проверок за неделю</div>'
+        f'<div class="v">{esc(week["checks"])}</div>'
+        f'<div class="sub">вступил {esc(week_replies)} '
+        f'({esc(_share(week_replies, week["checks"]))})</div></div>'
+        f'<div class="card"><div class="k">Раздумье</div>'
+        f'<div class="v">{esc(f"{day['avg_sec']:.1f}" if day.get("avg_sec") else "—")}</div>'
+        f'<div class="sub">{esc(think)}</div></div>'
+        '</div>'
+    )
+
+    # ── чем кончались проверки за неделю ──
+    outcomes = [(title, f'{n} · {_share(n, week["checks"])}', "")
+                for code, title in _OUTCOME_TITLES.items()
+                for n in (week.get(code, 0),) if n]
+    outcomes_html = ("<h3>Чем кончались проверки за неделю</h3>" + _rows(outcomes)
+                     if outcomes else
+                     '<div class="rows"><div class="empty">проверок за неделю '
+                     'не было</div></div>')
+
+    # ── по дням и по чатам ──
+    extra = ""
+    try:
+        by_day = proactive_by_day(7)
+    except Exception:
+        by_day = []
+    if by_day:
+        rows = "".join(
+            f'<div class="row"><div class="name">{esc(label)}</div>'
+            f'<div class="ctlbox"><span class="note">{esc(checks)} → '
+            f'<b>{esc(replies)}</b> ({esc(_share(replies, checks))})</span>'
+            f'</div></div>' for label, checks, replies in by_day)
+        extra += f'<h3>По дням</h3><div class="rows">{rows}</div>'
+
+    try:
+        by_chat = proactive_by_chat(_utc_since(24 * 7), limit=5)
+    except Exception:
+        by_chat = []
+    if by_chat:
+        rows = "".join(
+            f'<div class="row"><div class="name">{esc(_chat_title(chat_id))}</div>'
+            f'<div class="ctlbox"><span class="note">{esc(checks)} → '
+            f'<b>{esc(replies)}</b></span></div></div>'
+            for chat_id, checks, replies in by_chat)
+        extra += f'<h3>По чатам за неделю</h3><div class="rows">{rows}</div>'
+
+    if week.get("by_trigger"):
+        kinds = " · ".join(
+            f'{_TRIGGER_TITLES.get(k, k)} {n}'
+            for k, n in sorted(week["by_trigger"].items(), key=lambda kv: -kv[1]))
+        extra += ('<h3>Триггеры за неделю</h3><div class="rows"><div class="row">'
+                  f'<div class="name">{esc(kinds)}<div class="note">медиа дороже: '
+                  'вложение сначала разбирает отдельная модель</div></div>'
+                  '</div></div>')
+
+    # ── отсев: считается В ПАМЯТИ ──
+    skipped, since = skip_counts()
+    total = sum(skipped.values())
+    minutes = max(0, (_time.time() - since) / 60)
+    uptime = f"{minutes / 60:.0f} ч" if minutes >= 60 else f"{minutes:.0f} мин"
+    if total:
+        rows = "".join(
+            f'<div class="row"><div class="name">{esc(reason)}</div>'
+            f'<div class="ctlbox"><span class="note">{esc(n)}</span></div></div>'
+            for reason, n in sorted(skipped.items(), key=lambda kv: -kv[1]))
+    else:
+        rows = '<div class="empty">пока ничего не отсеивалось</div>'
+    skip_html = (f'<h3>Отсеяно до модели: {esc(total)}</h3>'
+                 f'<div class="note">с последнего запуска ({esc(uptime)}). '
+                 f'Эти числа живут в памяти и обнуляются перезапуском — на '
+                 f'каждое сообщение группы бот в базу не ходит.</div>'
+                 f'<div class="rows">{rows}</div>')
+
+    hint = ('<div class="card wide"><div class="note">Вступает часто при малом '
+            'числе проверок — правь промпт участия. Проверок много — правь '
+            'порог на сводке.</div></div>')
+
+    return ("<h2>📊 Участие в разговоре</h2>" + tiles + outcomes_html + extra
+            + skip_html + hint)
+
+
+def page_prompts(csrf: str = "", confirm: str = "", saved: str = "",
+                 viewer_id: int = 0) -> str:
     """
     Страница промптов.
 
     confirm — ключ промпта, для которого показать вопрос «точно стереть?»
     (человек отправил пустое поле поверх непустого текста).
     saved   — ключ промпта, который только что сохранён (подсветить карточку).
+    viewer_id — кто вошёл: от него зависит ЛИЧНЫЙ тумблер промпта (этап 7).
     """
     from services import prompts_spec
 
@@ -1479,7 +1834,10 @@ def page_prompts(csrf: str = "", confirm: str = "", saved: str = "") -> str:
             '<span><a href="/exit">выйти</a></span></footer>')
 
     body = ("<div class=\"wrap\">" + head + _topbar(csrf, "/prompts")
-            + intro + "".join(cards) + foot + "</div>")
+            + intro + "".join(cards)
+            + _personal_prompt_block(csrf, viewer_id)
+            + _proactive_block()
+            + foot + "</div>")
     return _shell("Промпты — C4_Max", body)
 
 

@@ -18,6 +18,30 @@ from .common import (_adm_back_row, _audit, _filter_keyboard, _fmt_mod_time, _is
                      _onoff, _require)
 from .panel_rag import _end_kb_test
 
+# Значок и название для каждого вида записи журнала модерации.
+#
+# ⚠️ ВСЕ ТИПЫ ПЕРЕЧИСЛЕНЫ ЯВНО. Раньше «всё остальное» рисовалось как размут —
+# с приходом ручных действий (кик, бан) это стало враньём в журнале.
+#
+# ⚠️ Лежит на уровне файла, а не внутри сборки панели (01.09.2026): тот же
+# журнал показывает страница сайта (`web/pages.py::page_journal`), и вторая
+# копия названий разъехалась бы с этой на первом же новом виде записи. Ровно
+# так же устроен `panel_users._ACTION_TITLES` для журнала персонала.
+MOD_ACTION_TITLES = {
+    "mute":     ("🛡", "мут"),
+    "mute_adm": ("🛡", "мут вручную"),
+    "mute_ai":  ("🤚", "мут от бота"),
+    "linkdel":  ("🔗", "ссылка удалена"),
+    "unmute":   ("🔓", "размут"),
+    "kick":     ("👢", "кик"),
+    "ban":      ("⛔", "бан"),
+    "unban":    ("♻️", "разбан"),
+}
+
+# У каких записей есть улики — сохранённый текст удалённых сообщений.
+# Тот же список читают кнопка «📜» в панели и страница журналов на сайте.
+MOD_ACTIONS_WITH_EVIDENCE = ("mute", "linkdel")
+
 
 
 
@@ -92,20 +116,7 @@ def _build_mod_panel_text_and_keyboard(viewer_id: int = 0):
         for a in recent:
             t = _fmt_mod_time(a["ts"])
             action = a["action"]
-            # Все типы записей журнала перечислены ЯВНО. Раньше «всё остальное»
-            # рисовалось как размут — с приходом ручных действий (кик, бан)
-            # это стало враньём в журнале.
-            icons = {
-                "mute":     ("🛡", "мут"),
-                "mute_adm": ("🛡", "мут вручную"),
-                "mute_ai":  ("🤚", "мут от бота"),
-                "linkdel":  ("🔗", "ссылка удалена"),
-                "unmute":   ("🔓", "размут"),
-                "kick":     ("👢", "кик"),
-                "ban":      ("⛔", "бан"),
-                "unban":    ("♻️", "разбан"),
-            }
-            icon, verb = icons.get(action, ("❔", action))
+            icon, verb = MOD_ACTION_TITLES.get(action, ("❔", action))
             nm = (a.get("name") or str(a["user_id"]))[:24]
             # Имя пользователя — чужой текст: экранируем, иначе символ «<» в имени
             # ломает HTML-разметку и панель /mod перестаёт открываться.
@@ -118,7 +129,7 @@ def _build_mod_panel_text_and_keyboard(viewer_id: int = 0):
                 line += f" ({word}: {html.escape(adm[:24])})"
             lines.append(line)
             # Кнопка просмотра удалённого — для мутов и ссылок (у них есть улики).
-            if action in ("mute", "linkdel") and a.get("id"):
+            if action in MOD_ACTIONS_WITH_EVIDENCE and a.get("id"):
                 evidence_buttons.append(
                     InlineKeyboardButton(f"📜 {t} {nm}"[:30],
                                          callback_data=f"mod:evidence:{a['id']}")

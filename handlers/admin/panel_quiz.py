@@ -152,6 +152,23 @@ def _build_panel(context):
     if kb["failed"]:
         failed_line = f"⚠️ Не разобрались: <code>{kb['failed']}</code>\n"
 
+    # 📄 Сверка эталонного файла с банком (2026-09-01, решение Максима).
+    # ⚠️ Ради чего строка существует. Кнопка загрузки пропускает вопрос,
+    # который в банке уже есть, ЦЕЛИКОМ — значит правка разбора, вариантов или
+    # верного ответа в файле обычной отправкой кода не доезжает никуда, и
+    # расхождение файла с игрой ничем не видно. Теперь видно здесь.
+    seed = quiz_bank.seed_stats()
+    diff = quiz_bank.seed_diff() if seed["questions"] else None
+    seed_line = ""
+    if diff and diff["file_ok"]:
+        marks = []
+        if diff["changed"]:
+            marks.append(f"⚠️ разошлись <code>{diff['changed']}</code>")
+        if diff["missing"]:
+            marks.append(f"не залито <code>{diff['missing']}</code>")
+        tail = " · ".join(marks) if marks else "всё сошлось"
+        seed_line = f"📄 Файл вопросов: <code>{diff['total']}</code> · {tail}\n"
+
     # 🕛 Вопрос дня (2026-08-20): состояние тумблера и когда уйдёт следующий.
     # Цифры живые, считаются при каждом открытии панели.
     from services import quiz_daily
@@ -173,6 +190,7 @@ def _build_panel(context):
         f"✅ В игре: <code>{counts['approved']}</code>\n"
         f"📝 Черновиков: <code>{counts['drafts']}</code>\n"
         f"📚 Статей в базе знаний: <code>{kb['articles_total']}</code>\n"
+        f"{seed_line}"
         f"🎖 Игроков со статистикой: <code>{players}</code>\n"
         f"{auto_line}"
         f"{failed_line}"
@@ -199,11 +217,18 @@ def _build_panel(context):
     if counts["drafts"]:
         rows.append([InlineKeyboardButton("🗑 Очистить черновики", callback_data="quiz:wipe")])
 
+    # ♻️ Догнать банк до файла. Кнопка есть ТОЛЬКО когда есть что догонять:
+    # она переписывает варианты, верный ответ и разбор у вопросов, которые в
+    # банке уже лежат, — единственный способ доставить такую правку, кроме
+    # ручной работы в боевой базе.
+    if diff and diff["changed"]:
+        rows.append([InlineKeyboardButton(f"♻️ Обновить из файла ({diff['changed']})",
+                                          callback_data="quiz:reseed")])
+
     # Эталонный набор — вопросы, написанные вручную и приехавшие файлом в
     # обновлении кода (2026-08-05, решение Максима после негодной машинной
     # сборки). Кнопка показывается, только когда файл на месте и в нём что-то
     # есть, иначе она врала бы про несуществующий набор.
-    seed = quiz_bank.seed_stats()
     if seed["questions"]:
         # Слово «в черновики» в подписи намеренно: кнопка меняла назначение
         # 28.08.2026, и без него пришлось бы каждый раз вспоминать, куда она
@@ -447,6 +472,28 @@ async def _handle_quiz_callback(query, context, data: str, chat_id: int, user_id
         if result["bad"]:
             text += f"\n⚠️ Не прошли проверку: {result['bad']}."
         await _popup(query, context, chat_id, text)
+        await send_quiz_panel(context.bot, chat_id, context)
+        return
+
+    if action == "reseed":
+        # ♻️ Догнать банк до эталонного файла (2026-09-01, решение Максима).
+        # Кнопка загрузки этого не умеет и уметь не должна: она добавляет
+        # новое, а эта чинит уже залитое — правку разбора, вариантов или
+        # верного ответа, которую сверка по имени вопроса пропускает молча.
+        from services import quiz_bank
+        result = quiz_bank.seed_apply()
+        if not result["changed"]:
+            await _popup(query, context, chat_id,
+                         "✅ Файл и банк и так сошлись — обновлять нечего.")
+            await send_quiz_panel(context.bot, chat_id, context)
+            return
+        _audit(user_id, "quiz_reseed", 0, f"догнано до файла: {result['updated']}")
+        logger.info("🎮 Админ %s догнал банк до эталонного файла: поправлено %d из %d",
+                    user_id, result["updated"], result["changed"])
+        await _popup(query, context, chat_id,
+                     f"♻️ Обновлено вопросов: {result['updated']}.\n"
+                     f"Поправлены варианты, верный ответ и разбор — "
+                     f"статус «в игре / черновик» не менялся.")
         await send_quiz_panel(context.bot, chat_id, context)
         return
 

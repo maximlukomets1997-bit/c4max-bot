@@ -431,20 +431,150 @@ SEED_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file_
                          "quiz", "questions.json")
 
 
+def _read_seed(quiet: bool = True) -> list | None:
+    """
+    Содержимое эталонного файла списком. None — файла нет, он битый или в нём
+    не список; тогда звать нечего и показывать нечего.
+
+    ⚠️ Один читатель на всех (2026-09-01). Раньше файл открывали три места
+    своими руками, и каждое по-своему решало, что делать с битым JSON. Правка
+    в одном из них молча расходилась с остальными.
+    """
+    try:
+        with open(SEED_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError) as e:
+        if not quiet:
+            logger.error("⚠️ Викторина: не прочитать эталонный файл вопросов: %s", e)
+        return None
+    if not isinstance(data, list):
+        if not quiet:
+            logger.error("⚠️ Викторина: эталонный файл вопросов — не список")
+        return None
+    return data
+
+
 def seed_stats() -> dict:
     """
     Что лежит в эталонном файле: сколько вопросов и по скольким статьям.
     Пустой словарь — файла нет или он битый (кнопка загрузки тогда не нужна).
     """
-    try:
-        with open(SEED_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, ValueError):
-        return {"questions": 0, "articles": 0}
-    if not isinstance(data, list):
+    data = _read_seed()
+    if data is None:
         return {"questions": 0, "articles": 0}
     return {"questions": len(data),
             "articles": len({item.get("article") for item in data if isinstance(item, dict)})}
+
+
+def seed_diff() -> dict:
+    """
+    Сверяет эталонный файл с банком ЦЕЛИКОМ — не только по имени вопроса
+    (2026-09-01, решение Максима).
+
+    ⚠️ РАДИ ЧЕГО ЭТО ЕСТЬ. Кнопка «📥 Мои вопросы в черновики» сверяет файл с
+    банком по паре «статья + текст вопроса» и уже знакомый вопрос пропускает
+    ЦЕЛИКОМ. Значит правка ВАРИАНТОВ, ВЕРНОГО ОТВЕТА или РАЗБОРА обычной
+    отправкой кода не доезжает никуда: файл в репозитории новый, в игре —
+    старый, и это расхождение ничем не видно. Так уже было 21.08.2026, когда
+    «Рапорт Полковника:» пришлось вычищать прямо в боевой базе руками.
+
+    Возвращает:
+      file_ok  — файл на месте и читается;
+      total    — годных вопросов в файле, bad — не прошедших проверку формата;
+      same     — есть в банке и совпадает целиком;
+      changed  — есть в банке, но содержимое разошлось (их чинит seed_apply);
+      missing  — в файле есть, в банке нет (их зальёт кнопка загрузки);
+      extra    — в банке есть, в файле нет: машинная сборка или вопрос,
+                 у которого в файле поправили САМ ТЕКСТ (тогда он же считается
+                 и в missing — старую запись надо убирать руками);
+      items    — расхождения списком, с номером записи в банке и с тем, что
+                 именно разошлось.
+    """
+    from database.history import list_all_quiz_questions
+
+    data = _read_seed()
+    if data is None:
+        return {"file_ok": False, "total": 0, "bad": 0, "same": 0,
+                "changed": 0, "missing": 0, "extra": 0, "items": []}
+
+    bank = {(q["article"], q["question"]): q for q in list_all_quiz_questions()}
+    seen = set()
+    total = bad = same = missing = 0
+    items = []
+
+    for raw in data:
+        clean = _clean_question(raw) if isinstance(raw, dict) else None
+        article = raw.get("article") if isinstance(raw, dict) else None
+        if not clean or not article:
+            bad += 1
+            continue
+        total += 1
+        # ⚠️ Сравниваем ПРИЧЁСАННЫЙ вопрос, а не сырой из файла: в банк он
+        # попал через _clean_question (тот подрезает длинный разбор), и сырой
+        # текст показывал бы вечное расхождение там, где всё в порядке.
+        # ⚠️ Ключ — «статья + текст вопроса», ТОТ ЖЕ, по которому решает
+        # add_quiz_question («этот уже есть, пропускаю»). Разойдутся ключи —
+        # сверка начнёт показывать расхождения там, где их нет.
+        key = (article, clean["question"])
+        current = bank.get(key)
+        if current is None:
+            missing += 1
+            continue
+        seen.add(key)
+        what = []
+        if list(current["options"]) != list(clean["options"]):
+            what.append("варианты ответа")
+        if int(current["correct_idx"]) != int(clean["correct_idx"]):
+            what.append("ВЕРНЫЙ ОТВЕТ")
+        if (current["explanation"] or "").strip() != clean["explanation"].strip():
+            what.append("разбор")
+        if not what:
+            same += 1
+            continue
+        items.append({
+            "qid": current["id"],
+            "article": article,
+            "question": clean["question"],
+            "approved": current["approved"],
+            "what": ", ".join(what),
+            "options": clean["options"],
+            "correct_idx": clean["correct_idx"],
+            "explanation": clean["explanation"],
+        })
+
+    return {"file_ok": True, "total": total, "bad": bad, "same": same,
+            "changed": len(items), "missing": missing,
+            "extra": len(bank) - len(seen), "items": items}
+
+
+def seed_apply() -> dict:
+    """
+    Догоняет банк до эталонного файла: переписывает варианты, верный ответ и
+    разбор у тех вопросов, где они разошлись (2026-09-01).
+
+    ⚠️ ЧЕГО НЕ ДЕЛАЕТ, и это важнее того, что делает:
+      • не трогает вопросы, которых в файле нет (машинная сборка) — их автор
+        не файл, и затирать их файлом было бы враньём;
+      • не заводит новых и не удаляет старых: добавляет только кнопка
+        загрузки, удаляет только человек;
+      • не меняет статус «в игре / черновик» и счётчик показов.
+
+    Возвращает {"updated": сколько поправлено, "changed": сколько было}.
+    """
+    from database.history import update_quiz_question_body
+
+    diff = seed_diff()
+    updated = 0
+    for item in diff["items"]:
+        update_quiz_question_body(item["qid"], item["options"],
+                                  item["correct_idx"], item["explanation"])
+        updated += 1
+        logger.info("🎮 Викторина: вопрос #%s (%s) догнан до файла — разошлось: %s",
+                    item["qid"], item["article"], item["what"])
+
+    logger.info("🎮 Викторина: сверка с эталонным файлом — поправлено %d из %d "
+                "расхождений", updated, diff["changed"])
+    return {"updated": updated, "changed": diff["changed"]}
 
 
 def load_seed(approved: bool = True) -> dict:
@@ -465,18 +595,16 @@ def load_seed(approved: bool = True) -> dict:
     Повторное нажатие безопасно: `add_quiz_question` не заводит дубль по паре
     «статья + текст вопроса», такие вопросы просто пропускаются.
 
+    ⚠️ И ПО ЭТОЙ ЖЕ ПРИЧИНЕ ОНА НЕ ЧИНИТ УЖЕ ЗАЛИТОЕ. Поправил в файле разбор
+    или варианты у существующего вопроса — сюда это не доедет, пара «статья +
+    вопрос» совпала, и запись пропущена целиком. Такие расхождения показывает
+    `seed_diff`, а переписывает `seed_apply` (кнопка «♻️ Обновить из файла»).
+
     Возвращает {"added": сколько добавлено, "skipped": сколько уже было,
     "bad": сколько не прошло проверку, "total": сколько всего в файле}.
     """
-    try:
-        with open(SEED_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, ValueError) as e:
-        logger.error("⚠️ Викторина: не прочитать эталонный файл вопросов: %s", e)
-        return {"added": 0, "skipped": 0, "bad": 0, "total": 0}
-
-    if not isinstance(data, list):
-        logger.error("⚠️ Викторина: эталонный файл вопросов — не список")
+    data = _read_seed(quiet=False)
+    if data is None:
         return {"added": 0, "skipped": 0, "bad": 0, "total": 0}
 
     added = skipped = bad = 0
