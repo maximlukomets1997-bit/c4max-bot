@@ -3847,6 +3847,33 @@ def check_update_notice():
     expect("время неизвестно (ноль) — не трогаем", upd.notice_expired(0, now), False)
     expect("время неизвестно (None) — не трогаем", upd.notice_expired(None, now), False)
 
+    # ── 1б. От какого момента считать возраст ──
+    # ⚠️ Ради чего. Сначала правило было «времени нет — не трогаем», и оно
+    # выглядело осторожным. На живом боте 03.09.2026 вышло наоборот: ПЕРВОЕ
+    # уведомление после перехода на новый код зависло навсегда — отправлял его
+    # ещё старый код, который время писать не умел. Теперь такой след считается
+    # от ЗАПУСКА бота, но только если помечен текущей сборкой.
+    START = now - 3600
+    expect("время записано — берём его",
+           upd.notice_since("abc", 777.0, "abc", START), 777.0)
+    expect("времени нет, метка СВОЯ — считаем от запуска",
+           upd.notice_since("abc", 0, "abc", START), START)
+    expect("времени нет, метка ЧУЖАЯ — не трогаем",
+           upd.notice_since("old", 0, "abc", START), 0.0)
+    expect("времени нет, метки нет вовсе — не трогаем",
+           upd.notice_since("", 0, "abc", START), 0.0)
+    expect("времени нет, а текущей метки не знаем — не трогаем",
+           upd.notice_since("abc", 0, "", START), 0.0)
+
+    # И то же самое сквозь расчёт срока: след без времени со своей меткой,
+    # бот работает дольше срока → пора убирать.
+    expect("свой след без времени, бот давно работает — убираем",
+           upd.notice_expired(upd.notice_since("abc", 0, "abc", now - ttl - 5), now), True)
+    expect("свой след без времени, бот только поднялся — ещё живо",
+           upd.notice_expired(upd.notice_since("abc", 0, "abc", now - 5), now), False)
+    expect("чужой след без времени не убираем даже через сутки",
+           upd.notice_expired(upd.notice_since("old", 0, "abc", now - 86400), now), False)
+
     # ── 2. Срок берётся ИЗ CONFIG, а не зашит числом ──
     # Тот же приём, что у ссылки входа: двигаем константу и требуем, чтобы
     # поведение поехало за ней. Зашитые 600 эту проверку не прошли бы.
@@ -3908,11 +3935,33 @@ def check_update_notice():
     expect("свежее не удалено", deleted, [])
     expect("след свежего на месте", upd._load_notice()[1], [[42, 999]])
 
-    # Время неизвестно — не трогаем (иначе снесли бы чужое сообщение вслепую).
+    # Времени нет, метка ЧУЖАЯ — не трогаем (снесли бы чужое сообщение вслепую).
     deleted.clear()
-    set_setting(UPDATE_NOTICE_MSGS_KEY, '{"build": "old", "msgs": [[5, 6]]}')
-    asyncio.run(upd.drop_expired_notice(_App()))
-    expect("след без времени не удаляем", deleted, [])
+    saved_build, saved_start = cfg.BOT_BUILD, upd._STARTED_AT
+    try:
+        cfg.BOT_BUILD = "текущая"
+        set_setting(UPDATE_NOTICE_MSGS_KEY, '{"build": "чужая", "msgs": [[5, 6]]}')
+        asyncio.run(upd.drop_expired_notice(_App()))
+        expect("чужой след без времени не удаляем", deleted, [])
+
+        # Времени нет, но метка СВОЯ и бот работает дольше срока — убираем.
+        # Это и есть случай, из-за которого 03.09.2026 первое уведомление после
+        # перехода на новый код зависло навсегда.
+        deleted.clear()
+        upd._STARTED_AT = time.time() - ttl - 5
+        set_setting(UPDATE_NOTICE_MSGS_KEY, '{"build": "текущая", "msgs": [[7, 8]]}')
+        asyncio.run(upd.drop_expired_notice(_App()))
+        expect("свой след без времени, бот давно работает — удалено", deleted, [(7, 8)])
+        expect("след при этом снят", upd._load_notice()[1], [])
+
+        # Тот же след, но бот только что поднялся — рано.
+        deleted.clear()
+        upd._STARTED_AT = time.time()
+        set_setting(UPDATE_NOTICE_MSGS_KEY, '{"build": "текущая", "msgs": [[9, 10]]}')
+        asyncio.run(upd.drop_expired_notice(_App()))
+        expect("свой след без времени, бот только поднялся — не трогаем", deleted, [])
+    finally:
+        cfg.BOT_BUILD, upd._STARTED_AT = saved_build, saved_start
 
     # Следа нет — не падаем и в Телеграм не ходим.
     deleted.clear()
@@ -3930,8 +3979,8 @@ def check_update_notice():
         problems.append("отправка уведомления не кладёт в след время — "
                         "сообщение повиснет навсегда")
 
-    return problems, (f"{done} проверок: расчёт срока, срок из config, три формата "
-                      f"следа, удаление и его отсутствие")
+    return problems, (f"{done} проверок: расчёт срока и точки отсчёта, срок из "
+                      f"config, три формата следа, удаление и его отсутствие")
 
 
 CHECKS = (
