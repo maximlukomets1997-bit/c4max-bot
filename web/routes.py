@@ -613,7 +613,7 @@ async def users(request):
 # ⚠️ Кик и бан сюда НЕ входят намеренно: они не стирают ничего, их видно в
 # журнале, и они отменяются «Разбаном». Спрашивать о них дважды на странице,
 # где кнопка и так одна, значит приучить нажимать «да» не глядя.
-_USER_CONFIRM = ("viol", "clr", "reset")
+_USER_CONFIRM = ("viol", "clr", "reset", "quizzero")
 
 
 async def user_card(request):
@@ -694,6 +694,30 @@ async def _run_user_action(actor_id: int, target_id: int, do: str, form,
     if do == "reset":
         actions.user_reset_settings(actor_id, target_id)
         return "↩️ Персональные настройки сброшены — действуют общие."
+
+    if do == "quizfix":
+        summary = actions.user_quiz_fix(actor_id, target_id)
+        return f"🎯 Промахи убраны: {summary}" if summary else "Промахов и так нет."
+
+    if do == "quizset":
+        from handlers.admin.panel_users import _QUIZ_FIELDS
+        field = str(form.get("field", ""))
+        if field not in _QUIZ_FIELDS:
+            raise actions.ActionError("не понял, какое число правим")
+        raw = str(form.get("value", "")).strip()
+        if not raw.lstrip("-").isdigit():
+            raise actions.ActionError("это не число")
+        title = _QUIZ_FIELDS[field][0]
+        summary = actions.user_quiz_score(
+            actor_id, target_id,
+            **{"correct" if field == "correct" else "attempts": int(raw)},
+            what=title.lower())
+        return f"🎯 {title}: {summary}"
+
+    if do == "quizzero":
+        summary = actions.user_quiz_score(actor_id, target_id, correct=0,
+                                          attempts=0, what="обнулён")
+        return f"↩️ Счёт викторины обнулён: {summary}"
 
     if do == "rank":
         try:

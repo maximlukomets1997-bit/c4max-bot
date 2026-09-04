@@ -1498,6 +1498,9 @@ def _user_danger_block(csrf: str, target_id: int, confirm: str) -> str:
          "человека"),
         ("reset", "Сбросить персональные настройки",
          "человек вернётся на общие правила бота по всем полям сразу"),
+        ("quizzero", "Обнулить счёт викторины",
+         "верные ответы и попытки станут нулями, звание вернётся к «Рядовой». "
+         "Почётное звание, если присвоено, останется"),
     ]
     items = []
     for code, title, hint in jobs:
@@ -1512,6 +1515,43 @@ def _user_danger_block(csrf: str, target_id: int, confirm: str) -> str:
             control = _uform(csrf, target_id, {"do": code}, _btn(title))
         items.append((title, hint, control))
     return "<h2>Очистка</h2>" + _rows(items)
+
+
+def _user_quiz_block(csrf: str, target_id: int) -> str:
+    """
+    Счёт викторины: «обнулить промахи» и правка обоих чисел полем ввода.
+
+    ⚠️ Вид у бота и сайта разный намеренно: в личке число присылают сообщением
+    (ждать ответа больше негде), здесь — обычное поле рядом с кнопкой. Правила
+    же одни на двоих и лежат в панели бота — см. web/actions.py::user_quiz_score.
+    Обнуление счёта живёт ниже, в блоке «Очистка»: там уже есть вопрос «точно?».
+    """
+    from database.history import get_user_stats
+    from handlers.admin.panel_users import _QUIZ_FIELDS
+
+    st = get_user_stats(target_id)
+    misses = st["total_attempts"] - st["correct_answers"]
+
+    items = []
+    if misses > 0:
+        items.append((
+            "Обнулить промахи",
+            f'верных станет столько же, сколько попыток ({st["total_attempts"]})',
+            _uform(csrf, target_id, {"do": "quizfix"},
+                   _btn(f"Убрать промахи ({misses})"))))
+
+    for code, (title, key, example) in _QUIZ_FIELDS.items():
+        control = _uform(
+            csrf, target_id, {"do": "quizset", "field": code},
+            f'<input type="text" name="value" class="qinput short" '
+            f'placeholder="{esc(example)}">' + _btn("Записать"),
+            "ctl pbtns")
+        items.append((title, f'сейчас: {st[key]}', control))
+
+    return ("<h2>Счёт викторины</h2>"
+            '<div class="note" style="margin-bottom:8px">Цифры накопительные — '
+            'это весь счёт человека за всё время. Правка сразу меняет звание '
+            'и полоску в /rank.</div>' + _rows(items))
 
 
 def _user_rank_block(csrf: str, target_id: int) -> str:
@@ -1580,6 +1620,7 @@ async def page_user_card(bot, target_id: int, csrf: str = "",
     body = ("<div class=\"wrap\">" + head + _topbar(csrf, "/users") + note
             + _user_facts(membership, target_id)
             + _user_settings_block(csrf, target_id)
+            + _user_quiz_block(csrf, target_id)
             + _user_rank_block(csrf, target_id)
             + _user_role_block(csrf, target_id)
             + _user_moderation_block(csrf, target_id)

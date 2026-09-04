@@ -375,6 +375,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if await handle_balance_input(update, context, user_text):
             return
 
+    # Экран «🎯 Счёт викторины» (карточка участника) ждёт число — верные ответы
+    # или попытки. Устроен ровно как экран счетов выше и гаснет там же:
+    # кнопкой «Отмена», любой другой кнопкой (router.py) и любой командой.
+    if not is_group and is_owner(user.id) and context.user_data.get("quiz_edit"):
+        from handlers.admin import handle_quiz_score_input
+        if await handle_quiz_score_input(update, context, user_text):
+            return
+
     # Игнор проверяем ПОСЛЕ режима «Проверить поиск» (он для админа и к ИИ
     # отношения не имеет) и до всего остального.
     if _ai_ignored(user.id):

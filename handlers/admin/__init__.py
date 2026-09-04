@@ -34,6 +34,7 @@ from .panel_main import (send_adm_panel, cmd_adm, send_stats_panel, cmd_stats, s
 from .panel_balance import send_balance_panel, handle_balance_input
 from .panel_mod import send_mod_panel, cmd_mod, cmd_unmute
 from .panel_quiz import send_quiz_panel, cmd_quiz_admin
-from .panel_users import send_users_panel, send_user_card, cmd_users
+from .panel_users import (send_users_panel, send_user_card, cmd_users,
+                          handle_quiz_score_input)
 from .panel_updates import send_updates_panel
 from .router import handle_callback_query

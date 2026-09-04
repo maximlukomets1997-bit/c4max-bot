@@ -231,6 +231,10 @@ _ACTION_TITLES = {
     "clear_ctx":  ("🧹", "очистка диалога"),
     "reset_viol": ("🧾", "обнуление нарушений"),
     "rank":       ("🎖️", "почётное звание"),
+    # Ручная правка счёта викторины (04.09.2026): и правка числа, и «обнулить
+    # промахи», и «в ноль» пишутся одним кодом — что именно вышло, сказано
+    # в подробности записи («285 из 289 → 289 из 289»).
+    "quiz_score": ("🎯", "счёт викторины"),
     "role_on":    ("🛡", "НАЗНАЧЕН МОДЕРАТОРОМ"),
     "role_off":   ("🚫", "СНЯТ С МОДЕРАТОРОВ"),
     "perm":       ("🔑", "право"),
@@ -530,8 +534,186 @@ def _actions_keyboard(user_id: int):
             InlineKeyboardButton("🧹 Очистить диалог", callback_data=f"usr:clr:{user_id}"),
             InlineKeyboardButton("🧾 Обнулить нарушения", callback_data=f"usr:viol:{user_id}"),
         ],
-        [InlineKeyboardButton("🎖️ Почётное звание", callback_data=f"usr:rank:{user_id}")],
+        [
+            InlineKeyboardButton("🎖️ Почётное звание", callback_data=f"usr:rank:{user_id}"),
+            InlineKeyboardButton("🎯 Счёт викторины", callback_data=f"usr:quiz:{user_id}"),
+        ],
     ]
+
+
+# ─── счёт викторины: правила, общие для бота и сайта ─────────────────
+#
+#  Кнопка «🎯 Счёт викторины» (04.09.2026, просьба Максима) правит два числа
+#  таблицы quiz_stats — «верных» и «попыток». До неё счёт правился только
+#  руками в базе на сервере, а кнопка была одна на всех: «обнулить всем».
+#
+#  ⚠️ ПРАВИЛА ЗДЕСЬ И ТОЛЬКО ЗДЕСЬ. Их зовёт и карточка бота, и страница сайта
+#  (web/actions.py::user_quiz_score). Второй набор проверок развёл бы бота и
+#  сайт при первой же правке — ровно так уже разъезжались панели этого проекта.
+_QUIZ_SCORE_MAX = 9999
+
+# Что можно править вводом: код кнопки → (надпись, ключ в get_user_stats,
+# число для примера). Ключи те же, что у кнопок `usr:quizset:<id>:<код>`.
+_QUIZ_FIELDS = {
+    "correct":  ("Верных ответов", "correct_answers", 100),
+    "attempts": ("Пройдено тестов", "total_attempts", 120),
+}
+
+
+def _set_quiz_score(target_id: int, correct=None, attempts=None) -> tuple[dict, dict]:
+    """
+    Ставит счёт викторины. Меняет только переданные числа, второе оставляет как
+    есть. Возвращает (было, стало) — два словаря get_user_stats: из них берутся
+    и звание, и проценты для сообщения человеку.
+
+    Отказ — ValueError с готовым русским текстом: он показывается и в боте
+    (всплывашкой), и на сайте (красной полосой). Три запрета:
+      • верных больше попыток — карточка нарисовала бы «110%», а полоска
+        прогресса ушла бы за край экрана;
+      • отрицательное — звание уехало бы в «Рядовой» при любом счёте;
+      • больше _QUIZ_SCORE_MAX — выше 600 верных ответов званий нет
+        (config.QUIZ_RANKS), дальше в базе копится мусор.
+    """
+    from database.history import set_quiz_stats
+
+    before = get_user_stats(target_id)
+    new_correct = before["correct_answers"] if correct is None else int(correct)
+    new_attempts = before["total_attempts"] if attempts is None else int(attempts)
+
+    if new_correct < 0 or new_attempts < 0:
+        raise ValueError("отрицательных ответов не бывает")
+    if new_correct > _QUIZ_SCORE_MAX or new_attempts > _QUIZ_SCORE_MAX:
+        raise ValueError(f"больше {_QUIZ_SCORE_MAX} не ставим — столько званий нет")
+    if new_correct > new_attempts:
+        raise ValueError(f"верных ({new_correct}) не может быть больше попыток "
+                         f"({new_attempts}) — вышло бы больше 100%")
+
+    set_quiz_stats(target_id, new_correct, new_attempts, _target_name(target_id))
+    return before, get_user_stats(target_id)
+
+
+def fix_quiz_misses(target_id: int):
+    """
+    «Обнулить промахи» — верных становится столько же, сколько попыток.
+    Возвращает (было, стало) или None, если промахов и не было.
+
+    Отдельной функцией, потому что это ОДНО действие в двух местах: кнопка
+    карточки в боте и кнопка на странице сайта. Посчитать «сколько ставить»
+    в каждом из них по-своему — верный способ однажды их развести.
+    """
+    before = get_user_stats(target_id)
+    if before["correct_answers"] >= before["total_attempts"]:
+        return None
+    return _set_quiz_score(target_id, correct=before["total_attempts"])
+
+
+def quiz_score_summary(before: dict, after: dict) -> str:
+    """
+    Строка «было → стало» для сообщения о правке счёта. Сырой текст без
+    разметки: его показывает и всплывашка бота, и полоса на сайте.
+    Про звание дописывает, ТОЛЬКО если оно поехало, — «Майор → Майор» шумит.
+    """
+    line = (f"{before['correct_answers']} из {before['total_attempts']} → "
+            f"{after['correct_answers']} из {after['total_attempts']}")
+    if after["rank"] != before["rank"]:
+        line += f" · звание: {before['rank']} → {after['rank']}"
+    return line
+
+
+async def _show_quiz_score(query, target_id: int):
+    """
+    Экран «🎯 Счёт викторины» — заменяет карточку в ТОМ ЖЕ сообщении, как
+    экраны мута и почётного звания. Кнопки показываются по обстановке:
+    убирать нечего — нет «обнулить промахи», счёт и так нулевой — нет «в ноль».
+    """
+    st = get_user_stats(target_id)
+    correct, attempts = st["correct_answers"], st["total_attempts"]
+    misses = attempts - correct
+
+    if st["next_rank_needed"] == -1:
+        band = f"от {st['rank_min']}"
+    else:
+        band = f"{st['rank_min']}–{st['next_rank_needed'] - 1}"
+
+    rows = []
+    if misses > 0:
+        rows.append([InlineKeyboardButton(f"✅ Обнулить промахи ({misses})",
+                                          callback_data=f"usr:quizfix:{target_id}")])
+    rows.append([
+        InlineKeyboardButton("✏️ Верных", callback_data=f"usr:quizset:{target_id}:correct"),
+        InlineKeyboardButton("✏️ Попыток", callback_data=f"usr:quizset:{target_id}:attempts"),
+    ])
+    if correct or attempts:
+        rows.append([InlineKeyboardButton("↩️ В ноль",
+                                          callback_data=f"usr:quizzero:{target_id}")])
+
+    await _screen(query,
+                  f"🎯 <b>Счёт викторины: {html.escape(_target_name(target_id))}</b>\n"
+                  "───────────────────────────\n"
+                  f"Верных: <b>{correct}</b> из <b>{attempts}</b>"
+                  f"{(' · ' + str(st['success_rate']) + '%') if attempts else ''}\n"
+                  f"Промахов: <b>{misses if misses > 0 else 0}</b>\n"
+                  f"Звание: {st['rank_icon']} <b>{html.escape(st['rank'])}</b> ({band} верных)\n\n"
+                  "<i>Цифры накопительные — это весь счёт человека за всё время. "
+                  "Правка сразу меняет звание и полоску в /rank. Заработанное "
+                  "звание перекрывается почётным, если оно присвоено.</i>",
+                  rows, target_id)
+
+
+async def handle_quiz_score_input(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                                  text: str) -> bool:
+    """
+    Ввод числа для экрана «🎯 Счёт викторины». Зовётся из handlers/messages.py,
+    когда в личке ВЛАДЕЛЬЦА висит ожидание `user_data["quiz_edit"]`.
+
+    Возвращает True — сообщение съедено этим режимом (в ИИ не пойдёт).
+    Не число или отказ по правилам → режим НЕ гаснет: бот объясняет ошибку
+    самоудаляемым сообщением и продолжает ждать (выйти можно «❌ Отмена»
+    или любой командой).
+    """
+    from utils import schedule_delete
+
+    waiting = context.user_data.get("quiz_edit")
+    if not waiting:
+        return False
+    target_id, field = waiting
+    chat_id = update.effective_chat.id
+    admin_id = update.effective_user.id
+    # Сообщение с числом в чате не нужно — карточка покажет итог сама.
+    await delete_user_message_safe(update.message)
+
+    async def _warn(reason: str) -> None:
+        """Объяснение ошибки, которое само исчезает. НЕ через гигиену панелей:
+        иначе предупреждение снесло бы сам экран ввода."""
+        msg = await context.bot.send_message(
+            chat_id=chat_id,
+            text=(f"⚠️ {reason}.\nПришли число — например <code>100</code>, "
+                  f"или нажми «❌ Отмена» на экране выше."),
+            parse_mode=ParseMode.HTML)
+        if msg:
+            schedule_delete(context.bot, chat_id, msg.message_id, 15)
+
+    raw = (text or "").strip()
+    if not raw.lstrip("-").isdigit():
+        await _warn("Это не число")
+        return True
+
+    try:
+        before, after = _set_quiz_score(target_id, **{
+            "correct" if field == "correct" else "attempts": int(raw)})
+    except ValueError as e:
+        await _warn(str(e).capitalize())
+        return True
+
+    context.user_data.pop("quiz_edit", None)
+    summary = quiz_score_summary(before, after)
+    title = _QUIZ_FIELDS[field][0]
+    logger.info("👥 Админ %s правит счёт викторины (%s): %s (%s)",
+                admin_id, title, _target_label(target_id), summary)
+    _audit(admin_id, "quiz_score", target_id, f"{title.lower()}: {summary}")
+    await send_user_card(context.bot, chat_id, target_id, admin_id,
+                         note=f"🎯 Счёт викторины: {summary}")
+    return True
 
 
 def _role_lines(target_id: int) -> list[str]:
@@ -804,10 +986,18 @@ async def _build_user_card(bot, user_id: int, viewer_id: int):
     return text, InlineKeyboardMarkup(_filter_keyboard(keyboard, viewer_id))
 
 
-async def send_user_card(bot, chat_id: int, user_id: int, viewer_id: int | None = None):
+async def send_user_card(bot, chat_id: int, user_id: int, viewer_id: int | None = None,
+                         note: str = ""):
     """Отправляет карточку участника. viewer_id по умолчанию = chat_id
-    (карточка открывается в личке, где это одно и то же число)."""
+    (карточка открывается в личке, где это одно и то же число).
+
+    note — строка о только что сделанной правке, встаёт над карточкой. Нужна
+    там, где ответить всплывашкой не на что: правка числом приходит обычным
+    сообщением, а не нажатием кнопки. Отдельным сообщением её слать нельзя —
+    гигиена панелей тут же затрёт либо его, либо карточку."""
     text, markup = await _build_user_card(bot, user_id, chat_id if viewer_id is None else viewer_id)
+    if note:
+        text = f"✅ <b>{html.escape(note)}</b>\n───────────────────────────\n" + text
     await _send_panel_message(bot, chat_id, text, markup)
 
 
@@ -1011,6 +1201,10 @@ async def _handle_users_callback(query, context, data: str, chat_id: int, admin_
       usr:clr:<id> / usr:clrgo:<id>         — очистка истории диалога
       usr:viol:<id> / usr:violgo:<id>       — обнуление нарушений
       usr:rank:<id> / usr:rankset:<id>:<№>  — почётное звание (№ -1 = убрать)
+      usr:quiz:<id>                — экран «🎯 Счёт викторины»
+      usr:quizfix:<id>             — обнулить промахи (верных = попыткам)
+      usr:quizset:<id>:correct|attempts — ждать число одним сообщением
+      usr:quizzero:<id> / usr:quizzerogo:<id> — обнулить счёт этому человеку
       usr:rights:<id>              — экран «⚙️Настройки Прав Модератора»
       usr:role:<id>:on|off|offgo   — назначить / спросить / снять модератора
       usr:perm:<id>:<код>          — галочка права (на экране прав)
@@ -1293,6 +1487,76 @@ async def _handle_users_callback(query, context, data: str, chat_id: int, admin_
         await query.answer(f"{title}: {'✅ выдано' if new_val else '⬜ снято'}")
         # Остаёмся на экране прав — галочки накликиваются подряд.
         await _show_rights(query, target_id)
+        return
+
+    # ── Счёт викторины ───────────────────────────────────────────────
+    if section == "quiz":
+        await query.answer()
+        await _show_quiz_score(query, target_id)
+        return
+
+    if section == "quizfix":
+        try:
+            changed = fix_quiz_misses(target_id)
+        except ValueError as e:
+            await query.answer(f"⚠️ {e}", show_alert=True)
+            return
+        if changed is None:
+            await query.answer("Промахов и так нет.", show_alert=False)
+            return
+        before, after = changed
+        summary = quiz_score_summary(before, after)
+        logger.info("👥 Админ %s убрал промахи викторины: %s (%s)",
+                    admin_id, _target_label(target_id), summary)
+        _audit(admin_id, "quiz_score", target_id, f"промахи убраны: {summary}")
+        await query.answer(f"🎯 {summary}", show_alert=True)
+        await _show_quiz_score(query, target_id)
+        return
+
+    if section == "quizset":
+        field = parts[3] if len(parts) > 3 else ""
+        if field not in _QUIZ_FIELDS:
+            await query.answer("❌ Некорректные данные кнопки.", show_alert=True)
+            return
+        # Ожидание числа гаснет от любой другой кнопки (router.py) и от любой
+        # команды (commands.py::log_incoming_command) — иначе следующий вопрос
+        # боту в личке был бы съеден как «не число».
+        context.user_data["quiz_edit"] = (target_id, field)
+        await query.answer()
+        st = get_user_stats(target_id)
+        title, key, example = _QUIZ_FIELDS[field]
+        rows = [[InlineKeyboardButton("❌ Отмена", callback_data=f"usr:quiz:{target_id}")]]
+        try:
+            await query.edit_message_text(
+                f"✏️ <b>{title}: {html.escape(_target_name(target_id))}</b>\n"
+                "───────────────────────────\n"
+                f"Сейчас: <b>{st[key]}</b>\n\n"
+                "Пришли новое число одним сообщением.\n"
+                f"Например: <code>{example}</code>",
+                parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(rows))
+        except Exception as e:
+            logger.debug("🎯 Не удалось показать экран ввода счёта: %s", e)
+        return
+
+    if section == "quizzero":
+        await query.answer()
+        rows = [[InlineKeyboardButton("✅ Да, обнулить", callback_data=f"usr:quizzerogo:{target_id}")]]
+        await _screen(query, f"↩️ Обнулить счёт викторины у "
+                             f"<b>{html.escape(_target_name(target_id))}</b>?\n\n"
+                             f"<i>Верные ответы и попытки станут нулями, звание вернётся "
+                             f"к «Рядовой». Почётное звание, если оно присвоено, останется. "
+                             f"Вернуть прежние цифры будет неоткуда.</i>",
+                      rows, target_id)
+        return
+
+    if section == "quizzerogo":
+        before, after = _set_quiz_score(target_id, correct=0, attempts=0)
+        summary = quiz_score_summary(before, after)
+        logger.info("👥 Админ %s обнулил счёт викторины: %s (%s)",
+                    admin_id, _target_label(target_id), summary)
+        _audit(admin_id, "quiz_score", target_id, f"обнулён: {summary}")
+        await query.answer(f"↩️ {summary}", show_alert=True)
+        await _show_quiz_score(query, target_id)
         return
 
     # ── Почётное звание ──────────────────────────────────────────────

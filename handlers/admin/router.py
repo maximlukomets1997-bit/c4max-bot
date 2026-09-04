@@ -109,6 +109,13 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     if not data.startswith("bal:"):
         context.user_data.pop("balance_edit", None)
 
+    # ── Ожидание числа для экрана «🎯 Счёт викторины» ────────────────────
+    # То же самое для правки счёта в карточке участника: ушёл с экрана ввода
+    # любой другой кнопкой — ожидание гаснет здесь. Сама кнопка ввода
+    # (usr:quizset:…) ожидание, наоборот, ставит, поэтому исключена.
+    if not data.startswith("usr:quizset:"):
+        context.user_data.pop("quiz_edit", None)
+
     # ── Кнопка «⬅️ Назад к панели» (из служебных сообщений промптов) ─────
     # Удаляет текущее сообщение с кнопкой и заново открывает панель промптов
     # (callback-имя историческое: раньше вело в общую панель /stats).

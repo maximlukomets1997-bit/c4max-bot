@@ -91,7 +91,7 @@ from .stats import (_kyiv_today_start_utc, get_bot_stats, save_stats_snapshot,
                     delete_old_stats_snapshots)
 
 # ─── викторина: банк вопросов и счёт игроков ────────────────────────
-from .quiz import (add_quiz_attempt, get_user_stats, _row_to_question,
+from .quiz import (add_quiz_attempt, get_user_stats, set_quiz_stats, _row_to_question,
                    add_quiz_question, get_random_quiz_question,
                    note_quiz_question_asked, get_quiz_bank_counts,
                    get_quiz_articles_covered, list_quiz_questions,

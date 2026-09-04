@@ -254,6 +254,45 @@ def user_rank(actor_id: int, target_id: int, idx: int) -> str:
     return name
 
 
+def user_quiz_score(actor_id: int, target_id: int, correct=None,
+                    attempts=None, what: str = "правка") -> str:
+    """
+    Ручная правка счёта викторины со страницы участника. Возвращает строку
+    «было → стало» для зелёной полосы над карточкой.
+
+    ⚠️ САМИ ПРАВИЛА НЕ ЗДЕСЬ. И запреты («верных не больше попыток», потолок,
+    отрицательные), и запись зовутся у панели бота — иначе сайт и бот начнут
+    принимать разные числа, а поймёт это только тот, кому счёт перепишут не
+    так. `what` — что писать в журнал персонала («промахи убраны», «обнулён»).
+    """
+    from handlers.admin.panel_users import _set_quiz_score, quiz_score_summary
+    try:
+        before, after = _set_quiz_score(target_id, correct=correct, attempts=attempts)
+    except ValueError as e:
+        raise ActionError(str(e))
+    summary = quiz_score_summary(before, after)
+    logger.info("🌐 Сайт: счёт викторины %s — %s (%s, админ %s)",
+                _target_label(target_id), summary, what, actor_id)
+    _staff_audit(actor_id, "quiz_score", target_id, f"{what}: {summary}")
+    return summary
+
+
+def user_quiz_fix(actor_id: int, target_id: int) -> str:
+    """«Обнулить промахи» со страницы участника. Пусто — промахов и не было."""
+    from handlers.admin.panel_users import fix_quiz_misses, quiz_score_summary
+    try:
+        changed = fix_quiz_misses(target_id)
+    except ValueError as e:
+        raise ActionError(str(e))
+    if changed is None:
+        return ""
+    summary = quiz_score_summary(*changed)
+    logger.info("🌐 Сайт: убраны промахи викторины %s — %s (админ %s)",
+                _target_label(target_id), summary, actor_id)
+    _staff_audit(actor_id, "quiz_score", target_id, f"промахи убраны: {summary}")
+    return summary
+
+
 async def user_role(actor_id: int, target_id: int, make: bool, application=None) -> None:
     """
     Назначает или снимает модератора.

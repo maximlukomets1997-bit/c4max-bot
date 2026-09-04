@@ -396,6 +396,7 @@ async def log_incoming_command(update: Update, context: ContextTypes.DEFAULT_TYP
         # Единственное место, где это ловится для ВСЕХ команд сразу (кнопки
         # гасят ожидание в router.py). Ни на что больше не влияет.
         context.user_data.pop("balance_edit", None)
+        context.user_data.pop("quiz_edit", None)
     except Exception as e:
         logger.debug("⌨️ Не удалось записать команду в лог: %s", e)
 

@@ -3446,6 +3446,11 @@ def check_web_wiring():
                       "VALUES (?, ?, datetime('now'))", (-100999, "Проверочная группа"))
         _conn.commit()
     _hist.add_quiz_attempt(777000111, "проверка", True)
+    # ⚠️ Второй ответ НЕВЕРНЫЙ, и это не украшение: без промаха кнопка
+    # «Обнулить промахи» на карточке не рисуется (её незачем показывать при
+    # 100%), и сверка «кнопка ↔ обработчик» объявила бы обработчик сиротой.
+    # Уберёшь эту строку — проверка покраснеет на ровном месте (04.09.2026).
+    _hist.add_quiz_attempt(777000111, "проверка", False)
     _hist.note_quiz_failure("проверочная.md", "проверка проводки")
 
     # ⚠️ Статью заводим во ВРЕМЕННОЙ папке: настоящие статьи базы знаний —
@@ -3983,6 +3988,195 @@ def check_update_notice():
                       f"config, три формата следа, удаление и его отсутствие")
 
 
+def check_quiz_score():
+    """
+    Ручная правка счёта викторины из карточки участника (04.09.2026, просьба
+    Максима — до неё счёт правился только руками в базе на сервере).
+
+    ⚠️ Ради чего проверка существует. Тут три тихих способа соврать, и ни один
+    не падает сам по себе:
+      • пропустить «верных больше попыток» — /rank нарисует «110%», а полоска
+        прогресса уедет за край экрана;
+      • не пересчитать звание — карточка покажет новый счёт со старым званием;
+      • забыть НЕДЕЛЬНЫЙ СНИМОК ДАЙДЖЕСТА. Он самый коварный: счёт правится
+        в личке, а врёт потом дайджест В ГРУППЕ — «за неделю +115 ответов»,
+        которых человек не давал, или «0 за неделю» неделями после понижения.
+
+    Отдельно сверяется, что бот и сайт зовут ОДНИ правила: два набора запретов
+    начнут принимать разные числа, и заметит это только тот, кому счёт
+    перепишут не так.
+    """
+    import json as _json
+
+    from config import QUIZ_RANKS
+    from database import history as _hist
+    from handlers.admin.panel_users import (_QUIZ_FIELDS, _QUIZ_SCORE_MAX,
+                                            _set_quiz_score, fix_quiz_misses,
+                                            quiz_score_summary)
+
+    UID = 777000222
+    problems = []
+    done = 0
+
+    def expect(title, got, want):
+        nonlocal done
+        done += 1
+        if got != want:
+            problems.append(f"{title}: ожидалось {want!r}, вышло {got!r}")
+
+    def refuse(title, **kwargs):
+        """Правка ОБЯЗАНА отказать — и словами, а не пустым исключением."""
+        nonlocal done
+        done += 1
+        try:
+            _set_quiz_score(UID, **kwargs)
+        except ValueError as e:
+            if not str(e).strip():
+                problems.append(f"{title}: отказ без объяснения")
+            return
+        problems.append(f"{title}: правка ПРОШЛА — так нельзя")
+
+    def score():
+        st = _hist.get_user_stats(UID)
+        return st["correct_answers"], st["total_attempts"]
+
+    try:
+        # ── 1. Три запрета ──
+        _set_quiz_score(UID, correct=10, attempts=20)
+        refuse("верных больше попыток", correct=21)
+        refuse("отрицательные верные", correct=-1)
+        refuse("отрицательные попытки", attempts=-5)
+        refuse("выше потолка", attempts=_QUIZ_SCORE_MAX + 1)
+        expect("после отказов счёт не поехал", score(), (10, 20))
+
+        # Ровно на потолке — можно: запрет «больше», а не «столько».
+        _set_quiz_score(UID, correct=_QUIZ_SCORE_MAX, attempts=_QUIZ_SCORE_MAX)
+        expect("потолок берётся", score(), (_QUIZ_SCORE_MAX, _QUIZ_SCORE_MAX))
+
+        # ── 2. «Обнулить промахи» ──
+        _set_quiz_score(UID, correct=285, attempts=289)
+        changed = fix_quiz_misses(UID)
+        expect("промахи убраны", score(), (289, 289))
+        expect("точность стала ровно 100", _hist.get_user_stats(UID)["success_rate"], 100.0)
+        done += 1
+        if not changed or quiz_score_summary(*changed) != "285 из 289 → 289 из 289":
+            problems.append(f"строка «было → стало» разъехалась: "
+                            f"{changed and quiz_score_summary(*changed)!r}")
+        expect("повторное нажатие — уже нечего убирать", fix_quiz_misses(UID), None)
+
+        # ── 3. Звание едет за счётом ──
+        # Границы взяты из config.QUIZ_RANKS, а не переписаны сюда числами:
+        # переставят лестницу — проверка поедет вместе с ней.
+        ranks = {r["name"]: r for r in QUIZ_RANKS}
+        maj = ranks["Майор"]
+        _set_quiz_score(UID, correct=maj["min"] - 1, attempts=_QUIZ_SCORE_MAX)
+        expect("на ступень ниже — не Майор",
+               _hist.get_user_stats(UID)["rank"] == "Майор", False)
+        _set_quiz_score(UID, correct=maj["min"])
+        expect("нижняя граница — уже Майор", _hist.get_user_stats(UID)["rank"], "Майор")
+        _set_quiz_score(UID, correct=maj["max"] + 1)
+        expect("выше верхней границы — уже не Майор",
+               _hist.get_user_stats(UID)["rank"] == "Майор", False)
+        _set_quiz_score(UID, correct=0, attempts=0)
+        expect("обнуление возвращает первое звание",
+               _hist.get_user_stats(UID)["rank"], QUIZ_RANKS[0]["name"])
+
+        # ── 4. Недельный снимок дайджеста едет вместе со счётом ──
+        # Иначе правка счёта в личке превращается во вранье в ГРУППЕ.
+        _hist.set_setting("group_digest_quiz", _json.dumps({str(UID): 100, "1": 7}))
+        # Счёт дайджеста берём ДО и ПОСЛЕ правки: в базе проверок живут и
+        # другие игроки, и их вклад в «за неделю» нам не интересен — важно,
+        # что правка не добавила НИЧЕГО.
+        week_before, _b, _n = _quiz_week_for_check()
+        _set_quiz_score(UID, correct=140, attempts=200)
+        snap = _json.loads(_hist.get_setting("group_digest_quiz", "{}"))
+        expect("снимок недели не поехал за правкой", snap.get(str(UID)), 140)
+        expect("правка одного человека тронула чужую строку снимка",
+               snap.get("1"), 7)
+
+        week_after, _b, _n = _quiz_week_for_check()
+        expect("правка счёта засчиталась дайджесту как ответы за неделю",
+               week_after, week_before)
+
+        # Снимка нет вовсе — первый выпуск дайджеста намеренно считает всё
+        # накопленное, и создавать снимок раньше времени нельзя.
+        _hist.delete_setting("group_digest_quiz")
+        _set_quiz_score(UID, correct=141)
+        expect("снимок создан там, где его не должно быть",
+               _hist.get_setting("group_digest_quiz", ""), "")
+
+        # ── 5. Сайт правит счёт ТЕМИ ЖЕ правилами, что и бот ──
+        # ⚠️ Проверяется ПОВЕДЕНИЕМ, а не поиском имени по файлу. Первая
+        # редакция этой проверки искала «_set_quiz_score» в web/actions.py —
+        # и проспала подделку, в которой имя осталось на месте, а считалось
+        # по-своему (сломано нарочно 04.09.2026, проверка не покраснела).
+        from web import actions as _wact
+        _set_quiz_score(UID, correct=5, attempts=10)
+        done += 1
+        try:
+            _wact.user_quiz_score(1, UID, correct=11)
+            problems.append("сайт принял «верных больше попыток» — запреты "
+                            "бота и сайта разъехались")
+        except _wact.ActionError:
+            pass
+        expect("отказ сайта не должен менять счёт", score(), (5, 10))
+        _wact.user_quiz_fix(1, UID)
+        expect("«обнулить промахи» на сайте не сработало", score(), (10, 10))
+    finally:
+        with _hist._lock:
+            _hist._get_connection().execute("DELETE FROM quiz_stats WHERE user_id=?", (UID,))
+            _hist._get_connection().commit()
+        _hist.delete_setting("group_digest_quiz")
+
+    # ── 6. Кнопка в карточке есть, и видит её только владелец ──
+    # ⚠️ Опять же ПОВЕДЕНИЕМ: поиск «usr:quiz:» по файлу эту кнопку не
+    # сторожит — такая же строка стоит у «Отмены» на экране ввода, и убранная
+    # из карточки кнопка проверку бы не уронила (сломано нарочно 04.09.2026).
+    from handlers.admin.common import _filter_keyboard
+    from handlers.admin.panel_users import _actions_keyboard
+    from services import roles as _roles
+
+    rows = _actions_keyboard(5)
+    on_card = [b.callback_data for row in rows for b in row]
+    expect("кнопки «Счёт викторины» в карточке участника больше нет",
+           "usr:quiz:5" in on_card, True)
+
+    for data in ("usr:quiz:5", "usr:quizfix:5", "usr:quizset:5:correct",
+                 "usr:quizzero:5", "usr:quizzerogo:5"):
+        expect(f"право на «{data}»", _roles.perm_for_callback(data), "owner")
+
+    # Право в таблице — половина дела: кнопку с экрана убирает фильтр
+    # клавиатуры, и молчащий фильтр показал бы её модератору как ни в чём
+    # не бывало. Модератору с «⚙️ Правкой карточек» соседнее «Почётное
+    # звание» остаться ОБЯЗАНО — иначе проверка поймала бы не то.
+    MOD = 777000333
+    try:
+        _roles.make_moderator(MOD, 1)
+        _roles.grant_perm(MOD, "cards_edit", True)
+        seen = [b.callback_data for row in _filter_keyboard(rows, MOD) for b in row]
+        expect("модератор видит кнопку счёта викторины", "usr:quiz:5" in seen, False)
+        expect("у модератора заодно пропало почётное звание",
+               "usr:rank:5" in seen, True)
+    finally:
+        _roles.unmake_moderator(MOD)
+
+    # Поля правки и их ключи не разъехались с тем, что отдаёт get_user_stats.
+    stats_keys = set(_hist.get_user_stats(1).keys())
+    for code, (_title, key, _example) in _QUIZ_FIELDS.items():
+        expect(f"поле «{code}» смотрит в несуществующий ключ счёта",
+               key in stats_keys, True)
+
+    return problems, (f"{done} проверок: три запрета, обнуление промахов, "
+                      f"звание по границам лестницы, недельный снимок "
+                      f"дайджеста, общие правила бота и сайта, права")
+
+
+def _quiz_week_for_check() -> tuple:
+    """Сколько дайджест засчитает «за неделю» прямо сейчас (без сохранения)."""
+    from services.group_digest import _quiz_week
+    return _quiz_week(save=False)
+
+
 CHECKS = (
     ("деньги — расчёт стоимости запросов", check_money),
     ("деньги — сам прайс не менялся", check_price_list),
@@ -4015,6 +4209,7 @@ CHECKS = (
     ("ссылка входа исчезает вместе со своим сроком", check_login_link_message),
     ("вход в веб-админку — подпись и срок", check_web_auth),
     ("уведомление об обновлении уходит по сроку", check_update_notice),
+    ("ручная правка счёта викторины", check_quiz_score),
 )
 
 
