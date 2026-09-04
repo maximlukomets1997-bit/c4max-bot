@@ -146,7 +146,7 @@ database.history import add_messages` работает как работал; т
 | `jobs/update.py` | 221 | `forget_update_notice`, `auto_update_loop` |
 | `jobs/news.py` | 230 | `send_news_to_chat`, `news_polling_loop` |
 | `jobs/watchdog.py` | 102 | `watchdog_loop` |
-| `jobs/rag.py` | 85 | `rag_catchup_loop` |
+| `jobs/rag.py` | 162 | `send_notice`, `drop_notices`, `rag_catchup_loop` |
 | `jobs/web.py` | 71 | `web_loop` — поднимает сайт внутри процесса бота |
 
 ## `web/` — веб-админка (30.08.2026, этапы 0–5)

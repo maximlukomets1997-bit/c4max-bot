@@ -4177,6 +4177,315 @@ def _quiz_week_for_check() -> tuple:
     return _quiz_week(save=False)
 
 
+def check_rag_notice():
+    """
+    Уведомления о базе знаний: «✅ снова полная» исчезает само, а «⚠️ неполная»
+    висит до конца инцидента и стирается отбоем (просьба Максима 04.09.2026).
+
+    ⚠️ Ради чего проверка существует. Ежечасный цикл добора не видит НИ ОДНА
+    другая проверка: preflight смотрит кнопки и импорты, остальные группы
+    selftest сюда не заглядывают. Ошибка здесь всплывает не сразу, а через час
+    или через сутки, и выглядит не как поломка, а как «бот замолчал» или
+    «опять мусор в личке» — руками такое ловится случайно и поздно.
+
+    ⚠️ Проверяется НЕ пара вспомогательных функций, а сам цикл: он запускается
+    целиком, с поддельным Telegram и поддельным индексом. Проверить отдельно
+    send_notice и drop_notices означало бы проверить механизм и не заметить,
+    что его перестали звать из нужного места.
+
+    Срок самоудаления берётся заведомо НЕ ТОТ, что стоит в config: с настоящими
+    пятью минутами зашитое в код число прошло бы проверку насквозь.
+    """
+    import asyncio
+
+    import config as cfg
+    import utils as u
+    import jobs.rag as jr
+    from services import rag as rag_mod
+
+    problems = []
+    done = 0
+    OWNER, SECOND = 4242, 4343
+    TTL = 111  # нарочно не 300: зашитое в код число обязано провалиться
+
+    class _Stop(Exception):
+        """Останов сценария. Бросается из sleep — он стоит ВНЕ try цикла."""
+
+    def run(script, admins=(OWNER,), fail_for=()):
+        """
+        Прогоняет цикл по сценарию. script — шаги вида
+        (сколько статей без векторов, что вернёт синхронизация).
+        Возвращает: что отправлено, что поставлено на самоудаление, что стёрто.
+        """
+        sent, deletes, dropped = [], [], []
+        steps = iter(script)
+        current = {}
+
+        class _Msg:
+            def __init__(self, mid):
+                self.message_id = mid
+
+        class _Bot:
+            def __init__(self):
+                self.n = 0
+
+            async def send_message(self, chat_id=None, text=None, **kw):
+                if chat_id in fail_for:
+                    raise RuntimeError("админ заблокировал бота")
+                self.n += 1
+                sent.append((chat_id, text, self.n))
+                return _Msg(self.n)
+
+            async def delete_message(self, chat_id=None, message_id=None):
+                dropped.append((chat_id, message_id))
+
+        class _App:
+            bot = _Bot()
+            bot_data = {}
+
+        class _Sleeper:
+            """Подменяет модуль asyncio внутри jobs/rag.py: час ждать незачем."""
+            calls = 0
+
+            @staticmethod
+            async def sleep(_):
+                _Sleeper.calls += 1
+                if _Sleeper.calls > len(script):
+                    raise _Stop()
+
+            get_running_loop = staticmethod(asyncio.get_running_loop)
+
+        def _lag():
+            current["step"] = next(steps)
+            return current["step"][0]
+
+        def _sync():
+            return current["step"][1]
+
+        saved = (cfg.RAG_ENABLED, cfg.ADMIN_IDS, cfg.RAG_NOTICE_TTL_SEC,
+                 rag_mod.index_lag, rag_mod.sync_knowledge_base,
+                 u.schedule_delete, jr.asyncio)
+        try:
+            cfg.RAG_ENABLED = True
+            cfg.ADMIN_IDS = list(admins)
+            cfg.RAG_NOTICE_TTL_SEC = TTL
+            rag_mod.index_lag = _lag
+            rag_mod.sync_knowledge_base = _sync
+            u.schedule_delete = lambda bot, chat, mid, delay: deletes.append((chat, mid, delay))
+            jr.asyncio = _Sleeper
+            try:
+                asyncio.run(jr.rag_catchup_loop(_App()))
+            except _Stop:
+                pass
+        finally:
+            (cfg.RAG_ENABLED, cfg.ADMIN_IDS, cfg.RAG_NOTICE_TTL_SEC,
+             rag_mod.index_lag, rag_mod.sync_knowledge_base,
+             u.schedule_delete, jr.asyncio) = saved
+        return sent, deletes, dropped
+
+    # ── 1. Рутина: поправили статью, цикл её дотянул ────────────────────────
+    # Именно этот случай Максим и видит чаще всего — инцидента не было вовсе.
+    sent, deletes, dropped = run([(1, (92, 92))])
+    done += 1
+    if len(sent) != 1 or "✅" not in sent[0][1]:
+        problems.append(f"после успешного добора не пришло «✅ снова полная»: {sent!r}")
+    else:
+        done += 1
+        if "92 из 92" not in sent[0][1]:
+            problems.append(f"в отбое потерялись цифры: {sent[0][1]!r}")
+    done += 1
+    if not deletes:
+        problems.append("«✅ снова полная» НЕ поставлено на самоудаление — "
+                        "сообщение останется висеть в личке навсегда")
+    else:
+        chat, mid, delay = deletes[0]
+        done += 3
+        if chat != OWNER:
+            problems.append(f"самоудаление назначено не в тот чат: {chat}")
+        if sent and mid != sent[0][2]:
+            problems.append(f"самоудаление назначено не тому сообщению: {mid}")
+        if delay != TTL:
+            problems.append(f"срок самоудаления {delay} не поехал за настройкой "
+                            f"RAG_NOTICE_TTL_SEC ({TTL}) — похоже, число зашито в код")
+    done += 1
+    if dropped:
+        problems.append(f"без инцидента цикл полез что-то удалять: {dropped!r}")
+
+    # ── 2. Инцидент: тревога висит, отбой её уносит ─────────────────────────
+    sent, deletes, dropped = run([(5, (80, 92)), (5, (85, 92)), (3, (92, 92))])
+    done += 1
+    if len(sent) != 2:
+        problems.append(f"за инцидент ждали ровно два сообщения (тревога и отбой), "
+                        f"пришло {len(sent)}: {[s[1][:40] for s in sent]!r}")
+    else:
+        warn, ok = sent
+        done += 2
+        if "⚠️" not in warn[1]:
+            problems.append(f"первым сообщением инцидента пришла не тревога: {warn[1][:60]!r}")
+        if "✅" not in ok[1]:
+            problems.append(f"вторым сообщением инцидента пришёл не отбой: {ok[1][:60]!r}")
+        done += 1
+        if any(mid == warn[2] for _, mid, _ in deletes):
+            problems.append("тревоге «⚠️ база неполная» назначено самоудаление — "
+                            "она пропадёт посреди инцидента, пока база ещё сломана")
+        done += 1
+        if not any(mid == ok[2] and delay == TTL for _, mid, delay in deletes):
+            problems.append(f"отбой не поставлен на самоудаление по сроку: {deletes!r}")
+        done += 1
+        if (OWNER, warn[2]) not in dropped:
+            problems.append("отбой не стёр прежнюю тревогу — «⚠️ база неполная» "
+                            f"останется висеть навсегда: стёрто {dropped!r}")
+
+    # ── 3. Базу починили мимо цикла (кнопкой «Пересобрать RAG») ─────────────
+    sent, deletes, dropped = run([(5, (80, 92)), (0, None)])
+    done += 1
+    if len(sent) != 2 or "✅" not in sent[-1][1]:
+        problems.append(f"база стала полной мимо цикла, а обещанный отбой не пришёл: "
+                        f"{[s[1][:40] for s in sent]!r}")
+    done += 1
+    if sent and (OWNER, sent[0][2]) not in dropped:
+        problems.append("база починена мимо цикла, а тревога осталась висеть: "
+                        f"стёрто {dropped!r}")
+
+    # ── 4. Админов несколько, одному не доходит ────────────────────────────
+    sent, deletes, dropped = run([(1, (92, 92))], admins=(OWNER, SECOND), fail_for=(OWNER,))
+    done += 1
+    if len(sent) != 1 or sent[0][0] != SECOND:
+        problems.append(f"отказ отправки одному админу утянул за собой второго: {sent!r}")
+    done += 1
+    if len(deletes) != 1 or deletes[0][0] != SECOND:
+        problems.append(f"самоудаление назначено не тому, кто получил сообщение: {deletes!r}")
+
+    return problems, (f"{done} проверок: отбой уходит по сроку из настройки, "
+                      f"тревога висит до конца инцидента и стирается отбоем, "
+                      f"починка мимо цикла, отказ отправки одному из админов")
+
+
+def check_photo_route():
+    """
+    Куда уходит ФОТО: к активной модели или в обход, по цепочке Gemini.
+
+    ⚠️ Ради чего проверка существует. До 04.09.2026 в этот маршрут не смотрела
+    НИ ОДНА проверка — ни preflight, ни selftest. А ошибиться тут можно тихо:
+    DeepSeek на картинку НЕ РУГАЕТСЯ. Запрос проходит с кодом 200, картинка
+    молча выбрасывается, и человек получает уверенный ответ вслепую вместо
+    отказа (проверено живым запросом: 106 токенов входа с картинкой против 101
+    без неё). То есть «слепая модель в цепочке фото» — не ошибка с сообщением,
+    а враньё без единого следа в логе.
+
+    ⚠️ Проверяется НЕ поле "vision" в конфиге, а КУДА РЕАЛЬНО УШЁЛ ЗАПРОС:
+    запускается настоящий `_gemini_chat_request`, а провайдерские отправлялки
+    подменены на записные книжки. Сверять флаг с флагом значило бы проверять,
+    что конфиг равен сам себе.
+    """
+    import time as _time
+    import types
+
+    import config as cfg
+    from database import history as hist
+    from services import gemini as g
+
+    problems = []
+    done = 0
+    MSG = [{"role": "user", "content": "неважно"}]
+
+    def route(active: str, has_image: bool) -> list:
+        """Возвращает список моделей, которых РЕАЛЬНО попробовали по порядку."""
+        tried = []
+
+        def _fake_provider(model_name, messages, thinking_override=None):
+            tried.append(model_name)
+            return None          # «не ответила» — цепочка идёт дальше
+
+        class _Resp:
+            status_code = 503
+
+            @staticmethod
+            def raise_for_status():
+                raise RuntimeError("подставной отказ")
+
+        class _Session:
+            @staticmethod
+            def post(url, json=None, **kw):
+                tried.append((json or {}).get("model"))
+                return _Resp()
+
+        saved = (g._qwen_chat_request, g._deepseek_chat_request,
+                 g._xiaomi_chat_request, g._http, g._notify_models_failed, g.time)
+        try:
+            g._qwen_chat_request = _fake_provider
+            g._deepseek_chat_request = _fake_provider
+            g._xiaomi_chat_request = _fake_provider
+            g._http = lambda: _Session()
+            g._notify_models_failed = lambda *a, **kw: None
+            # Ждать по-настоящему нельзя: между попытками стоят паузы в секунды,
+            # а проверка гоняется на каждой выкатке.
+            g.time = types.SimpleNamespace(sleep=lambda *_: None,
+                                           perf_counter=_time.perf_counter)
+            hist.set_setting("active_model", active)
+            g._gemini_chat_request(MSG, kind="проверка", has_image=has_image)
+        finally:
+            (g._qwen_chat_request, g._deepseek_chat_request,
+             g._xiaomi_chat_request, g._http, g._notify_models_failed, g.time) = saved
+        # Активную пробуют дважды — в списке она встретится подряд, схлопываем.
+        out = []
+        for m in tried:
+            if not out or out[-1] != m:
+                out.append(m)
+        return out
+
+    def blind(models) -> list:
+        return [m for m in models
+                if not cfg.AVAILABLE_MODELS.get(m, {}).get("vision", False)]
+
+    saved_active = hist.get_setting("active_model", "")
+    try:
+        # ── 1. Активная ЗРЯЧАЯ не-Gemini: фото должна получить она сама ──
+        chain = route("qwen3.7-plus", has_image=True)
+        done += 1
+        if not chain or chain[0] != "qwen3.7-plus":
+            problems.append(f"фото при зрячей активной ушло мимо неё: первой пробовали "
+                            f"{chain[0] if chain else '— никого —'}, ждали qwen3.7-plus")
+        done += 1
+        if blind(chain):
+            problems.append(f"в цепочке фото оказались СЛЕПЫЕ модели: {blind(chain)} — "
+                            f"картинка уйдёт в пустоту, а человек получит ответ вслепую")
+        done += 1
+        if len(chain) < 2:
+            problems.append(f"у фото не осталось подстраховки: цепочка {chain}")
+
+        # ── 2. Активная СЛЕПАЯ: её не должны пробовать вовсе ──
+        for model in ("qwen3.7-max", "deepseek-v4-flash", "mimo-v2.5-pro"):
+            chain = route(model, has_image=True)
+            done += 2
+            if model in chain:
+                problems.append(f"фото отправили СЛЕПОЙ активной модели {model} — "
+                                f"обход (vision-reroute) не сработал")
+            if blind(chain):
+                problems.append(f"обход фото у {model} привёл к слепым моделям: {blind(chain)}")
+
+        # ── 3. ТЕКСТ у слепой активной идёт ЕЙ, а не в обход ──
+        # Иначе обход фото тихо утащил бы к Gemini всю переписку.
+        chain = route("qwen3.7-max", has_image=False)
+        done += 1
+        if not chain or chain[0] != "qwen3.7-max":
+            problems.append(f"текст у слепой активной ушёл мимо неё: {chain} — "
+                            f"обход сработал там, где картинки нет вовсе")
+
+        # ── 4. Активная Gemini: фото остаётся у неё ──
+        chain = route(cfg.FALLBACK_MODEL, has_image=True)
+        done += 2
+        if not chain or chain[0] != cfg.FALLBACK_MODEL:
+            problems.append(f"фото при активной Gemini ушло мимо неё: {chain}")
+        if blind(chain):
+            problems.append(f"в запасе у активной Gemini есть слепые: {blind(chain)}")
+    finally:
+        hist.set_setting("active_model", saved_active)
+
+    return problems, (f"{done} проверок: фото идёт зрячей активной, слепую обходит, "
+                      f"в цепочке нет слепых ни у кого, текст обходом не задет")
+
+
 CHECKS = (
     ("деньги — расчёт стоимости запросов", check_money),
     ("деньги — сам прайс не менялся", check_price_list),
@@ -4210,6 +4519,8 @@ CHECKS = (
     ("вход в веб-админку — подпись и срок", check_web_auth),
     ("уведомление об обновлении уходит по сроку", check_update_notice),
     ("ручная правка счёта викторины", check_quiz_score),
+    ("уведомления о базе знаний живут по сроку", check_rag_notice),
+    ("фото уходит зрячей модели, а не в пустоту", check_photo_route),
 )
 
 

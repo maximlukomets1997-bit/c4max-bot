@@ -13,6 +13,57 @@ logger = logging.getLogger(__name__)
 
 
 # ───────────────────────────────────────────────
+#  Служебные уведомления о базе знаний
+# ───────────────────────────────────────────────
+
+async def send_notice(bot, admin_ids, text: str, ttl: int = 0) -> list:
+    """
+    Отправляет служебное уведомление о базе знаний каждому админу.
+
+    Возвращает координаты отправленных сообщений — список пар
+    (chat_id, message_id). По ним потом можно стереть сообщение раньше срока
+    (см. drop_notices) — так «✅ снова полная» уносит с собой «⚠️ неполная».
+
+    ttl > 0 — сообщение исчезнет само через столько секунд.
+
+    ⚠️ Ошибка отправки одному админу не мешает остальным (как в итогах месяца):
+    цикл продолжается, а несостоявшееся сообщение просто не попадает в ответ.
+    ⚠️ Самоудаление живёт в ПАМЯТИ процесса (utils.schedule_delete): перезапуск
+    бота внутри срока — и сообщение останется висеть. Для служебных сообщений
+    это принято во всём проекте; см. оговорку у RAG_NOTICE_TTL_SEC в config.
+    """
+    from utils import schedule_delete
+
+    sent = []
+    for admin_id in admin_ids:
+        try:
+            msg = await bot.send_message(chat_id=admin_id, text=text)
+        except Exception as e:
+            logger.warning("⚠️ Не удалось отправить уведомление о доборе базы админу %s: %s", admin_id, e)
+            continue
+        sent.append((admin_id, msg.message_id))
+        if ttl > 0:
+            schedule_delete(bot, admin_id, msg.message_id, ttl)
+    return sent
+
+
+async def drop_notices(bot, coords) -> None:
+    """
+    Стирает ранее отправленные уведомления по координатам от send_notice.
+
+    ⚠️ Telegram не даёт ботам удалять сообщения старше 48 часов: база лежала
+    неполной двое суток — предупреждение останется в переписке. Это не поломка,
+    и валить из-за неё цикл добора нельзя, поэтому неудача только пишется в лог.
+    """
+    for chat_id, message_id in coords:
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=message_id)
+        except Exception as e:
+            logger.info("ℹ️ Предупреждение о неполной базе стереть не удалось (%s/%s): %s",
+                        chat_id, message_id, e)
+
+
+# ───────────────────────────────────────────────
 #  Ежечасный добор базы знаний (RAG)
 # ───────────────────────────────────────────────
 
@@ -30,22 +81,36 @@ async def rag_catchup_loop(application):
     Пока идёт ручная пересборка (защёлка kb_rebuild_running в bot_data, её же
     ставит кнопка панели /rag) — пропускает свой час; на время собственной
     работы ставит ту же защёлку, чтобы панель вежливо просила подождать.
+
+    Сроки жизни сообщений (04.09.2026, просьба Максима): «✅ снова полная»
+    исчезает само через RAG_NOTICE_TTL_SEC и уносит с собой «⚠️ неполная»,
+    отправленное раньше. У предупреждения своего срока нет намеренно: пока
+    инцидент идёт, оно должно висеть.
+
+    ⚠️ «✅» приходит не только после инцидента: чаще всего это рутина —
+    поправили статью, цикл её дотянул. Именно поэтому сообщение и уходит по
+    сроку, а не остаётся в переписке навсегда.
     """
-    from config import RAG_ENABLED, ADMIN_IDS
+    from config import RAG_ENABLED, ADMIN_IDS, RAG_NOTICE_TTL_SEC
     from services import rag
 
     if not RAG_ENABLED:
         return  # RAG выключен глобально — цикл не нужен (включение = рестарт бота)
 
-    async def _notify_admins(text: str) -> None:
-        # Ошибка отправки одному админу не мешает остальным (как в итогах месяца)
-        for admin_id in ADMIN_IDS:
-            try:
-                await application.bot.send_message(chat_id=admin_id, text=text)
-            except Exception as e:
-                logger.warning("⚠️ Не удалось отправить уведомление о доборе базы админу %s: %s", admin_id, e)
+    bot = application.bot
+
+    async def _recovered(text: str) -> None:
+        """Выздоровление: сказать «снова полная» и убрать прежнее предупреждение."""
+        nonlocal broken_msgs, notified_broken
+        # Сначала отправляем отбой, и только потом стираем тревогу: не ушёл
+        # отбой — предупреждение обязано остаться, иначе инцидент исчезнет молча.
+        await send_notice(bot, ADMIN_IDS, text, RAG_NOTICE_TTL_SEC)
+        await drop_notices(bot, broken_msgs)
+        broken_msgs = []
+        notified_broken = False
 
     notified_broken = False  # об ЭТОМ инциденте в личку уже жаловались?
+    broken_msgs = []         # координаты отправленного «⚠️» — чтобы стереть при выздоровлении
     while True:
         # Стартовую синхронизацию делает main.py при запуске — первый час пропускаем
         await asyncio.sleep(3600)
@@ -55,6 +120,14 @@ async def rag_catchup_loop(application):
             loop = asyncio.get_running_loop()
             lag = await loop.run_in_executor(None, rag.index_lag)
             if not lag:
+                if notified_broken:
+                    # Базу починили мимо цикла — кнопкой «🔄 Пересобрать RAG» в
+                    # панели. Цифр «столько из стольких» у этого часа нет: цикл
+                    # ничего не индексировал. Но обещание из предупреждения
+                    # («напишу, когда база снова станет полной») выполняем, иначе
+                    # тревога исчезнет молча и останется непонятно, починилось ли.
+                    logger.info("🚀 Добор базы знаний: база снова полная (починена мимо цикла)")
+                    await _recovered("✅ База знаний снова полная — индекс собран целиком.")
                 notified_broken = False  # база полная; следующий сбой — новый инцидент
                 continue
 
@@ -69,13 +142,17 @@ async def rag_catchup_loop(application):
             indexed, total = result
             if indexed >= total:
                 logger.info("🚀 Добор базы знаний: база снова полная (%d из %d)", indexed, total)
-                await _notify_admins(f"✅ База знаний снова полная: {indexed} из {total} статей (автоматический добор).")
-                notified_broken = False
+                await _recovered(
+                    f"✅ База знаний снова полная: {indexed} из {total} статей (автоматический добор)."
+                )
             else:
                 logger.warning("⚠️ Добор базы знаний: удалось не всё (%d из %d) — следующая попытка через час", indexed, total)
                 if not notified_broken:
                     notified_broken = True
-                    await _notify_admins(
+                    # Без срока: предупреждение живёт, пока идёт инцидент,
+                    # и стирается отбоем (_recovered).
+                    broken_msgs = await send_notice(
+                        bot, ADMIN_IDS,
                         f"⚠️ База знаний неполная: проиндексировано {indexed} из {total} статей — "
                         f"лимит Google пока не пускает.\n"
                         f"Буду пытаться добрать каждый час и напишу, когда база снова станет полной."
