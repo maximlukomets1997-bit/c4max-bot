@@ -4440,19 +4440,23 @@ def check_photo_route():
 
     saved_active = hist.get_setting("active_model", "")
     try:
-        # ── 1. Активная ЗРЯЧАЯ не-Gemini: фото должна получить она сама ──
-        chain = route("qwen3.7-plus", has_image=True)
-        done += 1
-        if not chain or chain[0] != "qwen3.7-plus":
-            problems.append(f"фото при зрячей активной ушло мимо неё: первой пробовали "
-                            f"{chain[0] if chain else '— никого —'}, ждали qwen3.7-plus")
-        done += 1
-        if blind(chain):
-            problems.append(f"в цепочке фото оказались СЛЕПЫЕ модели: {blind(chain)} — "
-                            f"картинка уйдёт в пустоту, а человек получит ответ вслепую")
-        done += 1
-        if len(chain) < 2:
-            problems.append(f"у фото не осталось подстраховки: цепочка {chain}")
+        # ── 1. Активные ЗРЯЧИЕ не-Gemini: фото должна получить сама активная ──
+        # ⚠️ Обе перечислены поимённо НАМЕРЕННО. Проверены живыми запросами
+        # 04.09.2026 (обе переписали панель ТТХ из игры и верно назвали флаг
+        # страны), и обе включены по прямой просьбе Максима. Вернут любой из
+        # них пометку «слепая» — эта строка обязана покраснеть.
+        for seeing in ("qwen3.7-plus", "qwen3.8-max"):
+            chain = route(seeing, has_image=True)
+            done += 3
+            if not chain or chain[0] != seeing:
+                problems.append(f"фото при зрячей активной ушло мимо неё: первой пробовали "
+                                f"{chain[0] if chain else '— никого —'}, ждали {seeing}")
+            if blind(chain):
+                problems.append(f"в цепочке фото ({seeing}) оказались СЛЕПЫЕ модели: "
+                                f"{blind(chain)} — картинка уйдёт в пустоту, а человек "
+                                f"получит ответ вслепую")
+            if len(chain) < 2:
+                problems.append(f"у фото не осталось подстраховки ({seeing}): цепочка {chain}")
 
         # ── 2. Активная СЛЕПАЯ: её не должны пробовать вовсе ──
         for model in ("qwen3.7-max", "deepseek-v4-flash", "mimo-v2.5-pro"):
