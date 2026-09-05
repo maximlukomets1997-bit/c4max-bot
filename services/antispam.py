@@ -404,9 +404,11 @@ async def check_and_mute(bot, chat_id: int, user, user_text: str = "",
         logger.info("🛡 Антиспам: %s получил мут на %d мин (%d сек) — порог %d сообщений за %d сек (чат %s)",
                     name, minutes, mute_sec, msg_count, window_sec, chat_id)
 
-        # Модераторам в личку — с кнопкой размута (чтобы разобраться быстро).
+        # Модераторам в личку — с кнопкой размута (чтобы разобраться быстро)
+        # и списком того, что человек прислал (burst собран выше, до удаления).
         await _notify_moderators_mute(bot, chat_id, user_id, name, minutes,
-                                      f"флуд ({msg_count} сообщ. за {window_sec} сек)")
+                                      f"флуд ({msg_count} сообщ. за {window_sec} сек)",
+                                      burst)
         return True
 
     except Exception as e:
@@ -471,8 +473,44 @@ async def unmute(bot, chat_id: int, user_id: int, name: str | None = None,
 
 # ─── уведомление модераторов об автоматическом муте ─────────────────
 
+# Сколько сообщений и сколько знаков в каждом уходит модератору в личку.
+# Ограничение не косметическое: письмо длиннее ~4000 знаков Telegram просто
+# не примет, а кнопка «Размутить» и без того уезжает под текст.
+NOTIFY_EVIDENCE_MAX   = 10
+NOTIFY_EVIDENCE_CHARS = 200
+
+
+def _format_evidence_lines(records) -> str:
+    """
+    Блок «Что присылал» для личного уведомления: пронумерованные тексты
+    сообщений, за которые выдан мут. Пустая строка, если показывать нечего —
+    тогда письмо выглядит ровно как до 2026-09-05.
+
+    Сообщения без текста подписываются тем же значком 🖼, что и в панели /mod
+    (handlers/admin/panel_mod.py, показ улик): два экрана показывают одни и те
+    же улики, и разъехаться подписям нельзя.
+    """
+    if not records:
+        return ""
+    lines = []
+    for i, rec in enumerate(records[:NOTIFY_EVIDENCE_MAX], 1):
+        # Переносы строк внутри сообщения сломали бы нумерацию — схлопываем
+        # в пробелы ДО обрезки, иначе лимит съедят невидимые символы.
+        t = " ".join((rec.get("text") or "").split())
+        if not t:
+            t = "🖼 [фото/медиа — без текста]" if rec.get("has_photo") else "[пусто]"
+        elif len(t) > NOTIFY_EVIDENCE_CHARS:
+            t = t[:NOTIFY_EVIDENCE_CHARS] + "…"
+        lines.append(f"{i}. {t}")
+    hidden = len(records) - NOTIFY_EVIDENCE_MAX
+    if hidden > 0:
+        lines.append(f"…и ещё {hidden}")
+    return "\n\nЧто присылал:\n" + "\n".join(lines)
+
+
 async def _notify_moderators_mute(bot, chat_id: int, user_id: int, name: str,
-                                  minutes: int, reason: str) -> None:
+                                  minutes: int, reason: str,
+                                  messages: list | None = None) -> None:
     """
     Сообщает МОДЕРАТОРАМ в личку, что автоматика кого-то замутила, и даёт
     кнопку «🔓 Размутить» — чтобы несправедливый мут можно было снять, не
@@ -487,6 +525,11 @@ async def _notify_moderators_mute(bot, chat_id: int, user_id: int, name: str,
     заведено уведомление о муте, который выдаёт модель (notify_owners_ai_mute).
     Тихая: недоступность одного получателя не мешает остальным и не роняет
     модерацию (вся antispam.py обязана быть «тихой»).
+
+    messages (2026-09-05, просьба Максима «видно, что именно он присылал») —
+    те же улики, что уходят в журнал: тексты сообщений, за которые выдан мут.
+    Получатели письма и без того могут открыть их кнопкой в /mod, новых глаз
+    список не добавляет. Не передали — письмо остаётся трёхстрочным.
     """
     try:
         from services.roles import list_moderators, can
@@ -513,7 +556,8 @@ async def _notify_moderators_mute(bot, chat_id: int, user_id: int, name: str,
             InlineKeyboardButton("🔓 Размутить", callback_data=f"mod:unmute:{chat_id}:{user_id}")
         ]])
         text = (f"🛡 Антиспам: {name} получил мут на {minutes} мин.\n"
-                f"Группа: {title}\nПричина: {reason}")
+                f"Группа: {title}\nПричина: {reason}"
+                + _format_evidence_lines(messages))
         for uid in recipients:
             try:
                 await bot.send_message(chat_id=uid, text=text, reply_markup=kb)
@@ -789,11 +833,15 @@ async def check_and_delete_links(bot, chat_id: int, user, message) -> bool:
 
         name = user.first_name or (f"@{user.username}" if user.username else str(user_id))
 
-        # Журнал + улика (текст удалённого) — тем же механизмом, что у мутов
+        # Журнал + улика (текст удалённого) — тем же механизмом, что у мутов.
+        # Ту же запись показываем модераторам в личке, если дойдёт до мута:
+        # предыдущие удаления в памяти не лежат (_link_strikes хранит только
+        # время), поэтому в письме будет ПОСЛЕДНЯЯ ссылка, а не все три.
+        evidence = [{"text": message.text or message.caption or "",
+                     "has_photo": bool(message.photo)}]
         try:
             log_id = log_moderation_action("linkdel", chat_id, user_id, name)
-            save_mute_evidence(log_id, [{"text": message.text or message.caption or "",
-                                         "has_photo": bool(message.photo)}])
+            save_mute_evidence(log_id, evidence)
         except Exception as e:
             logger.debug("🛡 Не удалось записать удаление ссылки в журнал: %s", e)
 
@@ -852,7 +900,8 @@ async def check_and_delete_links(bot, chat_id: int, user, message) -> bool:
                 logger.info("🛡 Фильтр ссылок: %s получил мут на %d мин за повторные ссылки (чат %s)",
                             name, minutes, chat_id)
                 await _notify_moderators_mute(bot, chat_id, user_id, name, minutes,
-                                              f"{LINKFILTER_MUTE_COUNT} ссылки за час")
+                                              f"{LINKFILTER_MUTE_COUNT} ссылки за час",
+                                              evidence)
         return True
 
     except Exception as e:
