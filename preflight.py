@@ -154,10 +154,17 @@ def check_models():
         problems.append(f"кнопка картинок {name} есть, а модели в AVAILABLE_IMAGE_MODELS нет")
 
     # Цепочки подстраховки и запасная модель
+    #
+    # ⚠️ PROACTIVE_MEDIA_CHAIN сверялась НЕ ВСЕГДА: до 08.09.2026 её здесь не
+    # было вовсе, хотя по ней ходит весь разбор фото и голосовых — и в режиме
+    # «Сам в разговор», и поиск по базе знаний в личке. Опечатка в имени
+    # выпадала бы из очереди молча, а заметили бы это в день, когда откажет
+    # первая модель. Найдено при добавлении Gemini 3.8 Flash.
     chains = {
         "FALLBACK_MODEL": [config.FALLBACK_MODEL],
         "AUDIO_FALLBACK_CHAIN": list(getattr(config, "AUDIO_FALLBACK_CHAIN", [])),
         "VIDEO_FALLBACK_CHAIN": list(getattr(config, "VIDEO_FALLBACK_CHAIN", [])),
+        "PROACTIVE_MEDIA_CHAIN": list(getattr(config, "PROACTIVE_MEDIA_CHAIN", [])),
     }
     for chain_name, names in chains.items():
         for name in names:

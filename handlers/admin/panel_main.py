@@ -44,9 +44,16 @@ from .panel_rag import _end_kb_test
 # Flash-Lite, добавлена 3.5 Flash-Lite. Четыре оставшиеся Максим разложил
 # СТОЛБЦАМИ: слева 3.5 Flash-Lite и 3.5 Flash, справа 3.6 Flash и 3.7 Flash —
 # в рядах это даёт пары ниже.
+# 2026-09-08: добавлена gemini-3.8-flash — своей строкой сразу под блоком
+# Gemini (выбор Максима из двух показанных раскладок). Тем же приёмом, что и
+# qwen3.8-max годом раньше в этом же файле: ряд из одной кнопки Telegram
+# растягивает на всю ширину, и новинка читается как новинка. Вторая раскладка
+# ставила её в пару к 3.7 Flash, но тогда ломался порядок «Gemini столбцами»
+# и Qwen переезжал в чужой ряд — отклонена.
 _MODEL_BUTTON_ROWS = [
     ["gemini-3.5-flash-lite", "gemini-3.6-flash"],
     ["gemini-3.5-flash", "gemini-3.7-flash"],
+    ["gemini-3.8-flash"],
     ["qwen3.7-plus", "qwen3.7-max"],
     ["qwen3.8-max"],
     ["deepseek-v4-flash", "deepseek-v4-pro"],
