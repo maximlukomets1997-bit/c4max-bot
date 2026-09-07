@@ -804,13 +804,48 @@ def check_wait_budgets():
         run("видео в группе", lambda: g._describe_video("QQ"),
             g._MEDIA_CHAIN_BUDGET_SEC, 90, n_media)
 
+        # ── Фото в личке ради поиска по базе (07.09.2026) ──────────────
+        #
+        # ⚠️ ЭТОГО СЦЕНАРИЯ ЗДЕСЬ НЕ БЫЛО ВОВСЕ, а он единственный, где перебор
+        # режется ПО ЧИСЛУ моделей, а не только по времени. Проверка заведена
+        # в тот день, когда число подстраховок подняли с одной до трёх: без неё
+        # откат к единице не заметила бы ни одна проверка проекта.
+        run("фото в личке (разбор ради поиска по базе)",
+            lambda: g._describe_image("QQ", g._SEARCH_PHOTO_CHAIN_LIMIT),
+            g._MEDIA_CHAIN_BUDGET_SEC, g._describe_timeout(1), n_media)
+        done += 1
+        if len(calls) != g._SEARCH_PHOTO_CHAIN_LIMIT:
+            problems.append(f"фото в личке: пробовано моделей {len(calls)}, а "
+                            f"должно {g._SEARCH_PHOTO_CHAIN_LIMIT} — укорот цепочки не сработал")
+
+        # Связь «поиск по базе → настройка» жива. Отдельной проверкой, потому
+        # что предыдущая гоняет _describe_image НАПРЯМУЮ и слепа к тому, какое
+        # число просит сам поиск: верни туда жёсткую единицу — и она смолчит.
+        asked = []
+        import services.rag as rag_module
+        saved_describe, saved_rag_active = g._describe_image, rag_module.is_active
+        try:
+            rag_module.is_active = lambda: True
+            g._describe_image = lambda img, chain_limit=0, **kw: (asked.append(chain_limit)
+                                                                  or "описание картинки.")
+            g._media_search_text(image_base64="QQ")
+        finally:
+            g._describe_image = saved_describe
+            rag_module.is_active = saved_rag_active
+        done += 1
+        if asked != [g._SEARCH_PHOTO_CHAIN_LIMIT]:
+            problems.append(f"поиск по базе просит у разбора фото {asked}, а "
+                            f"должен [{g._SEARCH_PHOTO_CHAIN_LIMIT}] — "
+                            f"настройка и вызов разъехались")
+
     finally:
         g.time, g._http = saved_time, saved_http
         g._notify_chain_dead = saved_notify
         g._quota_blocked.clear()
         g._quota_blocked.update(saved_blocked)
 
-    return problems, f"{done} проверок: личка, группа, первая попытка не урезана"
+    return problems, (f"{done} проверок: личка, группа, фото ради поиска по базе, "
+                      f"первая попытка не урезана")
 
 
 # ───────────────────────────────────────────────
