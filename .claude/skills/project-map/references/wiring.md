@@ -1,6 +1,7 @@
 # Проводка: чем что запускается и где регистрируется
 
-Снимок от 2026-08-20 (код версии v4.56). Всё ниже проверено чтением кода; если правишь что-то из
+Снимок от 2026-09-08 (код версии v5.09): числа и списки сверены с кодом
+в этот день. Всё ниже проверено чтением кода; если правишь что-то из
 этого — перечитай исходный файл, а не этот текст.
 
 ## Точки входа
@@ -47,13 +48,14 @@
 `jobs/reports.py` отдаёт наружу ещё `weekly_group_digest`, `nightly_backup` и
 `daily_quiz` (вопрос дня, сроки из `config.QUIZ_AUTO_HOURS` — 12:00 и 18:00
 по Киеву);
-`jobs/update.py` — `forget_update_notice`.
+`jobs/update.py` — `forget_update_notice`, `notice_since`, `notice_expired`,
+`drop_expired_notice` (срок жизни уведомления об обновлении).
 
 ## Регистрация обработчиков — только `handlers/__init__.py::setup_handlers`
 
 Второго места регистрации в проекте нет. `preflight.py::check_handlers`
-считает зарегистрированные обработчики и группы (на 2026-08-17 — **39 в 4
-группах**).
+считает зарегистрированные обработчики и группы (на 2026-09-08 — **39 в 4
+группах**, число держится с 16.08.2026).
 
 **Группа 0 (по умолчанию)** — команды и основной разбор сообщений:
 
@@ -88,8 +90,8 @@
 
 Единственный роутер — `handlers/admin/router.py::handle_callback_query`.
 `preflight.py::check_callbacks` сверяет кнопки, найденные в коде панелей,
-с ветками роутера (на 2026-08-30 — **220 кнопок, 39 точных
-веток + 14 по приставке**).
+с ветками роутера (на 2026-09-08 — **228 кнопок, 39 точных
+веток + 15 по приставке**).
 
 Ограничение Telegram: `callback_data` ≤ 64 байта. Права на нажатие
 проверяются через `services/roles.py` (`perm_for_callback`, `may_press`).
@@ -112,7 +114,7 @@
 групп — в `database/groups.py`, дела, персональные настройки и персонал — в
 `database/people.py`, переписка и гигиена панелей — в `database/chat.py`, копилки расхода и
 счётчики обращений — в `database/money.py`, викторина — в
-`database/quiz.py`. Сам `database/history.py` (128 строк) кода больше НЕ
+`database/quiz.py`. Сам `database/history.py` (124 строки) кода больше НЕ
 СОДЕРЖИТ: это оглавление пакета, собирающее имена из двенадцати файлов, и он же отдаёт наружу все имена, включая
 фундаментальные: `from database.history import …` работает как работал.
 
@@ -121,7 +123,8 @@
 во временную папку через `config.DB_PATH`; со снимком они молча писали бы в
 боевую `history.db`.
 
-Схема создаётся в `_schema.py::_create_schema`; на 2026-08-16 — **24 таблицы**:
+Схема создаётся в `_schema.py::_create_schema`; на 2026-09-08 — **24 таблицы**
+(список сверен с кодом в этот день, имя в имя):
 
 ```
 api_calls, bot_sent_messages, group_messages, join_log, knowledge_log,
@@ -142,7 +145,7 @@ user_image_calls, user_settings, user_token_usage
 
 ## Конфигурация
 
-`config.py` (1347, 122 константы) — читают 39 модулей. Значения
+`config.py` (1454 строки, 124 константы) — читают 45 модулей. Значения
 берутся из `.env` (`python-dotenv`). Ключи из `.env.example`:
 
 ```
@@ -156,7 +159,7 @@ RAG_STRONG_SIM, WATCHDOG_URL, WEB_ENABLED, WEB_PUBLIC_URL
 `DB_PATH = "history.db"`, `BACKUP_DIR = "backups"`,
 `RAG_INDEX_FILE = "knowledge/knowledge_base_vectors.json"`,
 `KNOWLEDGE_PENDING_DIR`, `KNOWLEDGE_APPROVED_DIR`,
-`AVAILABLE_MODELS` (11 моделей), `PROVIDERS` (5 ключей: gemini, image, qwen, deepseek, xiaomi — «image» это
+`AVAILABLE_MODELS` (12 моделей — 08.09.2026 добавлена Gemini 3.8 Flash), `PROVIDERS` (5 ключей: gemini, image, qwen, deepseek, xiaomi — «image» это
 не провайдер моделей, а картинки; `preflight` считает четвёрку по
 `AVAILABLE_MODELS`), `AVAILABLE_IMAGE_MODELS` (2), `QUIZ_RANKS` (20 званий),
 `AUTO_UPDATE_INTERVAL_SEC = 300`, `AUTO_UPDATE_QUIET_SEC = 60`,
