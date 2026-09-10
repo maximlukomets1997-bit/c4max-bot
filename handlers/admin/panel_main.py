@@ -50,13 +50,17 @@ from .panel_rag import _end_kb_test
 # растягивает на всю ширину, и новинка читается как новинка. Вторая раскладка
 # ставила её в пару к 3.7 Flash, но тогда ломался порядок «Gemini столбцами»
 # и Qwen переезжал в чужой ряд — отклонена.
+# 2026-09-10: ряд DeepSeek стал одиночным. V4 Flash и V4 Pro сняты самим
+# провайдером (V4 Pro — с 14.09, запросы к нему уводятся на V4.1 Flash по её
+# же цене), на их место пришла одна V4.1 Flash. Та же длинная кнопка во всю
+# ширину, что у 3.8 Flash и qwen3.8-max, и по той же причине.
 _MODEL_BUTTON_ROWS = [
     ["gemini-3.5-flash-lite", "gemini-3.6-flash"],
     ["gemini-3.5-flash", "gemini-3.7-flash"],
     ["gemini-3.8-flash"],
     ["qwen3.7-plus", "qwen3.7-max"],
     ["qwen3.8-max"],
-    ["deepseek-v4-flash", "deepseek-v4-pro"],
+    ["deepseek-flash"],
     ["mimo-v2.5", "mimo-v2.5-pro"],
 ]
 

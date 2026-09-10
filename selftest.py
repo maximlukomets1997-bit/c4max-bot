@@ -72,7 +72,8 @@ def check_money():
     prompt_tokens, наивный расчёт уйдёт в МИНУС и тихо уменьшит суточный счёт.
     """
     from config import QWEN_PRICES, DEEPSEEK_PRICES, XIAOMI_PRICES, IMAGE_PRICES
-    from services.gemini import _qwen_cost, _deepseek_cost, _xiaomi_cost, _image_cost
+    from services.gemini import (_qwen_cost, _deepseek_cost, _xiaomi_cost, _image_cost,
+                                 _deepseek_peak_now)
 
     problems = []
     done = 0
@@ -116,7 +117,7 @@ def check_money():
                         "иначе расход посчитается как ноль и незаметно потеряется")
 
     # ── DeepSeek: пик и вне пика — РАЗНЫЕ суммы, пик дороже ──
-    model = "deepseek-v4-pro"
+    model = "deepseek-flash"
     table = DEEPSEEK_PRICES[model]
     usage = {"prompt_cache_hit_tokens": 300, "prompt_cache_miss_tokens": 700,
              "completion_tokens": 400}
@@ -137,6 +138,47 @@ def check_money():
     pr = table["offpeak"]
     want = (1000 * pr["cache_miss"] + 200 * pr["output"]) / 1_000_000
     expect("DeepSeek, кэш-полей нет", _deepseek_cost(model, usage, False), want)
+
+    # ── DeepSeek: ВЫБОР колонки по календарю (добавлено 10.09.2026) ──
+    # Считать сумму по заданной колонке проверки умели и раньше; а вот КТО
+    # выбирает колонку, не проверял никто — и правило «выходные вне пика»
+    # (у провайдера с 23.08.2026) полмесяца жило в боте неверным молча.
+    # ⚠️ Часы поддельные: настоящее время даёт лишь одну точку шкалы, и в
+    # понедельник проверка не увидела бы поломку выходных. Приём тот же, что
+    # у потолков ожидания ниже, — подмена атрибута в модуле.
+    from datetime import datetime as _dt, timezone as _tz
+    from services import gemini as _g
+
+    class _FixedClock:
+        """Часы, стоящие на заданном моменте. Подменяют модулю datetime."""
+        def __init__(self, moment): self._moment = moment
+        def now(self, tz=None): return self._moment
+
+    # (день, час, ждём пик?) — 2026-09-07 понедельник, 12-е суббота, 13-е воскресенье
+    peak_cases = [
+        (7,  2, True,  "будни, окно 01–04"),
+        (7,  7, True,  "будни, окно 06–10"),
+        (7,  5, False, "будни, между окнами"),
+        (7,  0, False, "будни, до первого окна"),
+        (7, 23, False, "будни, поздний вечер"),
+        (12, 2, False, "СУББОТА в часы пика"),
+        (13, 7, False, "ВОСКРЕСЕНЬЕ в часы пика"),
+        (11, 7, True,  "пятница, окно 06–10"),
+    ]
+    saved_dt = _g.datetime
+    try:
+        for day, hour, want_peak, human in peak_cases:
+            _g.datetime = _FixedClock(_dt(2026, 9, day, hour, 30, tzinfo=_tz.utc))
+            done += 1
+            got = _deepseek_peak_now()
+            if got != want_peak:
+                problems.append(
+                    f"DeepSeek, выбор тарифа ({human}, {day}.09 {hour}:30 UTC): "
+                    f"получили «{'пик' if got else 'вне пика'}», "
+                    f"ждали «{'пик' if want_peak else 'вне пика'}» — "
+                    f"проверь config.DEEPSEEK_PEAK_UTC и DEEPSEEK_PEAK_DAYS")
+    finally:
+        _g.datetime = saved_dt
 
     # ── Xiaomi: кэш ограничен размером входа ──
     model = "mimo-v2.5"
@@ -403,13 +445,9 @@ _PRICES_EXPECTED = {
 }
 
 _DEEPSEEK_EXPECTED = {
-    "deepseek-v4-flash": {
-        "peak":    {"cache_hit": 0.014, "cache_miss": 0.44, "output": 1.32},
-        "offpeak": {"cache_hit": 0.007, "cache_miss": 0.22, "output": 0.66},
-    },
-    "deepseek-v4-pro": {
-        "peak":    {"cache_hit": 0.044, "cache_miss": 1.32, "output": 3.96},
-        "offpeak": {"cache_hit": 0.022, "cache_miss": 0.66, "output": 1.98},
+    "deepseek-flash": {
+        "peak":    {"cache_hit": 0.006, "cache_miss": 0.30, "output": 1.20},
+        "offpeak": {"cache_hit": 0.003, "cache_miss": 0.15, "output": 0.60},
     },
 }
 
@@ -4476,11 +4514,13 @@ def check_photo_route():
     saved_active = hist.get_setting("active_model", "")
     try:
         # ── 1. Активные ЗРЯЧИЕ не-Gemini: фото должна получить сама активная ──
-        # ⚠️ Обе перечислены поимённо НАМЕРЕННО. Проверены живыми запросами
-        # 04.09.2026 (обе переписали панель ТТХ из игры и верно назвали флаг
-        # страны), и обе включены по прямой просьбе Максима. Вернут любой из
-        # них пометку «слепая» — эта строка обязана покраснеть.
-        for seeing in ("qwen3.7-plus", "qwen3.8-max"):
+        # ⚠️ Все перечислены поимённо НАМЕРЕННО. Каждая проверена живыми
+        # запросами на игровых скриншотах и включена по прямой просьбе
+        # Максима: две Qwen 04.09.2026 (обе переписали панель ТТХ и верно
+        # назвали флаг страны), deepseek-flash — 10.09.2026 (12 значений из 12
+        # за 13 с, страну назвала сама). Вернёт любая из них пометку «слепая» —
+        # эта строка обязана покраснеть.
+        for seeing in ("qwen3.7-plus", "qwen3.8-max", "deepseek-flash"):
             chain = route(seeing, has_image=True)
             done += 3
             if not chain or chain[0] != seeing:
@@ -4494,7 +4534,7 @@ def check_photo_route():
                 problems.append(f"у фото не осталось подстраховки ({seeing}): цепочка {chain}")
 
         # ── 2. Активная СЛЕПАЯ: её не должны пробовать вовсе ──
-        for model in ("qwen3.7-max", "deepseek-v4-flash", "mimo-v2.5-pro"):
+        for model in ("qwen3.7-max", "mimo-v2.5-pro"):
             chain = route(model, has_image=True)
             done += 2
             if model in chain:

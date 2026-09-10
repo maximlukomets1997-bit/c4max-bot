@@ -159,7 +159,7 @@ RAG_STRONG_SIM, WATCHDOG_URL, WEB_ENABLED, WEB_PUBLIC_URL
 `DB_PATH = "history.db"`, `BACKUP_DIR = "backups"`,
 `RAG_INDEX_FILE = "knowledge/knowledge_base_vectors.json"`,
 `KNOWLEDGE_PENDING_DIR`, `KNOWLEDGE_APPROVED_DIR`,
-`AVAILABLE_MODELS` (12 моделей — 08.09.2026 добавлена Gemini 3.8 Flash), `PROVIDERS` (5 ключей: gemini, image, qwen, deepseek, xiaomi — «image» это
+`AVAILABLE_MODELS` (11 моделей — 10.09.2026 две модели DeepSeek заменены одной V4.1 Flash), `PROVIDERS` (5 ключей: gemini, image, qwen, deepseek, xiaomi — «image» это
 не провайдер моделей, а картинки; `preflight` считает четвёрку по
 `AVAILABLE_MODELS`), `AVAILABLE_IMAGE_MODELS` (2), `QUIZ_RANKS` (20 званий),
 `AUTO_UPDATE_INTERVAL_SEC = 300`, `AUTO_UPDATE_QUIET_SEC = 60`,
