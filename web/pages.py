@@ -550,12 +550,16 @@ def _money_block(csrf: str) -> str:
                                               _balance_field, _qwen_model_keys,
                                               _value_str)
 
-    # ⚠️ 14.09.2026: остатки показываем к правке ТОЛЬКО тем, у кого она
-    # осталась (`balance_btn` в реестре). У DeepSeek правки больше нет ни
-    # кнопкой в боте, ни формой здесь: его остаток ведёт ежечасная сверка с
-    # платформой (jobs/balance.py), и второй путь к той же цифре сбивал бы её
-    # до ближайшего часа. Расход («потрачено») правится по-прежнему у всех.
-    ids = [pid for pid, cfg in _BALANCE_FIELDS.items() if cfg["btn"]]
+    # ⚠️ 14.09.2026, ПОЧИНЕНО В ТОТ ЖЕ ДЕНЬ. Сначала отсюда убрали строку
+    # DeepSeek целиком — вместе с формой правки исчез и САМ ПОКАЗ остатка, а
+    # его убирать не просили: в боте цифра осталась, на сайте пропала. Теперь
+    # строки СТРОЯТСЯ ВСЕМ, а поле ввода дают только тем, у кого правка есть
+    # (`balance_btn` в реестре). У DeepSeek её нет — его остаток ведёт
+    # ежечасная сверка с платформой (jobs/balance.py), и второй путь к той же
+    # цифре сбивал бы её до ближайшего часа.
+    from services.daily_report import balance_sync_note
+
+    ids = list(_BALANCE_FIELDS)
     ids += [f"cost:{pid}" for pid in _COST_FIELDS]
     ids += [f"qwen:{m}" for m in _qwen_model_keys()]
 
@@ -566,13 +570,21 @@ def _money_block(csrf: str) -> str:
             continue
         # Разметку Telegram из значения убираем — здесь она не к месту.
         now = plain(_value_str(info["key"], info["kind"], info["absent"]))
-        control = _sysform(
-            csrf, {"do": "money", "field": field_id},
-            f'<input type="text" name="value" class="qinput short" '
-            f'placeholder="{esc(info["example"])}">' + _btn("Записать"),
-            "ctl pbtns")
-        items.append((info["title"].title(), f'сейчас: {now} · «−» — {info["clear"]}',
-                      control))
+        editable = _BALANCE_FIELDS.get(field_id, {}).get("btn", True)
+        if editable:
+            control = _sysform(
+                csrf, {"do": "money", "field": field_id},
+                f'<input type="text" name="value" class="qinput short" '
+                f'placeholder="{esc(info["example"])}">' + _btn("Записать"),
+                "ctl pbtns")
+            hint = f'сейчас: {now} · «−» — {info["clear"]}'
+        else:
+            # Правки нет — только цифра и отметка, когда её сверяли.
+            note = balance_sync_note(_BALANCE_FIELDS[field_id]["provider"])
+            control = f'<div class="note">{esc(now)}</div>'
+            hint = (f'сверяется с платформой автоматически · {note}'
+                    if note else 'сверяется с платформой автоматически')
+        items.append((info["title"].title(), hint, control))
     return "<h2>💰 Счета и квоты</h2>" + _rows(items)
 
 
