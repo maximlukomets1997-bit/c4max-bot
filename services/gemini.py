@@ -49,6 +49,7 @@ from config import (
     DEEPSEEK_PRICES,
     DEEPSEEK_PEAK_UTC,
     DEEPSEEK_PEAK_DAYS,
+    DEEPSEEK_BALANCE_URL,
     XIAOMI_API_URL,
     XIAOMI_API_KEY,
     XIAOMI_PRICES,
@@ -1219,6 +1220,50 @@ def _deepseek_cost(model_name: str, usage: dict, peak: bool):
         miss = usage.get("prompt_tokens", 0) or 0
     out = usage.get("completion_tokens", 0) or 0
     return (hit * prices["cache_hit"] + miss * prices["cache_miss"] + out * prices["output"]) / 1_000_000
+
+
+def fetch_deepseek_balance() -> float | None:
+    """
+    НАСТОЯЩИЙ остаток на счету DeepSeek — спрошенный у самой платформы
+    (2026-09-14). None — не ответила, ответ непонятен или ключа нет; звонящий
+    в этом случае обязан оставить прежнее значение, а не обнулять его.
+
+    ⚠️ ЗАЧЕМ, ЕСЛИ ОСТАТОК И ТАК СЧИТАЕТСЯ. Собственный счёт бота занижен на
+    оборванных потоках: разбор — у `DEEPSEEK_BALANCE_URL` в config.py. Здесь
+    только запрос; что делать с расхождением, решает database.money.
+
+    ⚠️ ЧИСЛО ПРИХОДИТ СТРОКОЙ И ОКРУГЛЁННЫМ ДО ЦЕНТА («3.90») — это не наша
+    потеря точности, так отдаёт платформа. Отсюда порог BALANCE_SYNC_EPSILON
+    у сверки.
+
+    Отдельный адрес и отдельный разбор ответа: это не запрос к модели, общий
+    путь `_openai_stream_request` тут не при чём. Валюта проверяется — счёт
+    в юанях (у DeepSeek такие бывают) в долларовую копилку класть нельзя.
+    """
+    if not DEEPSEEK_API_KEY:
+        return None
+    try:
+        resp = _http().get(
+            DEEPSEEK_BALANCE_URL,
+            headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}"},
+            timeout=GEMINI_TIMEOUT,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        logger.warning("⚠️ Остаток DeepSeek не спросить (%s): %s", _err_code(e), e)
+        return None
+
+    for info in (data.get("balance_infos") or []):
+        if (info.get("currency") or "").upper() != "USD":
+            continue
+        try:
+            return float(info.get("total_balance"))
+        except (TypeError, ValueError):
+            logger.warning("⚠️ Остаток DeepSeek пришёл непонятным: %r", info.get("total_balance"))
+            return None
+    logger.warning("⚠️ В ответе DeepSeek нет долларового счёта: %s", data)
+    return None
 
 
 def _qwen_cost(model_name: str, usage: dict):

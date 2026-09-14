@@ -36,6 +36,7 @@
 # ───────────────────────────────────────────────
 
 import logging
+import time
 
 from config import PROVIDERS
 
@@ -83,6 +84,99 @@ def add_provider_cost(provider: str, delta_usd: float):
                 (str(delta_usd), balance_key),
             )
         conn.commit()
+
+
+def balance_sync_key(provider: str) -> str:
+    """Ключ settings, где лежит время последней сверки остатка с платформой
+    (unix-секунды). Имя строится из имени провайдера — второго списка ключей
+    в проекте заводить нельзя."""
+    return f"{provider}_balance_synced_at"
+
+
+def plan_balance_sync(ours: float, real: float, epsilon: float) -> tuple:
+    """
+    ЧТО ДЕЛАТЬ с расхождением между нашим остатком и настоящим (2026-09-14).
+    Возвращает (новый остаток, сколько добавить в копилку расхода, причина).
+
+    Вынесено отдельной функцией БЕЗ базы намеренно: вся соль правки в этих
+    трёх ветках, а до копилок проверки проекта не доходят (см. шапку файла).
+    Чистую арифметику selftest проверяет напрямую.
+
+    Ветки:
+      • разница меньше `epsilon` — НИЧЕГО не трогаем. Платформа округляет
+        остаток до цента, и без этого порога сверка дёргала бы обе цифры
+        туда-сюда на доли цента (см. BALANCE_SYNC_EPSILON в config.py);
+      • наш остаток БОЛЬШЕ настоящего — мы недосчитали расход (оборванный
+        поток: токены сгенерированы и оплачены, а отчёт о них не пришёл).
+        Ставим настоящий остаток и на ту же разницу поднимаем «потрачено»;
+      • наш остаток МЕНЬШЕ настоящего — счёт пополнили. Остаток принимаем,
+        а копилку расхода НЕ ТРОГАЕМ: уменьшать её нельзя, деньги-то
+        потрачены. ⚠️ Сюда же попадёт случай, когда бот расход ЗАВЫСИЛ
+        (так было при старой ошибке с выходными вне пика): остаток
+        выправится, а «потрачено» останется чуть больше правды — это
+        безопаснее, чем списывать расход по любому пополнению.
+    """
+    diff = ours - real
+    if abs(diff) < epsilon:
+        return ours, 0.0, "совпало"
+    if diff > 0:
+        return real, diff, "недостача"
+    return real, 0.0, "пополнение"
+
+
+def sync_provider_balance(provider: str, real_usd: float, epsilon: float) -> tuple:
+    """
+    Сверяет остаток провайдера с настоящим и запоминает время сверки.
+    Возвращает (новый остаток, доначислено в расход, причина) — то же, что
+    решила `plan_balance_sync`; звонящий пишет это в лог.
+
+    ⚠️ ВРЕМЯ СВЕРКИ СТАВИТСЯ ВСЕГДА, даже когда цифры совпали: экраны
+    показывают именно его, и «совпало» — тоже успешная сверка. А вот когда
+    платформа НЕ ОТВЕТИЛА, сюда вообще не заходят (см. jobs/balance.py):
+    старое время обязано остаться старым, иначе на экране будет свежая
+    отметка под несвежей цифрой.
+
+    Остаток пишется числом, а не вычитанием: мы кладём то, что сказала
+    платформа. Копилка расхода прибавляется тем же атомарным SQL, что и в
+    add_provider_cost — между сверкой и обычным запросом бота гонки быть не
+    должно.
+    """
+    meta = PROVIDERS.get(provider) or {}
+    balance_key = meta.get("balance_key")
+    cost_key = meta.get("cost_key")
+    if not balance_key:
+        return None, 0.0, "нет счёта"
+
+    with _lock:
+        conn = _get_connection()
+        row = conn.execute("SELECT value FROM settings WHERE key = ?", (balance_key,)).fetchone()
+        try:
+            ours = float(row[0]) if row and row[0] is not None else 0.0
+        except (TypeError, ValueError):
+            ours = 0.0
+
+        new_balance, add_cost, reason = plan_balance_sync(ours, real_usd, epsilon)
+
+        if reason != "совпало":
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (balance_key, str(new_balance)),
+            )
+            if add_cost and cost_key:
+                conn.execute(
+                    "INSERT INTO settings (key, value) VALUES (?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = CAST(value AS REAL) + CAST(excluded.value AS REAL)",
+                    (cost_key, str(add_cost)),
+                )
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (balance_sync_key(provider), str(int(time.time()))),
+        )
+        conn.commit()
+
+    return new_balance, add_cost, reason
 
 
 def spend_qwen_tokens(model_name: str, tokens: int):

@@ -213,13 +213,21 @@ def _build_balance_panel(flash: str = ""):
         parts.append(f"{flash}\n{sep}")
 
     # Денежные блоки — в том же порядке, что кнопки ниже.
+    # ⚠️ У кого остаток спрашивается у платформы (14.09.2026), к нему идёт
+    # приписка «сверено в 14:05». Вписанное здесь кнопкой такой провайдер
+    # переживёт только до ближайшей сверки — это не поломка, а смысл правки:
+    # его настоящий счёт знает платформа, а не мы.
+    from services.daily_report import balance_sync_note
+
     for field_id in _BALANCE_ORDER:
         cfg = _BALANCE_FIELDS[field_id]
         spent, _ = _read_number(_COST_FIELDS[field_id]["key"], "money")
+        note = balance_sync_note(cfg["provider"])
+        note = f" <i>({note})</i>" if note else ""
         parts.append(
             f"{_icon(cfg['provider'])} <b>{cfg['name']}</b>\n"
             f"  • Потрачено: <b>{_money_str(spent)}</b>\n"
-            f"  • Остаток на счету: {_value_str(cfg['key'], 'money', 'не задан')}\n"
+            f"  • Остаток на счету: {_value_str(cfg['key'], 'money', 'не задан')}{note}\n"
             f"{sep}"
         )
 

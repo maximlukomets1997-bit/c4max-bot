@@ -100,6 +100,36 @@ def kyiv_label(moment: datetime) -> str:
     return _to_kyiv(moment).strftime("%Y-%m-%d %H:%M")
 
 
+def balance_sync_note(provider: str) -> str:
+    """
+    Приписка «сверено в 14:05» к остатку на счету (14.09.2026).
+
+    Показывается ВЕЗДЕ, где виден остаток: панель «📡 Настройки API», экран
+    «💰 Счета и квоты», суточный отчёт. Одна функция на три экрана намеренно —
+    формат времени, разъехавшийся по трём файлам, однажды поправят в одном.
+
+    Сверки не было (провайдер её не умеет, или бот только поднялся и первый
+    заход ещё не прошёл) — приписки нет вовсе. Пустая строка тут честнее
+    слова «никогда»: у Xiaomi и картинок остаток вписывается руками, и
+    отметка о сверке им не полагается.
+
+    Время — киевское, как все даты в отчётах бота. Сверка сегодняшняя
+    показывается часами, вчерашняя и старше — с датой: «сверено 13.09 в 14:05».
+    Так видно застрявшую отметку, когда платформа давно не отвечает.
+    """
+    import database.history as hist
+
+    raw = hist.get_setting(hist.balance_sync_key(provider), "")
+    try:
+        moment = datetime.fromtimestamp(int(float(raw)), tz=timezone.utc)
+    except (TypeError, ValueError):
+        return ""
+    local = _to_kyiv(moment)
+    if local.date() == kyiv_now().date():
+        return f"сверено в {local.strftime('%H:%M')}"
+    return f"сверено {local.strftime('%d.%m в %H:%M')}"
+
+
 def seconds_to_next_hour(now: datetime = None) -> float:
     """
     Сколько секунд до НАЧАЛА следующего часа по Киеву (+5 сек запаса, чтобы
@@ -455,7 +485,12 @@ def render(header: str, period_line: str, note: str,
             text += (f"💰 <b>{meta['money_label']}:</b> {approx}${spent:.6f}"
                      f"{manual_note if totals.get(f'{pid}_manual') else ''}\n")
             if meta["balance_key"]:
-                text += f"   Остаток на счету: <b>${current.get(f'{pid}_balance', 0.0):.6f}</b>\n"
+                # Приписка «сверено в 14:05» — у кого остаток спрошен
+                # у платформы (14.09.2026); остальным её не полагается.
+                sync_note = balance_sync_note(pid)
+                sync_note = f" <i>({sync_note})</i>" if sync_note else ""
+                text += (f"   Остаток на счету: "
+                         f"<b>${current.get(f'{pid}_balance', 0.0):.6f}</b>{sync_note}\n")
         text += "───────────────────────────\n"
     # Хвост «прочих» и итоги дописываются ниже; лишний разделитель в конце
     # цикла снимаем — раньше его тут не было.

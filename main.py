@@ -24,6 +24,7 @@ from utils import register_and_clean_bot_message
 from jobs import news_polling_loop
 from jobs import cleanup_loop
 from jobs import rag_catchup_loop
+from jobs import balance_sync_loop
 from jobs import daily_report_loop
 from jobs import watchdog_loop
 from jobs import auto_update_loop, forget_update_notice
@@ -320,6 +321,11 @@ async def post_init(application):
         # Ежечасный добор базы знаний после сбоев лимита Google;
         # при выключенном RAG задача сама завершается сразу.
         asyncio.create_task(rag_catchup_loop(application)),
+        # Ежечасная сверка остатка на счету с платформой провайдера
+        # (14.09.2026). Первая — через 15 секунд после запуска: иначе экраны
+        # целый час показывали бы собственную оценку бота, а она занижена на
+        # оборванных ответах (см. jobs/balance.py).
+        asyncio.create_task(balance_sync_loop(application)),
         # Суточный отчёт о расходах: в 00:00 по Киеву владельцу в личку
         # (application нужен для отправки сообщения).
         asyncio.create_task(daily_report_loop(application)),

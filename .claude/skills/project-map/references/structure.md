@@ -14,9 +14,9 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 наружу. Имена с подчёркиванием тоже иногда зовут снаружи — проверяй
 скриптом `impact.py`, а не этим списком.
 
-Всего файлов с кодом: **79** (было 67 на 30.08.2026; прибавка — РОВНО те
-двенадцать файлов, на которые 02.09 разрезали `database/history.py`, других
-новых `.py` с того дня не появилось, сверено по git). Отдельных тестовых
+Всего файлов с кодом: **80** (было 67 на 30.08.2026): двенадцать файлов,
+на которые 02.09 разрезали `database/history.py`, плюс `jobs/balance.py`
+(сверка остатка с платформой, 14.09.2026). Отдельных тестовых
 файлов (`test_*.py`, `pytest`) по-прежнему **0** — но с 28.08.2026 есть
 `selftest.py`:
 проверки поведения в том же стиле, что `preflight.py`, без сторонних
@@ -28,13 +28,13 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 | файл | строк | тянут | публичные имена |
 |---|---:|---:|---|
 | `bot.py` | 11 | 0 | — (только вызывает `main.main`) |
-| `main.py` | 597 | 1 | `post_init`, `post_stop`, `post_shutdown`, `main` |
-| `config.py` | 1454 | 45 | `read_build_mark` + 122 константы верхнего уровня (заводские тексты всех пяти промптов — пустые строки) |
+| `main.py` | 603 | 1 | `post_init`, `post_stop`, `post_shutdown`, `main` |
+| `config.py` | 1558 | 46 | `read_build_mark` + 125 констант верхнего уровня (заводские тексты всех пяти промптов — пустые строки) |
 | `utils.py` | 181 | 21 | `should_respond_in_group`, `clean_mention`, `keep_chat_action`, `delete_user_message_safe`, `mention`, `schedule_delete`, `register_and_clean_bot_message` |
 | `utils_format.py` | 313 | 9 | `strip_thoughts`, `thoughts_enabled`, `build_text_and_entities`, `send_formatted`, `convert_md`, `fits_caption`, `reply_md` |
 | `logging_setup.py` | 255 | 3 | `archive_old_logs`, `setup_logging` |
 | `preflight.py` | 696 | 0 | `check_imports`, `check_models`, `check_providers`, `check_tables`, `check_ranks`, `check_callbacks`, `check_panels`, `check_handlers`, `check_web`, `main` |
-| `selftest.py` | 4621 | 0 | проверки ПОВЕДЕНИЯ (28.08.2026), **34 группы** — перечислять их здесь перестали 08.09.2026: список рос вчетверо быстрее, чем его переписывали, и врал уже на четырнадцать имён. Живой список отдаёт сам файл — кортеж `CHECKS` в его конце, где рядом с каждой проверкой стоит её человеческое название; что каждая ловит, а что нет — `references/checks.md`. Отвечает на «правильно ли считает», тогда как `preflight.py` — на «запустится ли». Зовётся из `deploy.sh` и CI, красный откатывает выкатку |
+| `selftest.py` | 4725 | 0 | проверки ПОВЕДЕНИЯ (28.08.2026), **34 группы** — перечислять их здесь перестали 08.09.2026: список рос вчетверо быстрее, чем его переписывали, и врал уже на четырнадцать имён. Живой список отдаёт сам файл — кортеж `CHECKS` в его конце, где рядом с каждой проверкой стоит её человеческое название; что каждая ловит, а что нет — `references/checks.md`. Отвечает на «правильно ли считает», тогда как `preflight.py` — на «запустится ли». Зовётся из `deploy.sh` и CI, красный откатывает выкатку |
 | `reset_db.py` | 81 | 0 | `main` |
 | `watchdog_local.py` | 297 | 0 | `main` |
 
@@ -78,7 +78,7 @@ database.history import add_messages` работает как работал; т
 | `database/groups.py` | 255 | 1 | `save_group_message`, `update_last_group_message_text`, `set_proactive_reset_mark`, `get_recent_group_messages`, `delete_old_group_messages`, `remember_chat`, `get_known_chats`, `get_group_messages_between`. Через файл проходит КАЖДОЕ сообщение группы. ⚠️ Время — строка UTC, а не `time.time()` как в журналах; исключение `known_chats.last_seen`. ⚠️ НЕ ПОКРЫТ `selftest` ни одним вызовом — правка проверяется только руками |
 | `database/people.py` | 306 | 1 | личные дела (`dossier_add_message`, `dossier_add_mute`, `dossier_add_linkdel`, `dossier_reset_violations`, `get_dossier`), список людей (`list_known_users`), персональные настройки (`get_user_settings`, `get_all_user_settings`, `set_user_settings`, `clear_user_settings`), персонал (`get_all_staff`, `get_staff`, `add_staff`, `remove_staff`, `set_staff_perm`). ⚠️ ВЛАДЕЛЬЦЕВ здесь нет — они в `config.ADMIN_IDS`. ⚠️ Два белых списка колонок — это ЗАЩИТА: имя колонки вклеивается в текст запроса, и они молча отбрасывают чужое (проверено подстановкой). ⚠️ Кэш живёт не здесь, а в `services/user_settings.py` и `services/roles.py` — запись мимо них бот не заметит до перезапуска |
 | `database/chat.py` | 258 | 1 | `get_history`, `get_history_length`, `get_user_usage`, `add_messages`, `add_bot_message`, `clear_history` + гигиена панелей (`register_bot_message`, `get_old_bot_messages`, `remove_bot_message`). САМЫЙ ГОРЯЧИЙ ПУТЬ: `get_history` зовётся на каждый ответ модели. ⚠️ Контекст берётся ПО ЧЕЛОВЕКУ, а не по чату — личка и группы вместе, поэтому и `/clear` стирает переписку целиком. ⚠️ `MAX_CONTEXT_MESSAGES` в шапке, а не внутри функции: он стоит значением по умолчанию в сигнатуре. ⚠️ `/clear` НЕ обнуляет накопленный расход токенов — так задумано |
-| `database/money.py` | 240 | 1 | `add_provider_cost`, `spend_qwen_tokens`, `get_qwen_tokens`, `register_api_call`, `clear_api_calls`, `clear_user_token_usage`, `register_image_call`, `unregister_image_call`, `get_remaining_image_calls`. ⚠️ ОДНА функция на всех провайдеров — имена ключей из реестра `config.PROVIDERS`, новый провайдер добавляется в реестр, а не сюда. ⚠️ Попытка картинки списывается АВАНСОМ и возвращается, если картинка не вышла. ⚠️ Здесь только копилки; арифметика цены — в `services/gemini.py`, и покрыта она, а копилки — нет |
+| `database/money.py` | 334 | 1 | `add_provider_cost`, `spend_qwen_tokens`, `get_qwen_tokens`, `register_api_call`, `clear_api_calls`, `clear_user_token_usage`, `register_image_call`, `unregister_image_call`, `get_remaining_image_calls`, `sync_provider_balance`, `plan_balance_sync`, `balance_sync_key`. ⚠️ ОДНА функция на всех провайдеров — имена ключей из реестра `config.PROVIDERS`, новый провайдер добавляется в реестр, а не сюда. ⚠️ Попытка картинки списывается АВАНСОМ и возвращается, если картинка не вышла. ⚠️ Здесь только копилки; арифметика цены — в `services/gemini.py`, и покрыта она, а копилки — нет. Исключение — `plan_balance_sync` (14.09.2026): развилка сверки остатка вынесена в функцию БЕЗ базы ровно затем, чтобы её мог проверять `selftest` |
 | `database/quiz.py` | 504 | 1 | банк вопросов (`add_quiz_question`, `get_random_quiz_question`, `list_all_quiz_questions`, `update_quiz_question_body`, `set_quiz_question_approved`, `delete_quiz_question`, `get_quiz_bank_counts`), неудачные статьи (`note_quiz_failure`, `list_quiz_failures`, `clear_quiz_failures`), счёт и звания (`add_quiz_attempt`, `get_user_stats`, `set_quiz_stats`, `get_all_quiz_stats`, `reset_all_quiz_stats`), чистки и выборки банка (`list_quiz_questions`, `get_quiz_question`, `count_quiz_failures`, `delete_quiz_drafts`, `delete_all_quiz_questions`), покрытие статей (`note_quiz_question_asked`, `get_quiz_articles_covered`). ⚠️ Варианты ответа хранятся СТРОКОЙ JSON — разбор спрятан в `_row_to_question`, наружу всегда уходит готовый список |
 | `database/history.py` | 124 | 40 | **ОГЛАВЛЕНИЕ, кода нет.** Только re-export: собирает имена из двенадцати файлов пакета и отдаёт наружу, как `jobs/__init__.py`. ⚠️ Новое имя, не вписанное сюда, снаружи не видно | Ключевые группы: переписка и гигиена сообщений бота |
 
@@ -116,9 +116,9 @@ database.history import add_messages` работает как работал; т
 
 | файл | строк | тянут | публичные имена |
 |---|---:|---:|---|
-| `services/gemini.py` | 3028 | 11 | `compress_newlines`, `thinking_level`, `ask_gemini`, `ask_gemini_audio`, `ask_gemini_video`, `format_news_as_colonel`, `author_brief`, `ask_group_proactive`, `ask_group_proactive_media`, `generate_image` |
+| `services/gemini.py` | 3109 | 12 | `compress_newlines`, `thinking_level`, `ask_gemini`, `ask_gemini_audio`, `ask_gemini_video`, `format_news_as_colonel`, `author_brief`, `ask_group_proactive`, `ask_group_proactive_media`, `generate_image`, `fetch_deepseek_balance` (остаток на счету у самой платформы, 14.09.2026) |
 | `services/antispam.py` | 910 | 10 | `is_enabled`, `get_thresholds`, `get_thresholds_for`, `trust_info`, `check_and_mute`, `unmute`, `mute_user`, `kick_user`, `ban_user`, `unban_user`, `notify_owners_ai_mute`, `is_linkfilter_enabled`, `check_and_delete_links`, `get_mute_stats`, `get_recent_actions`, `get_evidence` |
-| `services/daily_report.py` | 800 | 11 | `kyiv_now`, `kyiv_label`, `collect_counters`, `period_totals`, `render`, `midnight_report`, `today_so_far`, `weekly_report`, `week_so_far`, `last_report_text`, `last_weekly_text`, плюс метки и границы периодов (`seconds_to_next_hour`, `period_closed`, `week_add_day`, `week_closed`, `start_snapshot_if_needed`, `note_monthly_reset`) |
+| `services/daily_report.py` | 835 | 12 | `kyiv_now`, `kyiv_label`, `balance_sync_note` (приписка «сверено в 14:05» к остатку — одна на три экрана), `collect_counters`, `period_totals`, `render`, `midnight_report`, `today_so_far`, `weekly_report`, `week_so_far`, `last_report_text`, `last_weekly_text`, плюс метки и границы периодов (`seconds_to_next_hour`, `period_closed`, `week_add_day`, `week_closed`, `start_snapshot_if_needed`, `note_monthly_reset`) |
 | `services/rag.py` | 795 | 7 | `cosine_similarity`, `RagQuotaError`, `get_embedding`, `parse_article_file`, `is_active`, `sync_knowledge_base`, `index_lag`, `rebuild_knowledge_base`, `normalize_query`, `retrieve_relevant_context`, `test_search` |
 | `services/proactive.py` | 844 | 5 | `skip_counts`, `is_enabled`, `hands_enabled`, `note_bot_group_reply`, `forget_conversations`, `consider_message` |
 | `services/tech_card.py` | 514 | 2 | `index`, `find_local`, `suggest`, `by_kind`, `by_title`, `token`, `by_token`, `load`, `render_card`, `render_section`, `render_candidates`, `kinds_summary`, `section_label`, `is_specs`, `short_title`, `kind_icon` |
@@ -150,6 +150,7 @@ database.history import add_messages` работает как работал; т
 | `jobs/news.py` | 242 | `send_news_to_chat`, `news_polling_loop` |
 | `jobs/watchdog.py` | 102 | `watchdog_loop` |
 | `jobs/rag.py` | 162 | `send_notice`, `drop_notices`, `rag_catchup_loop` |
+| `jobs/balance.py` | 94 | `balance_sync_loop`, `sync_balances_once` — раз в час спрашивает у платформы НАСТОЯЩИЙ остаток на счету (14.09.2026). Заведён потому, что собственный счёт бота занижен на оборванных потоках: токены оплачены, а отчёт о них не пришёл. ⚠️ Сверяется только DeepSeek — остаток по своему адресу отдаёт он один; список провайдеров внутри файла, не в реестре |
 | `jobs/web.py` | 73 | `web_loop` — поднимает сайт внутри процесса бота |
 
 ## `web/` — веб-админка (30.08.2026, этапы 0–5)

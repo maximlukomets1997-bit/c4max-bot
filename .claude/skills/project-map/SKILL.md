@@ -93,15 +93,15 @@ description: Карта проекта Telegram-бота C4_Max и проток�
 
 | файл | тянут | что это значит |
 |---|---:|---|
-| `config.py` | 45 | почти весь проект; правка константы задевает всё |
-| `database/history.py` | 40 | ОГЛАВЛЕНИЕ пакета `database/` (кода нет с 02.09.2026). Работа с данными — в двенадцати файлах рядом: `_core`, `_schema`, `settings`, `chat`, `groups`, `people`, `money`, `stats`, `quiz`, `moderation`, `journals`, `news`. Снаружи имена прежние: правится нужный файл, а не этот |
+| `config.py` | 46 | почти весь проект; правка константы задевает всё |
+| `database/history.py` | 41 | ОГЛАВЛЕНИЕ пакета `database/` (кода нет с 02.09.2026). Работа с данными — в двенадцати файлах рядом: `_core`, `_schema`, `settings`, `chat`, `groups`, `people`, `money`, `stats`, `quiz`, `moderation`, `journals`, `news`. Снаружи имена прежние: правится нужный файл, а не этот |
 | `utils.py` | 21 | отправка и уборка сообщений бота |
 | `handlers/admin/common.py` | 17 | общий каркас всех админ-панелей |
 | `services/roles.py` | 15 | права доступа: ошибка = дыра или запертая панель |
 | `services/user_settings.py` | 12 | кэш персональных настроек |
 | `database/_core.py` | 12 | одно соединение с базой и замок к нему — под всеми файлами `database/` |
-| `services/daily_report.py` | 11 | счётчики и деньги |
-| `services/gemini.py` | 11 | все обращения к нейросетям, 3028 строк |
+| `services/daily_report.py` | 12 | счётчики и деньги |
+| `services/gemini.py` | 12 | все обращения к нейросетям, 3109 строк |
 | `services/antispam.py` | 10 | муты, баны, фильтр ссылок |
 | `services/knowledge_store.py` | 9 | файлы статей базы знаний |
 | `utils_format.py` | 9 | превращение ответа модели в сообщение Telegram |

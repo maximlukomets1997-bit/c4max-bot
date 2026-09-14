@@ -237,6 +237,8 @@ async def send_stats_panel(bot, chat_id: int, user_id: int):
 
 async def send_api_panel(bot, chat_id: int, user_id: int):
     """Панель «🤖 УПРАВЛЕНИЕ МОДЕЛЯМИ»: вызовы API по провайдерам + кнопки моделей."""
+    from services import daily_report
+
     stats = get_bot_stats()
 
     # Раскладываем счётчики вызовов по провайдерам (поле "provider" в config.py).
@@ -307,6 +309,12 @@ async def send_api_panel(bot, chat_id: int, user_id: int):
                      f"<a href=\"{meta['console_url']}\">${_money(meta['cost_key']):.6f}</a>")
             if meta["balance_key"]:
                 money += f" / <b>${_money(meta['balance_key']):.6f}</b>"
+                # Приписка «сверено в 14:05» — только у провайдеров, чей
+                # остаток бот спрашивает у платформы (14.09.2026). Остальным
+                # она не полагается: их счёт вписывается руками.
+                note = daily_report.balance_sync_note(pid)
+                if note:
+                    money += f" <i>({note})</i>"
             text += money + "\n"
         text += "───────────────────────────\n"
     text += (

@@ -83,7 +83,8 @@ from .people import (dossier_add_message, dossier_add_mute, dossier_add_linkdel,
 from .money import (add_provider_cost, spend_qwen_tokens, get_qwen_tokens,
                     register_api_call, clear_api_calls, clear_user_token_usage,
                     register_image_call, unregister_image_call,
-                    get_remaining_image_calls)
+                    get_remaining_image_calls,
+                    sync_provider_balance, plan_balance_sync, balance_sync_key)
 
 # ─── счётчики бота и ночные снимки ──────────────────────────────────
 from .stats import (_kyiv_today_start_utc, get_bot_stats, save_stats_snapshot,

@@ -16,6 +16,7 @@
 #    cleanup.py  — суточная чистка журналов + месячный сброс статистики API
 #    reports.py  — суточный и недельный отчёты о расходах + ночная копия базы
 #    rag.py      — ежечасный добор базы знаний после лимита Google
+#    balance.py  — ежечасная сверка остатка на счету с платформой провайдера
 #    update.py   — самообновление: забрать новый код с GitHub и перезапуститься
 #    watchdog.py — отметки живости внешнему сторожу (healthchecks.io)
 #    web.py      — веб-админка: сайт внутри процесса бота (страницы в web/)
@@ -26,6 +27,7 @@ from .cleanup import cleanup_loop, _monthly_stats_reset
 from .reports import (daily_report_loop, nightly_backup, weekly_group_digest,
                       daily_quiz)
 from .rag import rag_catchup_loop
+from .balance import balance_sync_loop, sync_balances_once
 from .update import (auto_update_loop, forget_update_notice,
                      drop_expired_notice, notice_expired, notice_since)
 from .watchdog import watchdog_loop
@@ -35,7 +37,8 @@ __all__ = [
     "send_news_to_chat", "news_polling_loop",
     "cleanup_loop", "_monthly_stats_reset",
     "daily_report_loop", "nightly_backup", "weekly_group_digest", "daily_quiz",
-    "rag_catchup_loop", "auto_update_loop", "forget_update_notice",
+    "rag_catchup_loop", "balance_sync_loop", "sync_balances_once",
+    "auto_update_loop", "forget_update_notice",
     "drop_expired_notice", "notice_expired", "notice_since",
     "watchdog_loop", "web_loop",
 ]

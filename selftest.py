@@ -213,7 +213,71 @@ def check_money():
     if zero != 0.0:
         problems.append(f"Qwen: пустой запрос должен стоить ровно 0, вышло {zero}")
 
-    return problems, f"{done} проверок: Qwen, DeepSeek, Xiaomi, картинки"
+    # ── СВЕРКА ОСТАТКА С ПЛАТФОРМОЙ (14.09.2026) ──────────────────────
+    #
+    # Собственный счёт бота занижен на оборванных потоках: токены провайдер
+    # сгенерировал и деньги списал, а отчёт о них не пришёл (замер 14.09:
+    # 4 обрыва из 114 запросов, отставание 4.7 цента). Поэтому остаток
+    # берётся у платформы, а разницу разбирает plan_balance_sync.
+    #
+    # ⚠️ ПРОВЕРЯЕТСЯ ИМЕННО АРИФМЕТИКА РЕШЕНИЯ, а не запись в базу: до копилок
+    # settings проверки проекта не доходят вовсе (см. шапку database/money.py),
+    # и ради этого вся развилка вынесена в отдельную функцию без базы.
+    from config import BALANCE_SYNC_EPSILON
+    from database.money import plan_balance_sync
+
+    def expect_sync(title, ours, real, want_balance, want_add, want_reason):
+        nonlocal done
+        done += 1
+        balance, add, reason = plan_balance_sync(ours, real, BALANCE_SYNC_EPSILON)
+        if reason != want_reason:
+            problems.append(f"сверка остатка ({title}): решение «{reason}», ждали «{want_reason}»")
+        if not _same_money(balance, want_balance):
+            problems.append(f"сверка остатка ({title}): остаток ${balance:.6f}, "
+                            f"ждали ${want_balance:.6f}")
+        if not _same_money(add, want_add):
+            problems.append(f"сверка остатка ({title}): в расход добавлено ${add:.6f}, "
+                            f"ждали ${want_add:.6f}")
+
+    # Наш остаток БОЛЬШЕ настоящего — недосчитали расход, доначисляем разницу.
+    expect_sync("мы недосчитали расход", 3.946671, 3.90, 3.90, 0.046671, "недостача")
+    # Наш остаток МЕНЬШЕ настоящего — счёт пополнили; расход уменьшать нельзя.
+    expect_sync("счёт пополнили", 0.81, 10.81, 10.81, 0.0, "пополнение")
+    # Разница меньше цента — платформа округляет остаток, это не расхождение.
+    expect_sync("в пределах округления", 3.8988, 3.90, 3.8988, 0.0, "совпало")
+    # Ровно порог — уже расхождение (сравнение строгое, граница описана в config).
+    expect_sync("ровно на пороге", 3.91, 3.90, 3.90, 0.01, "недостача")
+
+    # ⚠️ ПЛАТФОРМА МОЛЧИТ — НИЧЕГО НЕ ТРОГАЕМ. Главное обещание правки:
+    # неответ не должен ни обнулять остаток, ни двигать «потрачено», ни
+    # обновлять отметку «сверено». Гоняется САМ проход цикла, а не его куски:
+    # проверять отдельно разбор ответа значило бы проверить механизм и не
+    # заметить, что его перестали звать.
+    import asyncio as _asyncio
+    import jobs.balance as _bal
+    import database.history as _hist
+
+    written = []
+    saved_providers, saved_sync = _bal._providers, _hist.sync_provider_balance
+    try:
+        _hist.sync_provider_balance = lambda *a, **kw: (written.append(a) or (0.0, 0.0, "совпало"))
+
+        _bal._providers = lambda: {"deepseek": lambda: None}          # платформа не ответила
+        _asyncio.run(_bal.sync_balances_once())
+        done += 1
+        if written:
+            problems.append(f"платформа молчит, а остаток всё равно переписали: {written}")
+
+        _bal._providers = lambda: {"deepseek": lambda: 7.77}          # платформа ответила
+        _asyncio.run(_bal.sync_balances_once())
+        done += 1
+        if not written or not _same_money(written[-1][1], 7.77):
+            problems.append(f"ответ платформы до записи не дошёл: {written}")
+    finally:
+        _bal._providers, _hist.sync_provider_balance = saved_providers, saved_sync
+
+    return problems, (f"{done} проверок: Qwen, DeepSeek, Xiaomi, картинки, "
+                      f"сверка остатка с платформой")
 
 
 # ───────────────────────────────────────────────
