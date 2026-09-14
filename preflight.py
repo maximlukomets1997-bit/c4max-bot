@@ -206,6 +206,14 @@ def check_providers():
               "balance_key", "console_url", "balance_btn",
               "monthly_reset", "report_approx", "quota_tokens"}
 
+    # Кто обновляет остаток сам (сверка с платформой) и какие кнопки правки
+    # счёта реально нарисованы — оба списка берутся из кода, а не из памяти.
+    import jobs.balance as balance_jobs
+
+    synced = set(balance_jobs._providers())
+    balance_buttons = {data for data, _, _ in _callback_literals()
+                       if data.startswith("bal:set:")}
+
     providers = {info.get("provider") for info in config.AVAILABLE_MODELS.values()}
     providers.discard(None)
     for provider in sorted(providers):
@@ -220,14 +228,29 @@ def check_providers():
         if meta.get("cost_key") and not meta.get("console_url"):
             problems.append(f"у провайдера {pid} есть копилка расхода, но нет console_url — "
                             f"сумма в панели API станет ссылкой в никуда")
-        if meta.get("balance_key") and not meta.get("balance_btn"):
-            problems.append(f"у провайдера {pid} есть счёт, но нет надписи кнопки balance_btn")
+        # ⚠️ ПРАВИЛО ОСЛАБЛЕНО 14.09.2026 РОВНО НА ОДИН СЛУЧАЙ. Раньше: «есть
+        # счёт — обязана быть кнопка правки». Теперь кнопки может не быть у
+        # того, чей остаток ведёт ежечасная сверка с платформой
+        # (jobs/balance.py) — у DeepSeek она есть, и правка руками там только
+        # мешала бы: вписанное живёт до ближайшего часа. Для всех остальных
+        # правило прежнее: забыл кнопку — покраснеет.
+        if meta.get("balance_key") and not meta.get("balance_btn") and pid not in synced:
+            problems.append(f"у провайдера {pid} есть счёт, нет кнопки правки (balance_btn) "
+                            f"и нет сверки с платформой в jobs/balance.py — "
+                            f"остаток нечем поправить и некому обновить")
+        # Обратная сторона того же: надпись кнопки заведена, а самой кнопки на
+        # экране нет. Ловится по литералу callback_data в коде панели —
+        # собранный f-строкой он бы сюда не попал (см. _callback_literals).
+        if meta.get("balance_btn") and f"bal:set:{pid}" not in balance_buttons:
+            problems.append(f"у провайдера {pid} задана надпись кнопки balance_btn, "
+                            f"но кнопки bal:set:{pid} нет в panel_balance — "
+                            f"счёт не поправить ни в боте, ни на сайте")
         if meta.get("cost_key") and pid not in panel_balance._COST_ORDER:
             problems.append(f"провайдер {pid} не попал в panel_balance._COST_ORDER — "
                             f"его не будет на экране «Обнулить потрачено»")
         if meta.get("balance_key") and pid not in panel_balance._BALANCE_ORDER:
             problems.append(f"провайдер {pid} не попал в panel_balance._BALANCE_ORDER — "
-                            f"его остаток нельзя будет поправить кнопкой")
+                            f"его цифры не покажутся на экране «Счета и квоты»")
 
     return problems, f"провайдеров: {len(providers)} ({', '.join(sorted(providers))})"
 

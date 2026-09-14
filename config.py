@@ -852,12 +852,23 @@ PROVIDERS = {
         "balance_btn": None,
         "monthly_reset": True, "report_approx": True, "quota_tokens": True,
     },
+    # ⚠️ 14.09.2026 У DeepSeek УБРАНА КНОПКА ПРАВКИ СЧЁТА (решение Максима):
+    # `balance_btn: None` — и её нет ни на экране «💰 Счета и квоты» в боте,
+    # ни формой на сайте. Остаток у этого провайдера правится не руками, а
+    # ежечасной сверкой с платформой (jobs/balance.py), и вписанное вручную
+    # всё равно жило бы до ближайшего часа.
+    # ⚠️ САМ СЧЁТ (`balance_key`) НА МЕСТЕ и показывается как раньше — убрана
+    # только правка. Цифра остатка и приписка «сверено в 14:05» — главное, что
+    # есть на том экране.
+    # ⚠️ Пустой `balance_btn` при заведённом `balance_key` — законно ТОЛЬКО для
+    # того, у кого работает сверка: это правило сторожит preflight
+    # (check_providers). Появится сверка у Xiaomi — можно убрать кнопку и там.
     "deepseek": {
         "icon": "🐋", "title": "DeepSeek", "calls_label": "Вызовы DeepSeek",
         "money_label": "Расход DeepSeek", "cost_key": "deepseek_cost_usd",
         "balance_key": "deepseek_balance_usd",
         "console_url": "https://platform.deepseek.com/usage",
-        "balance_btn": "💵 Счёт DeepSeek",
+        "balance_btn": None,
         "monthly_reset": False, "report_approx": False, "quota_tokens": False,
     },
     "xiaomi": {

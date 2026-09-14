@@ -249,10 +249,20 @@ def _build_balance_panel(flash: str = ""):
     parts.append("Нажми кнопку — бот попросит прислать число.\n"
                  "Правка сразу видна в панели API и в отчётах о расходах.")
 
+    # ⚠️ 14.09.2026 КНОПКИ «💵 Счёт DeepSeek» ЗДЕСЬ БОЛЬШЕ НЕТ (решение
+    # Максима): его остаток правится не руками, а ежечасной сверкой с
+    # платформой (jobs/balance.py), и вписанное жило бы до ближайшего часа.
+    # Блок с ЦИФРАМИ DeepSeek выше остался — убрана только правка.
+    # ⚠️ Кнопки перечислены ЯВНО, а не собраны циклом из реестра, и это не
+    # лень: `preflight` считает callback_data ЛИТЕРАЛАМИ в коде. Собери их
+    # f-строкой с переменной — счётчик кнопок перестанет их видеть, и
+    # потерянная кнопка больше никогда не покраснеет.
+    # Захочешь вернуть правку DeepSeek — вернуть сюда строку с
+    # `callback_data="bal:set:deepseek"` И заполнить `balance_btn` в реестре:
+    # ветка обработчика жива, её не трогали.
     rows = [
-        [InlineKeyboardButton(_BALANCE_FIELDS["deepseek"]["btn"], callback_data="bal:set:deepseek"),
-         InlineKeyboardButton(_BALANCE_FIELDS["xiaomi"]["btn"], callback_data="bal:set:xiaomi")],
-        [InlineKeyboardButton(_BALANCE_FIELDS["image"]["btn"], callback_data="bal:set:image")],
+        [InlineKeyboardButton(_BALANCE_FIELDS["xiaomi"]["btn"], callback_data="bal:set:xiaomi"),
+         InlineKeyboardButton(_BALANCE_FIELDS["image"]["btn"], callback_data="bal:set:image")],
     ]
     # Кнопки квот — по две в ряд, собираются из конфига сами.
     qw_buttons = [InlineKeyboardButton(f"🎫 Квота {m}", callback_data=f"bal:set:qwen:{m}")

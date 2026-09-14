@@ -550,7 +550,12 @@ def _money_block(csrf: str) -> str:
                                               _balance_field, _qwen_model_keys,
                                               _value_str)
 
-    ids = [pid for pid in _BALANCE_FIELDS]
+    # ⚠️ 14.09.2026: остатки показываем к правке ТОЛЬКО тем, у кого она
+    # осталась (`balance_btn` в реестре). У DeepSeek правки больше нет ни
+    # кнопкой в боте, ни формой здесь: его остаток ведёт ежечасная сверка с
+    # платформой (jobs/balance.py), и второй путь к той же цифре сбивал бы её
+    # до ближайшего часа. Расход («потрачено») правится по-прежнему у всех.
+    ids = [pid for pid, cfg in _BALANCE_FIELDS.items() if cfg["btn"]]
     ids += [f"cost:{pid}" for pid in _COST_FIELDS]
     ids += [f"qwen:{m}" for m in _qwen_model_keys()]
 

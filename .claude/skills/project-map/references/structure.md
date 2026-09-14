@@ -29,11 +29,11 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 |---|---:|---:|---|
 | `bot.py` | 11 | 0 | — (только вызывает `main.main`) |
 | `main.py` | 603 | 1 | `post_init`, `post_stop`, `post_shutdown`, `main` |
-| `config.py` | 1558 | 46 | `read_build_mark` + 125 констант верхнего уровня (заводские тексты всех пяти промптов — пустые строки) |
+| `config.py` | 1569 | 46 | `read_build_mark` + 125 констант верхнего уровня (заводские тексты всех пяти промптов — пустые строки) |
 | `utils.py` | 181 | 21 | `should_respond_in_group`, `clean_mention`, `keep_chat_action`, `delete_user_message_safe`, `mention`, `schedule_delete`, `register_and_clean_bot_message` |
 | `utils_format.py` | 313 | 9 | `strip_thoughts`, `thoughts_enabled`, `build_text_and_entities`, `send_formatted`, `convert_md`, `fits_caption`, `reply_md` |
 | `logging_setup.py` | 255 | 3 | `archive_old_logs`, `setup_logging` |
-| `preflight.py` | 696 | 0 | `check_imports`, `check_models`, `check_providers`, `check_tables`, `check_ranks`, `check_callbacks`, `check_panels`, `check_handlers`, `check_web`, `main` |
+| `preflight.py` | 719 | 0 | `check_imports`, `check_models`, `check_providers`, `check_tables`, `check_ranks`, `check_callbacks`, `check_panels`, `check_handlers`, `check_web`, `main` |
 | `selftest.py` | 4725 | 0 | проверки ПОВЕДЕНИЯ (28.08.2026), **34 группы** — перечислять их здесь перестали 08.09.2026: список рос вчетверо быстрее, чем его переписывали, и врал уже на четырнадцать имён. Живой список отдаёт сам файл — кортеж `CHECKS` в его конце, где рядом с каждой проверкой стоит её человеческое название; что каждая ловит, а что нет — `references/checks.md`. Отвечает на «правильно ли считает», тогда как `preflight.py` — на «запустится ли». Зовётся из `deploy.sh` и CI, красный откатывает выкатку |
 | `reset_db.py` | 81 | 0 | `main` |
 | `watchdog_local.py` | 297 | 0 | `main` |
@@ -108,7 +108,7 @@ database.history import add_messages` работает как работал; т
 | `handlers/admin/panel_rag.py` | 988 | 7 | `send_rag_panel`, `cmd_rag`, `handle_kb_document`, `handle_kb_test_query` (панель из трёх экранов: разделы → список раздела → настройки поиска) |
 | `handlers/admin/panel_mod.py` | 586 | 5 | `send_mod_panel`, `cmd_mod`, `cmd_unmute`, `MOD_ACTION_TITLES` и `MOD_ACTIONS_WITH_EVIDENCE` — названия видов записей журнала и список тех, у кого бывают улики; их же читает страница журналов на сайте |
 | `handlers/admin/panel_quiz.py` | 643 | 3 | `send_quiz_panel`, `cmd_quiz_admin` |
-| `handlers/admin/panel_balance.py` | 442 | 5 | `send_balance_panel`, `handle_balance_input` |
+| `handlers/admin/panel_balance.py` | 460 | 5 | `send_balance_panel`, `handle_balance_input` |
 | `handlers/admin/panel_updates.py` | 181 | 5 | `send_updates_panel` |
 | `handlers/admin/panel_digest.py` | 179 | 2 | `digest_keyboard`, `send_digest_panel` |
 
@@ -166,7 +166,7 @@ database.history import add_messages` работает как работал; т
 | `web/__init__.py` | 21 | re-export `ROUTES`, `build_app` |
 | `web/routes.py` | 882 | `ROUTES` — единственный список адресов; `build_app`, `index`, `apply`, `prompts`, `kb`, `quiz`, `journal`, `users`, `user_card`, `system`, `download`, `enter`, `exit_`, `health` |
 | `web/auth.py` | 263 | `check_webapp`, `check_widget`, `is_allowed`, `make_session`, `read_session`, `make_login_token`, `read_login_token`, `make_login_url`, `csrf_for`, `csrf_ok`, `current_user` |
-| `web/pages.py` | 1911 | `esc`, `page_login`, `page_denied`, `page_summary`, `page_prompts`, `page_users`, `page_user_card`, `page_kb`, `page_quiz`, `page_journal`, `page_system`, `plain`, `current_theme` + `THEMES` (две темы оформления), `NAV` (список разделов верхней полосы), `css_version` (отпечаток оформления против кэша браузера) |
+| `web/pages.py` | 1916 | `esc`, `page_login`, `page_denied`, `page_summary`, `page_prompts`, `page_users`, `page_user_card`, `page_kb`, `page_quiz`, `page_journal`, `page_system`, `plain`, `current_theme` + `THEMES` (две темы оформления), `NAV` (список разделов верхней полосы), `css_version` (отпечаток оформления против кэша браузера) |
 | `web/actions.py` | 962 | `ActionError`, `apply_setting`, `apply_prompt`, `apply_model`, `apply_image_model`, `apply_thinking`, `apply_theme`, `user_adjust`, `user_toggle`, `user_reset_settings`, `user_reset_violations`, `user_clear_history`, `user_rank`, `user_quiz_score`, `user_quiz_fix`, `user_role`, `user_perm`, `user_moderate`, `kb_add`, `kb_replace`, `kb_approve`, `kb_delete`, `kb_rebuild`, `kb_test_search`, `kb_clear_log`, `quiz_generate`, `quiz_approve`, `quiz_delete`, `quiz_forget_fails`, `quiz_seed`, `quiz_wipe_drafts`, `quiz_nuke`, `quiz_zero`, `quiz_auto_toggle`, `quiz_reseed`, `balance_set`, `report_text`, `make_backup`, `digest_text`, `digest_send`, `digest_toggle`, `wipe_conversations`, `toggle_personal_prompt`, `clear_moderation_journal`, `clear_staff_journal`, `restart_bot` — правка с сайта делает ВСЁ то же, что нажатие кнопки |
 | `web/longjobs.py` | 80 | `is_running`, `last_result`, `forget_result`, `start` — долгие работы с сайта (пересборка базы знаний, сборка вопросов): запускаются в отдельном потоке, страница опрашивает результат. Из проекта не тянет НИЧЕГО, поэтому в списке зависимостей выглядит одиноко |
 | `web/static/style.css` | — | оформление; ни одного адреса со стороны |
