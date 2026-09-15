@@ -1550,8 +1550,14 @@ def check_group_guard():
                                               -1009990004, -1009990005)
     MINE, OLD_BASIC, NEW_SUPER, GONE, NETFAIL, FAILOPEN = (
         -1009990006, -9990007, -1009990008, -1009990009, -1009990010, -1009990011)
+    # Переезд в супергруппу: ждущая решения (сначала сообщение о переезде /
+    # сначала событие «бота добавили») и своя (сначала событие).
+    P_OLD, P_NEW, Q_OLD, Q_NEW, M_OLD, M_NEW = (
+        -9990012, -1009990013, -9990014, -1009990015, -9990016, -1009990017)
+    LEFT_ME, NOT_MEMBER = -1009990018, -1009990019
     ALL_CHATS = (OWN, OWN2, FOREIGN, UNKNOWN, JOIN_ONLY, MINE, OLD_BASIC, NEW_SUPER,
-                 GONE, NETFAIL, FAILOPEN)
+                 GONE, NETFAIL, FAILOPEN, P_OLD, P_NEW, Q_OLD, Q_NEW, M_OLD, M_NEW,
+                 LEFT_ME, NOT_MEMBER)
 
     # ── 0. Русское число в вопросе («4 человека») ──
     for n, want in ((1, "участник"), (2, "участника"), (4, "участника"),
@@ -1582,6 +1588,9 @@ def check_group_guard():
             self.sent = []
             self.left = []
             self.member_error = None
+            self.retargeted = {}     # номер сообщения → callback_data новых кнопок
+            self.retired = {}        # номер сообщения → текст, которым вопрос снят
+            self._next_id = 1000
 
         async def initialize(self):
             pass
@@ -1590,7 +1599,20 @@ def check_group_guard():
             pass
 
         async def send_message(self, chat_id, text, parse_mode=None, reply_markup=None, **kw):
-            self.sent.append({"chat_id": chat_id, "text": text, "markup": reply_markup})
+            self._next_id += 1
+            self.sent.append({"chat_id": chat_id, "text": text, "markup": reply_markup,
+                              "message_id": self._next_id})
+
+            class _Sent:
+                message_id = self._next_id
+            return _Sent()
+
+        async def edit_message_reply_markup(self, chat_id, message_id, reply_markup=None, **kw):
+            rows = getattr(reply_markup, "inline_keyboard", None) or ()
+            self.retargeted[message_id] = [b.callback_data for row in rows for b in row]
+
+        async def edit_message_text(self, chat_id, message_id, text, parse_mode=None, **kw):
+            self.retired[message_id] = text
 
         async def get_chat_member_count(self, chat_id):
             return 5            # Telegram считает и самого бота — людей четверо
@@ -1820,8 +1842,90 @@ def check_group_guard():
                    "бы в мёртвую группу", not hist.is_known_chat(OLD_BASIC))
             await app.process_update(msg(OLD_BASIC, "Переезжающая", text=None, kind="group",
                                          migrate_to_chat_id=NEW_SUPER))
+            # Telegram шлёт ещё и «бота добавили» в новый номер — от того, кто
+            # вызвал переезд. Группа уже своя: спрашивать не о чем.
+            await app.process_update(my_status(NEW_SUPER, "Переезжающая",
+                                               person(STRANGER, "Чужой", "stranger"),
+                                               "left", "member"))
             expect("о своей переехавшей группе спросили владельца",
                    len(bot.sent) == sent_before)
+
+            # ── 8б. Переезд группы, ЖДУЩЕЙ решения (живой тест 15.09.2026) ──
+            stranger = person(STRANGER, "Чужой", "stranger")
+            # Сначала сообщение о переезде, потом «бота добавили» в новый номер.
+            sent_before = len(bot.sent)
+            await app.process_update(my_status(P_OLD, "Переезд до решения", stranger,
+                                               "left", "member"))
+            first = bot.sent[sent_before:]
+            await app.process_update(msg(P_NEW, "Переезд до решения", text=None,
+                                         migrate_from_chat_id=P_OLD))
+            await app.process_update(my_status(P_NEW, "Переезд до решения", stranger,
+                                               "left", "member"))
+            await app.process_update(msg(P_OLD, "Переезд до решения", text=None, kind="group",
+                                         migrate_to_chat_id=P_NEW))
+            expect(f"группа сменила номер, пока ждала решения, — и владельцу ушло "
+                   f"вопросов: {len(bot.sent) - sent_before}, а должен один",
+                   len(bot.sent) - sent_before == 1)
+            pending = gg._pending()
+            expect("ожидание решения не переехало на новый номер группы — на её "
+                   "сообщения вопрос пришёл бы заново",
+                   str(P_NEW) in pending and str(P_OLD) not in pending)
+            if first:
+                expect("кнопки уже отправленного вопроса не переключились на новый номер — "
+                       "«Выйти» ответил бы «меня уже нет», хотя бот в группе",
+                       bot.retargeted.get(first[0]["message_id"])
+                       == [f"grp:stay:{P_NEW}", f"grp:leave:{P_NEW}"])
+
+            # Сначала «бота добавили» в новый номер, потом сообщение о переезде.
+            sent_before = len(bot.sent)
+            await app.process_update(my_status(Q_OLD, "Переезд наоборот", stranger,
+                                               "left", "member"))
+            first = bot.sent[sent_before:]
+            await app.process_update(my_status(Q_NEW, "Переезд наоборот", stranger,
+                                               "left", "member"))
+            await app.process_update(msg(Q_NEW, "Переезд наоборот", text=None,
+                                         migrate_from_chat_id=Q_OLD))
+            pending = gg._pending()
+            expect("после переезда в ожидании остался старый номер группы или пропал новый",
+                   str(Q_NEW) in pending and str(Q_OLD) not in pending)
+            if first:
+                retired = bot.retired.get(first[0]["message_id"], "")
+                expect("второй вопрос о той же группе ушёл, а первый не снят — у владельца "
+                       "два вопроса, и кнопки первого бьют мимо",
+                       "стала супергруппой" in retired and "ниже" in retired)
+
+            # Своя группа: «бота добавили» в новый номер пришло раньше переезда.
+            hist.remember_chat(M_OLD, "Своя переезжающая")
+            sent_before = len(bot.sent)
+            await app.process_update(my_status(M_NEW, "Своя переезжающая", stranger,
+                                               "left", "member"))
+            asked = bot.sent[sent_before:]
+            await app.process_update(msg(M_NEW, "Своя переезжающая", text=None,
+                                         migrate_from_chat_id=M_OLD))
+            expect("своя группа переехала (событие раньше сообщения), а новый номер не "
+                   "стал своим", hist.is_known_chat(M_NEW) and not hist.is_known_chat(M_OLD))
+            expect("вопрос о СВОЕЙ переехавшей группе остался ждать решения — нажатое "
+                   "по ошибке «Выйти» вывело бы бота из группы Максима",
+                   str(M_NEW) not in gg._pending())
+            if asked:
+                expect("вопрос о своей переехавшей группе не снят — у владельца висят "
+                       "кнопки «Остаться/Выйти» про его же группу",
+                       "ваша группа" in bot.retired.get(asked[0]["message_id"], ""))
+
+            # ── 8в. Бот вышел — хвосты из покинутой группы вопросов не порождают ──
+            sent_before = len(bot.sent)
+            left_me = msg(LEFT_ME, "Покинутая", text=None,
+                          left_chat_member=person(BOT, "C4", "C4_Max_bot", is_bot=True))
+            expect("служебное «бот покинул группу» дошло до обработчиков",
+                   not await passes(left_me))
+            expect("бот вышел из группы — и на служебное «бот покинул группу» тут же ушёл "
+                   "новый вопрос о ней (живой тест 15.09.2026)", len(bot.sent) == sent_before)
+            bot.member_error = Forbidden("bot is not a member of the supergroup chat")
+            try:
+                await app.process_update(msg(NOT_MEMBER, "Где бота нет"))
+            finally:
+                bot.member_error = None
+            expect("вопрос ушёл о группе, где бота уже нет", len(bot.sent) == sent_before)
 
             # ── 9. Бота удалили ──
             quiz_daily.remember(OWN, {"message_id": 1, "poll_id": "selftest-poll"})

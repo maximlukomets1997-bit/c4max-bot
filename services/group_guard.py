@@ -53,7 +53,8 @@ _ICON = "🚪"
 
 # Группы, о которых владельца уже спросили:
 # {chat_id строкой: {"title": название, "by": кто добавил («Имя (@ник)» или
-#  пусто), "asked": time.time() последнего вопроса}}.
+#  пусто), "asked": time.time() последнего вопроса,
+#  "msgs": [[id владельца, номер сообщения с вопросом], …]}}.
 PENDING_KEY = "group_guard_pending"
 
 # Чужая группа ждёт решения, а в ней продолжают писать — напоминать владельцу
@@ -77,7 +78,7 @@ async def gate(update, context) -> None:
         return
     message = update.effective_message
     try:
-        if _carry_migration(chat, message):
+        if await _carry_migration(context.bot, chat, message):
             return
         if is_known_chat(chat.id):
             return
@@ -87,23 +88,35 @@ async def gate(update, context) -> None:
         return
 
     logger.debug("%s Обновление из чужой группы %s не обработано", _ICON, chat.id)
-    # Служебное «X добавил бота в группу» приходит рядом с событием
-    # my_chat_member, и порядок их Telegram не обещает. Вопрос с именем
-    # добавившего задаёт обработчик события — здесь о той же группе второй
-    # раз («кто добавил — не знаю») не спрашиваем.
+    # Служебные «X добавил бота» и «бот покинул группу» — про САМОГО бота, и
+    # вопроса они не порождают. Первое приходит рядом с событием
+    # my_chat_member (порядок Telegram не обещает), и вопрос с именем
+    # добавившего задаёт обработчик события. Второе приходит, когда бот уже
+    # вышел: без этой проверки кнопка «🚪 Выйти» тут же рождала новый вопрос
+    # о только что покинутой группе (живой тест 15.09.2026).
     joined = getattr(message, "new_chat_members", None) or ()
-    if not any(u.id == context.bot.id for u in joined):
+    left = getattr(message, "left_chat_member", None)
+    about_me = (any(u.id == context.bot.id for u in joined)
+                or (left is not None and left.id == context.bot.id))
+    if not about_me:
         await _remind_owner(context.bot, chat)
     raise ApplicationHandlerStop
 
 
-def _carry_migration(chat, message) -> bool:
+async def _carry_migration(bot, chat, message) -> bool:
     """
-    Обычная группа, ставшая супергруппой, получает НОВЫЙ номер — без этой
-    функции своя группа после переезда замолчала бы. Telegram шлёт два
-    служебных сообщения: в старую «переехала в…» и в новую «переехала из…»,
-    порядок не обещан. Какое бы ни пришло первым, одобрение переносится со
-    старого номера на новый.
+    Обычная группа, ставшая супергруппой, получает НОВЫЙ номер. Telegram
+    шлёт служебные сообщения в старую («переехала в…») и в новую («переехала
+    из…») группу, а ещё — событие «бота добавили» в новый номер. Порядок всех
+    трёх не обещан (живой тест 15.09.2026: группа переехала через 14 секунд
+    после добавления бота, и владелец получил два вопроса об одной группе).
+    Какое бы ни пришло первым:
+
+    • группа была СВОЕЙ — своим становится новый номер; если про новый номер
+      владельца уже успели спросить, вопрос снимается («это ваша группа»);
+    • группа ЖДАЛА РЕШЕНИЯ — ожидание переезжает на новый номер, а кнопки уже
+      отправленного вопроса переключаются на него; если про новый номер уже
+      ушёл второй вопрос, первый снимается («вопрос о ней ниже»).
 
     True — это сообщение о переезде: его пропускаем, спрашивать владельца о
     нём не о чем (номер со служебного сообщения подделать нельзя — его ставит
@@ -117,12 +130,51 @@ def _carry_migration(chat, message) -> bool:
         old_id, new_id = from_id, chat.id
     else:
         return False
+    shown = html.escape(chat.title or str(new_id))
+    pending = _pending()
+    old_rec = pending.get(str(old_id))
+    new_rec = pending.get(str(new_id))
     if is_known_chat(old_id):
         remember_chat(new_id, chat.title or "")
         forget_group(old_id)
         logger.info("%s Группа «%s» стала супергруппой (%s → %s) — осталась своей",
                     _ICON, chat.title or new_id, old_id, new_id)
+        if new_rec:
+            await _retire(bot, new_rec, f"✅ «{shown}» — ваша группа: она стала "
+                                        f"супергруппой, работаю в ней как раньше.")
+            _drop_pending(new_id)
+    elif old_rec:
+        if new_rec:
+            await _retire(bot, old_rec, f"{_ICON} Группа «{shown}» стала "
+                                        f"супергруппой — вопрос о ней ниже.")
+            _drop_pending(old_id)
+        else:
+            _move_pending(old_id, new_id)
+            await _retarget(bot, old_rec, new_id)
+        logger.info("%s Группа «%s», ждущая решения, стала супергруппой (%s → %s)",
+                    _ICON, chat.title or new_id, old_id, new_id)
     return True
+
+
+async def _retarget(bot, rec: dict, new_id: int) -> None:
+    """Кнопки уже отправленных вопросов — на новый номер группы."""
+    for owner_id, message_id in rec.get("msgs") or ():
+        try:
+            await bot.edit_message_reply_markup(chat_id=owner_id, message_id=message_id,
+                                                reply_markup=request_keyboard(new_id))
+        except Exception as e:
+            logger.debug("%s Не удалось переключить кнопки вопроса %s: %s",
+                         _ICON, message_id, e)
+
+
+async def _retire(bot, rec: dict, text: str) -> None:
+    """Снимает уже отправленные вопросы: новый текст вместо старого, без кнопок."""
+    for owner_id, message_id in rec.get("msgs") or ():
+        try:
+            await bot.edit_message_text(chat_id=owner_id, message_id=message_id,
+                                        text=text, parse_mode=ParseMode.HTML)
+        except Exception as e:
+            logger.debug("%s Не удалось снять вопрос %s: %s", _ICON, message_id, e)
 
 
 async def _remind_owner(bot, chat) -> None:
@@ -130,6 +182,10 @@ async def _remind_owner(bot, chat) -> None:
     try:
         asked = _pending().get(str(chat.id), {}).get("asked", 0)
         if time.time() - float(asked or 0) < REASK_SEC:
+            return
+        # Спрашиваем только о группе, где бот правда состоит: хвосты вроде
+        # служебных сообщений приходят и из чата, который бот уже покинул.
+        if await _bot_state(bot, chat.id) is not True:
             return
         await ask_owner(bot, chat)
     except Exception as e:
@@ -179,10 +235,16 @@ async def _on_added(bot, chat, actor) -> None:
                     _ICON, title, chat.id)
         return
     if is_known_chat(chat.id):
-        # Группа уже своя: событие об удалении когда-то потерялось, а теперь
-        # бота вернули. Владелец её одобрял — спрашивать не о чем.
-        logger.info("%s Меня вернули в свою группу «%s» (%s) — работаю",
-                    _ICON, title, chat.id)
+        # Группа уже своя: она переехала на новый номер (сообщение о переезде
+        # пришло раньше этого события) или событие об удалении когда-то
+        # потерялось. Владелец её одобрял — спрашивать не о чем.
+        logger.info("%s Группа «%s» (%s) уже своя — работаю", _ICON, title, chat.id)
+        return
+    asked = _pending().get(str(chat.id), {}).get("asked", 0)
+    if time.time() - float(asked or 0) < REASK_SEC:
+        # Ожидание решения переехало сюда вместе с группой (см. _carry_migration):
+        # вопрос уже у владельца, и его кнопки смотрят на этот номер.
+        logger.info("%s О группе «%s» (%s) уже спросил — жду решения", _ICON, title, chat.id)
         return
     await ask_owner(bot, chat, added_by=actor)
 
@@ -257,19 +319,24 @@ async def ask_owner(bot, chat, added_by=None) -> int:
     text = await _request_text(bot, chat, by, reminder)
     markup = request_keyboard(chat.id)
     sent = 0
+    msgs = []
     for owner_id in config.ADMIN_IDS:
         try:
             # БЕЗ register_and_clean_bot_message — как дайджест: это вопрос,
             # а не панель, и следующая открытая панель не должна его стереть.
-            await bot.send_message(chat_id=owner_id, text=text,
-                                   parse_mode=ParseMode.HTML, reply_markup=markup)
+            question = await bot.send_message(chat_id=owner_id, text=text,
+                                              parse_mode=ParseMode.HTML, reply_markup=markup)
             sent += 1
+            if getattr(question, "message_id", None):
+                # Номер сообщения нужен при переезде группы: переключить
+                # кнопки на новый номер группы или снять вопрос.
+                msgs.append([owner_id, question.message_id])
         except Exception as e:
             logger.warning("⚠️ %s Не удалось спросить владельца %s о группе «%s»: %s",
                            _ICON, owner_id, title, e)
     # Отметка ставится, даже если не ушло никому: иначе каждое сообщение
     # чужой группы порождало бы новую попытку. Через REASK_SEC спросим снова.
-    _mark_asked(chat.id, title, by)
+    _mark_asked(chat.id, title, by, msgs)
     logger.info("%s %s владельца, оставаться ли в группе «%s» (%s)%s",
                 _ICON, "Снова спросил" if reminder else "Спросил", title, chat.id,
                 f", добавил {by}" if by else "")
@@ -356,15 +423,28 @@ def _pending() -> dict:
         return {}
 
 
-def _mark_asked(chat_id: int, title: str, by: str = "") -> None:
+def _mark_asked(chat_id: int, title: str, by: str = "", msgs=None) -> None:
     data = _pending()
-    data[str(chat_id)] = {"title": title, "by": by, "asked": time.time()}
+    # Номера прежних вопросов (напоминаний) не выбрасываем: при переезде
+    # группы кнопки переключаются у ВСЕХ её вопросов, а не только у последнего.
+    kept = (data.get(str(chat_id)) or {}).get("msgs") or []
+    data[str(chat_id)] = {"title": title, "by": by, "asked": time.time(),
+                          "msgs": (kept + list(msgs or []))[-10:]}
     set_setting(PENDING_KEY, json.dumps(data, ensure_ascii=False))
 
 
 def _drop_pending(chat_id: int) -> None:
     data = _pending()
     if data.pop(str(chat_id), None) is not None:
+        set_setting(PENDING_KEY, json.dumps(data, ensure_ascii=False))
+
+
+def _move_pending(old_id: int, new_id: int) -> None:
+    """Ожидание решения переезжает на новый номер группы вместе со всем, что в нём было."""
+    data = _pending()
+    rec = data.pop(str(old_id), None)
+    if rec is not None:
+        data[str(new_id)] = rec
         set_setting(PENDING_KEY, json.dumps(data, ensure_ascii=False))
 
 
