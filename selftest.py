@@ -1636,11 +1636,18 @@ def check_group_guard():
         def time(self):
             return self.now
 
+    query_ids = iter(range(5000, 6000))
+
     class _Query:
         def __init__(self, data):
             self.data = data
             self.alerts = []
             self.edited = []
+
+            class _Msg:
+                chat_id = OWNER
+                message_id = next(query_ids)
+            self.message = _Msg()
 
         async def answer(self, text="", show_alert=False):
             self.alerts.append(text)
@@ -1651,6 +1658,14 @@ def check_group_guard():
     class _Ctx:
         def __init__(self, bot):
             self.bot = bot
+
+    # Что поставлено на самоудаление: (чат, номер сообщения) → через сколько
+    # секунд. Настоящий schedule_delete завёл бы задачу на пять минут ожидания.
+    DONE_TTL = 5 * 60        # просьба Максима 15.09.2026 — числом, а не из модуля
+    deleted = {}
+
+    def _record_delete(bot, chat_id, message_id, delay=30):
+        deleted[(chat_id, message_id)] = delay
 
     # ── строители обновлений в том виде, в каком их присылает Telegram ──
     ids = iter(range(1, 10_000))
@@ -1779,6 +1794,8 @@ def check_group_guard():
                 datas = [b.callback_data for row in rows for b in row]
                 expect(f"кнопки под вопросом не те: {datas}",
                        datas == [f"grp:stay:{FOREIGN}", f"grp:leave:{FOREIGN}"])
+                expect("вопрос, ЖДУЩИЙ решения, поставлен на самоудаление — вместе с ним "
+                       "пропали бы кнопки", (OWNER, asks[0]["message_id"]) not in deleted)
             expect("что владельца уже спросили, не записано в settings — после "
                    "перезапуска бота вопрос пришёл бы заново", str(FOREIGN) in gg._pending())
 
@@ -1875,6 +1892,8 @@ def check_group_guard():
                        "«Выйти» ответил бы «меня уже нет», хотя бот в группе",
                        bot.retargeted.get(first[0]["message_id"])
                        == [f"grp:stay:{P_NEW}", f"grp:leave:{P_NEW}"])
+                expect("вопрос с переключёнными кнопками поставлен на самоудаление — он "
+                       "всё ещё ждёт решения", (OWNER, first[0]["message_id"]) not in deleted)
 
             # Сначала «бота добавили» в новый номер, потом сообщение о переезде.
             sent_before = len(bot.sent)
@@ -1893,6 +1912,9 @@ def check_group_guard():
                 expect("второй вопрос о той же группе ушёл, а первый не снят — у владельца "
                        "два вопроса, и кнопки первого бьют мимо",
                        "стала супергруппой" in retired and "ниже" in retired)
+                expect(f"снятый вопрос («вопрос о ней ниже») не исчезает через 5 минут: "
+                       f"срок {deleted.get((OWNER, first[0]['message_id']))}",
+                       deleted.get((OWNER, first[0]["message_id"])) == DONE_TTL)
 
             # Своя группа: «бота добавили» в новый номер пришло раньше переезда.
             hist.remember_chat(M_OLD, "Своя переезжающая")
@@ -1911,6 +1933,9 @@ def check_group_guard():
                 expect("вопрос о своей переехавшей группе не снят — у владельца висят "
                        "кнопки «Остаться/Выйти» про его же группу",
                        "ваша группа" in bot.retired.get(asked[0]["message_id"], ""))
+                expect(f"снятый вопрос («это ваша группа») не исчезает через 5 минут: "
+                       f"срок {deleted.get((OWNER, asked[0]['message_id']))}",
+                       deleted.get((OWNER, asked[0]["message_id"])) == DONE_TTL)
 
             # ── 8в. Бот вышел — хвосты из покинутой группы вопросов не порождают ──
             sent_before = len(bot.sent)
@@ -1941,6 +1966,10 @@ def check_group_guard():
                    "сообщили без группы и того, кто удалил)",
                    len(new) == 1 and "Меня удалили из группы «Своя»" in new[0]["text"]
                    and "Удалил: Чужой (@stranger)" in new[0]["text"])
+            if new:
+                expect(f"«Меня удалили из группы» не исчезает через 5 минут: срок "
+                       f"{deleted.get((OWNER, new[0]['message_id']))}",
+                       deleted.get((OWNER, new[0]["message_id"])) == DONE_TTL)
             sent_before = len(bot.sent)
             await app.process_update(my_status(OWN2, "Своя вторая", person(OWNER, "Максим"),
                                                "member", "left"))
@@ -1974,6 +2003,9 @@ def check_group_guard():
                str(FOREIGN) not in gg._pending())
         expect("после «✅ Остаться» вопрос не сменился итогом — кнопки остались бы висеть",
                bool(q.edited) and "Остаюсь" in q.edited[-1])
+        expect(f"итог «✅ Остаюсь» не исчезает через 5 минут: срок "
+               f"{deleted.get((OWNER, q.message.message_id))}",
+               deleted.get((OWNER, q.message.message_id)) == DONE_TTL)
 
         q = _Query(f"grp:leave:{UNKNOWN}")
         await gg.handle_group_callback(q, ctx, q.data, OWNER)
@@ -1982,6 +2014,9 @@ def check_group_guard():
         expect("после «🚪 Выйти» группа осталась ждать решения", str(UNKNOWN) not in gg._pending())
         expect("после «🚪 Выйти» вопрос не сменился итогом",
                bool(q.edited) and "Вышел из «Незнакомая»" in q.edited[-1])
+        expect(f"итог «🚪 Вышел из…» не исчезает через 5 минут: срок "
+               f"{deleted.get((OWNER, q.message.message_id))}",
+               deleted.get((OWNER, q.message.message_id)) == DONE_TTL)
 
         # Бота удалили раньше, чем владелец нажал «Остаться».
         gg._mark_asked(GONE, "Ушедшая")
@@ -1992,6 +2027,9 @@ def check_group_guard():
                "рвался бы туда", not hist.is_known_chat(GONE))
         expect("владельцу не сказали, что бота в той группе уже нет",
                bool(q.edited) and "уже нет" in q.edited[-1])
+        expect(f"итог «🚪 Меня уже нет…» не исчезает через 5 минут: срок "
+               f"{deleted.get((OWNER, q.message.message_id))}",
+               deleted.get((OWNER, q.message.message_id)) == DONE_TTL)
 
         # Telegram не ответил — решение не должно ни засчитаться, ни пропасть.
         gg._mark_asked(NETFAIL, "Без связи")
@@ -2005,6 +2043,9 @@ def check_group_guard():
                str(NETFAIL) in gg._pending())
         expect("Telegram не ответил на «Остаться», а владельцу не сказали нажать ещё раз",
                bool(q.alerts) and "ещё раз" in q.alerts[-1])
+        expect("Telegram не ответил на «Остаться», а вопрос поставлен на самоудаление — "
+               "решение не принято, и кнопки пропали бы",
+               (OWNER, q.message.message_id) not in deleted)
         bot.member_error = None
 
         with hist._lock:
@@ -2019,17 +2060,20 @@ def check_group_guard():
 
     saved_cfg_admins, saved_roles_admins = config.ADMIN_IDS, roles.ADMIN_IDS
     saved_time = gg.time
+    saved_schedule_delete = gg.schedule_delete
     saved_settings = {key: hist.get_setting(key, None)
                       for key in (gg.PENDING_KEY, quiz_daily.ACTIVE_KEY)}
     config.ADMIN_IDS = [OWNER]
     roles.ADMIN_IDS = (OWNER,)
     clock = _Clock()
     gg.time = clock
+    gg.schedule_delete = _record_delete
     try:
         asyncio.run(scenario(clock))
     finally:
         config.ADMIN_IDS, roles.ADMIN_IDS = saved_cfg_admins, saved_roles_admins
         gg.time = saved_time
+        gg.schedule_delete = saved_schedule_delete
         with hist._lock:
             conn = hist._get_connection()
             conn.executemany("DELETE FROM known_chats WHERE chat_id = ?",

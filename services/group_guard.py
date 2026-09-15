@@ -45,6 +45,7 @@ from telegram.ext import ApplicationHandlerStop
 
 from database.history import (forget_chat, get_setting, is_known_chat,
                               remember_chat, set_setting)
+from utils import schedule_delete
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,15 @@ PENDING_KEY = "group_guard_pending"
 REASK_SEC = 24 * 3600
 
 _GROUP_TYPES = ("group", "supergroup")
+
+# Сколько живут в личке владельца сообщения, по которым решать уже нечего:
+# итоги кнопок («Вышел», «Остаюсь», «Меня уже нет»), снятые при переезде
+# группы вопросы и «Меня удалили из группы» (15.09.2026, просьба Максима).
+# Вопросы, ЖДУЩИЕ решения, не удаляются никогда — с ними пропали бы кнопки.
+# ⚠️ Таймер живёт в памяти процесса (utils.schedule_delete): перезапуск бота
+# в эти минуты оставит сообщение висеть. Telegram к тому же не даёт боту
+# удалить сообщение старше 48 часов.
+DONE_TTL_SEC = 5 * 60
 
 
 # ─── заслон: пускать ли обновление дальше ───────────────────────────
@@ -168,13 +178,17 @@ async def _retarget(bot, rec: dict, new_id: int) -> None:
 
 
 async def _retire(bot, rec: dict, text: str) -> None:
-    """Снимает уже отправленные вопросы: новый текст вместо старого, без кнопок."""
+    """
+    Снимает уже отправленные вопросы: новый текст вместо старого, без кнопок.
+    Решать по снятому вопросу нечего — через DONE_TTL_SEC он исчезает.
+    """
     for owner_id, message_id in rec.get("msgs") or ():
         try:
             await bot.edit_message_text(chat_id=owner_id, message_id=message_id,
                                         text=text, parse_mode=ParseMode.HTML)
         except Exception as e:
             logger.debug("%s Не удалось снять вопрос %s: %s", _ICON, message_id, e)
+        schedule_delete(bot, owner_id, message_id, DONE_TTL_SEC)
 
 
 async def _remind_owner(bot, chat) -> None:
@@ -260,13 +274,23 @@ async def _on_removed(bot, chat, actor) -> None:
     # сам бот: кнопка «🚪 Выйти» тоже порождает это событие.
     if not was_own or actor is None or roles.is_owner(actor.id) or actor.id == bot.id:
         return
-    from handlers.admin.common import _notify_owners
-    await _notify_owners(
-        bot,
-        f"👋 <b>Меня удалили из группы «{html.escape(title)}»</b>\n"
-        f"Удалил: {html.escape(_who(actor))}\n"
-        f"Вопрос дня и дайджест туда больше не идут.",
-    )
+    import config
+    text = (f"👋 <b>Меня удалили из группы «{html.escape(title)}»</b>\n"
+            f"Удалил: {html.escape(_who(actor))}\n"
+            f"Вопрос дня и дайджест туда больше не идут.")
+    # Своя рассылка, а не handlers.admin.common._notify_owners: тому не нужен
+    # номер отправленного сообщения, а здесь он нужен — через DONE_TTL_SEC
+    # сообщение убирается, как и прочие итоги этого раздела.
+    for owner_id in config.ADMIN_IDS:
+        try:
+            sent = await bot.send_message(chat_id=owner_id, text=text,
+                                          parse_mode=ParseMode.HTML)
+        except Exception as e:
+            logger.debug("%s Не удалось сообщить владельцу %s об удалении: %s",
+                         _ICON, owner_id, e)
+            continue
+        if getattr(sent, "message_id", None):
+            schedule_delete(bot, owner_id, sent.message_id, DONE_TTL_SEC)
 
 
 def forget_group(chat_id: int) -> bool:
@@ -478,7 +502,7 @@ async def handle_group_callback(query, context, data: str, user_id: int) -> None
             # Бота удалили раньше, чем владелец решил, — оставаться негде.
             forget_group(target)
             await query.answer()
-            await _finish(query, f"{_ICON} Меня уже нет в «{shown}» — оставаться негде.")
+            await _finish(bot, query, f"{_ICON} Меня уже нет в «{shown}» — оставаться негде.")
             return
         remember_chat(target, "" if title == str(target) else title)
         _drop_pending(target)
@@ -486,7 +510,7 @@ async def handle_group_callback(query, context, data: str, user_id: int) -> None
         logger.info("%s Владелец %s оставил меня в группе «%s» (%s)",
                     _ICON, user_id, title, target)
         await query.answer("✅ Остаюсь")
-        await _finish(query, f"✅ Остаюсь в «{shown}» — работаю там, как в ваших группах.")
+        await _finish(bot, query, f"✅ Остаюсь в «{shown}» — работаю там, как в ваших группах.")
         return
 
     if action == "leave":
@@ -507,7 +531,7 @@ async def handle_group_callback(query, context, data: str, user_id: int) -> None
         logger.info("%s Владелец %s вывел меня из группы «%s» (%s)",
                     _ICON, user_id, title, target)
         await query.answer()
-        await _finish(query, result)
+        await _finish(bot, query, result)
         return
 
     await query.answer()
@@ -527,12 +551,17 @@ async def _bot_state(bot, chat_id: int):
     return _is_in(member)
 
 
-async def _finish(query, text: str) -> None:
+async def _finish(bot, query, text: str) -> None:
     """
-    Меняет вопрос на итог и убирает кнопки. Двойное нажатие даёт ошибку
-    Telegram «Message is not modified» — она здесь глушится.
+    Меняет вопрос на итог, убирает кнопки и ставит итог на удаление через
+    DONE_TTL_SEC. Двойное нажатие даёт ошибку Telegram «Message is not
+    modified» — она здесь глушится (второе удаление того же сообщения тоже
+    тихо ничего не сделает).
     """
     try:
         await query.edit_message_text(text, parse_mode=ParseMode.HTML)
     except Exception as e:
         logger.debug("%s Не удалось обновить вопрос о группе: %s", _ICON, e)
+    msg = query.message
+    if msg is not None:
+        schedule_delete(bot, msg.chat_id, msg.message_id, DONE_TTL_SEC)
