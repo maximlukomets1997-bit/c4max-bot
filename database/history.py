@@ -69,7 +69,7 @@ from .chat import (get_history, get_history_length, get_user_usage,
 from .groups import (save_group_message, update_last_group_message_text,
                      set_proactive_reset_mark, get_recent_group_messages,
                      delete_old_group_messages, remember_chat, get_known_chats,
-                     get_group_messages_between)
+                     is_known_chat, forget_chat, get_group_messages_between)
 
 # ─── люди: дела, персональные настройки, персонал ───────────────────
 from .people import (dossier_add_message, dossier_add_mute, dossier_add_linkdel,

@@ -429,6 +429,13 @@ def check_permissions():
         expect_press("модератор с «карточки» → список", MOD_CARDS, "usr:list", True)
         expect_press("модератор с «мут» → список карточек", MOD_MUTE, "usr:list", False)
 
+        # ── Чужие группы: где работать боту, решает только владелец (15.09.2026) ──
+        expect_press("владелец → «остаться в группе»", OWNER, "grp:stay:-1004332242579", True)
+        expect_press("модератор с «мут» → «выйти из группы»",
+                     MOD_MUTE, "grp:leave:-1004332242579", False)
+        expect_press("модератор с «карточки» → «остаться в группе»",
+                     MOD_CARDS, "grp:stay:-1004332242579", False)
+
         # ── Право зависит от ДЕЙСТВИЯ внутри кнопки ──
         # usr:do:<id>:<действие>:… — «мут» и «бан» это РАЗНЫЕ права.
         expect_press("модератор с «мут» → мут участнику", MOD_MUTE, "usr:do:9:mute:0:600", True)
@@ -1497,6 +1504,444 @@ def check_greeter():
 
     return problems, (f"{done} проверок: мут не считается вступлением, текст "
                       f"и срок приветствия, капчу жмёт только адресат")
+
+
+def check_group_guard():
+    """
+    Заслон от чужих групп (15.09.2026, services/group_guard.py).
+
+    ⚠️ РАДИ ЧЕГО. 12.09.2026 бота без ведома Максима добавили в чужую группу
+    «Ветеэм»: в тот же вечер он ответил там 99 раз, сам влезал в разговор,
+    потом три дня слал туда вопрос дня. Поломка заслона тихая В ОБЕ
+    СТОРОНЫ: пропускает чужих — выглядит как обычная работа бота; не пускает
+    своих — бот «просто молчит». Поэтому проверяются обе стороны.
+
+    ⚠️ ГОНЯЕТСЯ НАСТОЯЩАЯ РЕГИСТРАЦИЯ ОБРАБОТЧИКОВ (handlers.setup_handlers) в
+    настоящем приложении Telegram — поддельные только бот и сеть. Проверять
+    gate() отдельно значило бы не заметить, что его забыли зарегистрировать,
+    поставили не первым или сделали неблокирующим, а это ровно те поломки,
+    при которых заслон молча становится дыркой. Все остальные обработчики
+    подменены записной книжкой «дошло»: ответы модели здесь не нужны, нужно
+    знать, прошло ли обновление дальше заслона.
+    """
+    import asyncio
+
+    import config
+    from telegram import Update
+    from telegram.error import Forbidden
+    from telegram.ext import ApplicationBuilder
+
+    from database import history as hist
+    from handlers import setup_handlers
+    from services import group_guard as gg
+    from services import quiz_daily, roles
+
+    problems = []
+    done = 0
+
+    def expect(title, ok):
+        nonlocal done
+        done += 1
+        if not ok:
+            problems.append(title)
+
+    OWNER, STRANGER, BOT = 555000111, 555000222, 555000999
+    OWN, OWN2, FOREIGN, UNKNOWN, JOIN_ONLY = (-1009990001, -1009990002, -1009990003,
+                                              -1009990004, -1009990005)
+    MINE, OLD_BASIC, NEW_SUPER, GONE, NETFAIL, FAILOPEN = (
+        -1009990006, -9990007, -1009990008, -1009990009, -1009990010, -1009990011)
+    ALL_CHATS = (OWN, OWN2, FOREIGN, UNKNOWN, JOIN_ONLY, MINE, OLD_BASIC, NEW_SUPER,
+                 GONE, NETFAIL, FAILOPEN)
+
+    # ── 0. Русское число в вопросе («4 человека») ──
+    for n, want in ((1, "участник"), (2, "участника"), (4, "участника"),
+                    (5, "участников"), (11, "участников"), (12, "участников"),
+                    (21, "участник"), (22, "участника"), (111, "участников")):
+        got = gg._plural(n, "участник", "участника", "участников")
+        expect(f"число {n}: вышло «{n} {got}», а должно «{n} {want}»", got == want)
+
+    class _User:
+        def __init__(self, uid, first_name, username=None):
+            self.id = uid
+            self.first_name = first_name
+            self.last_name = None
+            self.username = username
+
+    class _Member:
+        def __init__(self, status, user=None):
+            self.status = status
+            self.user = user
+            self.is_member = False
+
+    class _Bot:
+        """Telegram без сети: всё, что бот отправил, ложится в записную книжку."""
+        id = BOT
+        username = "C4_Max_bot"
+
+        def __init__(self):
+            self.sent = []
+            self.left = []
+            self.member_error = None
+
+        async def initialize(self):
+            pass
+
+        async def shutdown(self):
+            pass
+
+        async def send_message(self, chat_id, text, parse_mode=None, reply_markup=None, **kw):
+            self.sent.append({"chat_id": chat_id, "text": text, "markup": reply_markup})
+
+        async def get_chat_member_count(self, chat_id):
+            return 5            # Telegram считает и самого бота — людей четверо
+
+        async def get_chat_administrators(self, chat_id):
+            return [_Member("administrator", _User(STRANGER, "Чужой", "stranger")),
+                    _Member("creator", _User(777, "KRUPP <босс>", "deKRUPPde"))]
+
+        async def get_chat_member(self, chat_id, user_id):
+            if self.member_error is not None:
+                raise self.member_error
+            return _Member("member")
+
+        async def leave_chat(self, chat_id):
+            self.left.append(chat_id)
+            return True
+
+    class _Clock:
+        now = 1_800_000_000.0
+
+        def time(self):
+            return self.now
+
+    class _Query:
+        def __init__(self, data):
+            self.data = data
+            self.alerts = []
+            self.edited = []
+
+        async def answer(self, text="", show_alert=False):
+            self.alerts.append(text)
+
+        async def edit_message_text(self, text, parse_mode=None, **kw):
+            self.edited.append(text)
+
+    class _Ctx:
+        def __init__(self, bot):
+            self.bot = bot
+
+    # ── строители обновлений в том виде, в каком их присылает Telegram ──
+    ids = iter(range(1, 10_000))
+    DATE = 1_700_000_000
+
+    def person(uid, name, username=None, is_bot=False):
+        data = {"id": uid, "is_bot": is_bot, "first_name": name}
+        if username:
+            data["username"] = username
+        return data
+
+    def group(cid, title, kind="supergroup"):
+        return {"id": cid, "type": kind, "title": title}
+
+    def msg(cid, title, text="привет", kind="supergroup", **extra):
+        m = {"message_id": next(ids), "date": DATE, "chat": group(cid, title, kind),
+             "from": person(STRANGER, "Чужой", "stranger")}
+        if text is not None:
+            m["text"] = text
+        m.update(extra)
+        return Update.de_json({"update_id": next(ids), "message": m}, None)
+
+    def private_msg():
+        return Update.de_json({"update_id": next(ids), "message": {
+            "message_id": next(ids), "date": DATE, "text": "привет",
+            "chat": {"id": STRANGER, "type": "private", "first_name": "Чужой"},
+            "from": person(STRANGER, "Чужой", "stranger")}}, None)
+
+    def poll_answer():
+        # ⚠️ option_persistent_ids ОБЯЗАТЕЛЕН с библиотеки 22.8 (Bot API 9.6):
+        # без него на сервере (там 22.8) проверка срывалась бы на сборке
+        # обновления и откатывала выкатку, хотя дома, на 22.7, зеленела.
+        return Update.de_json({"update_id": next(ids), "poll_answer": {
+            "poll_id": "selftest-poll", "option_ids": [0], "option_persistent_ids": ["0"],
+            "user": person(STRANGER, "Чужой", "stranger")}}, None)
+
+    def button_in(cid, title):
+        return Update.de_json({"update_id": next(ids), "callback_query": {
+            "id": str(next(ids)), "chat_instance": "selftest", "data": "quiz_start",
+            "from": person(STRANGER, "Чужой", "stranger"),
+            "message": {"message_id": next(ids), "date": DATE, "text": "вопрос",
+                        "chat": group(cid, title)}}}, None)
+
+    def my_status(cid, title, actor, old, new):
+        me = person(BOT, "C4", "C4_Max_bot", is_bot=True)
+        return Update.de_json({"update_id": next(ids), "my_chat_member": {
+            "chat": group(cid, title), "from": actor, "date": DATE,
+            "old_chat_member": {"status": old, "user": me},
+            "new_chat_member": {"status": new, "user": me}}}, None)
+
+    async def scenario(clock):
+        app = (ApplicationBuilder().token("123456789:AAEeTestTokenForSelftestChecksOnly")
+               .updater(None).build())
+        setup_handlers(app)
+        bot = _Bot()
+        app.bot = bot
+
+        # ── 1. Как заслон зарегистрирован ──
+        guard_groups = [g for g, hs in app.handlers.items()
+                        if any(getattr(h, "callback", None) is gg.gate for h in hs)]
+        expect("заслон group_guard.gate не зарегистрирован в handlers/__init__.py — "
+               "чужие группы проходят без всякой проверки", len(guard_groups) == 1)
+        if len(guard_groups) != 1:
+            return
+        guard = guard_groups[0]
+        expect(f"заслон стоит в группе обработчиков {guard}, а раньше него есть другие — "
+               f"они увидят сообщения чужих групп", guard == min(app.handlers))
+        callbacks = [getattr(h, "callback", None) for h in app.handlers[guard]]
+        expect("событие «сменился мой статус» не стоит ПЕРЕД заслоном в его группе — "
+               "заслон съест событие «бота добавили», вопрос владельцу не уйдёт",
+               gg.on_my_chat_member in callbacks
+               and callbacks.index(gg.on_my_chat_member) < callbacks.index(gg.gate))
+        expect("заслон зарегистрирован НЕБЛОКИРУЮЩИМ — в таком ApplicationHandlerStop "
+               "не действует, и чужие сообщения проходят",
+               all(h.block is not False for h in app.handlers[guard]))
+
+        reached = []
+
+        async def _reached(update, context):
+            reached.append(update.update_id)
+
+        for g, handlers in app.handlers.items():
+            if g == guard:
+                continue
+            for h in handlers:
+                h.callback = _reached
+                h.block = True
+
+        async def passes(update):
+            before = len(reached)
+            await app.process_update(update)
+            return len(reached) > before
+
+        await app.initialize()
+        try:
+            # ── 2. Своя группа, личка, обновление без чата — проходят ──
+            hist.remember_chat(OWN, "Своя")
+            hist.remember_chat(OWN2, "Своя вторая")
+            expect("сообщение из СВОЕЙ группы не дошло до обработчиков — бот замолчит "
+                   "в группах Максима", await passes(msg(OWN, "Своя")))
+            expect("сообщение в ЛИЧКЕ не дошло до обработчиков", await passes(private_msg()))
+            expect("ответ на опрос (у него нет чата) не дошёл до обработчиков — очки "
+                   "викторины перестанут считаться", await passes(poll_answer()))
+            expect("о своей группе спросили владельца", not bot.sent)
+
+            # ── 3. Бота добавил чужой ──
+            await app.process_update(my_status(FOREIGN, "Ветеэм <тест>",
+                                               person(STRANGER, "Чужой", "stranger"),
+                                               "left", "member"))
+            expect("бота добавил ЧУЖОЙ, а группа сразу стала своей — ровно история "
+                   "«Ветеэм» 12.09", not hist.is_known_chat(FOREIGN))
+            asks = [s for s in bot.sent if s["chat_id"] == OWNER]
+            expect(f"владельцу ушло вопросов: {len(asks)}, а должен ровно один", len(asks) == 1)
+            if asks:
+                text = asks[0]["text"]
+                expect("в вопросе нет строки «Добавил:» с именем добавившего",
+                       "Добавил: Чужой (@stranger)" in text)
+                expect("название группы в вопросе не экранировано — «<» в названии "
+                       "порвёт разметку, и вопрос не уйдёт вовсе",
+                       "<тест>" not in text and "&lt;тест&gt;" in text)
+                expect("в вопросе нет владельца группы или его имя не экранировано",
+                       "Владелец: KRUPP &lt;босс&gt; (@deKRUPPde)" in text)
+                expect("людей в группе посчитано вместе с ботом: Telegram отдал 5, "
+                       "людей 4", "4 человека" in text)
+                rows = getattr(asks[0]["markup"], "inline_keyboard", None) or ()
+                datas = [b.callback_data for row in rows for b in row]
+                expect(f"кнопки под вопросом не те: {datas}",
+                       datas == [f"grp:stay:{FOREIGN}", f"grp:leave:{FOREIGN}"])
+            expect("что владельца уже спросили, не записано в settings — после "
+                   "перезапуска бота вопрос пришёл бы заново", str(FOREIGN) in gg._pending())
+
+            # ── 4. Чужая группа пишет ──
+            sent_before = len(bot.sent)
+            expect("сообщение из ЧУЖОЙ группы дошло до обработчиков — бот отвечал бы "
+                   "там, как 12.09 в «Ветеэм»", not await passes(msg(FOREIGN, "Ветеэм <тест>")))
+            expect("кнопка под сообщением в чужой группе дошла до обработчиков",
+                   not await passes(button_in(FOREIGN, "Ветеэм <тест>")))
+            expect("чужая группа пишет — и владельцу вопрос на каждое сообщение, а не "
+                   "раз в сутки", len(bot.sent) == sent_before)
+            clock.now += gg.REASK_SEC + 1
+            await app.process_update(msg(FOREIGN, "Ветеэм <тест>"))
+            new = bot.sent[sent_before:]
+            expect("чужая группа пишет через сутки после вопроса, а напоминания нет",
+                   len(new) == 1)
+            if new:
+                expect("напоминание не помечено как напоминание — выглядит как вопрос "
+                       "о новой группе", "Напоминаю" in new[0]["text"])
+                expect("в напоминании потерялось, кто добавил бота, — хотя в первом "
+                       "вопросе это было известно", "Добавил: Чужой (@stranger)" in new[0]["text"])
+
+            # ── 5. О группе узнали по сообщению (событие о добавлении потерялось) ──
+            sent_before = len(bot.sent)
+            expect("сообщение из НЕЗНАКОМОЙ группы дошло до обработчиков",
+                   not await passes(msg(UNKNOWN, "Незнакомая")))
+            new = bot.sent[sent_before:]
+            expect("о незнакомой группе не спросили владельца — бот молчал бы там без "
+                   "конца, а Максим не знал бы почему",
+                   len(new) == 1 and "Кто добавил — не знаю" in new[0]["text"])
+
+            # ── 6. Служебное «добавил бота» — второго вопроса нет ──
+            sent_before = len(bot.sent)
+            joined = msg(JOIN_ONLY, "Только вступление", text=None,
+                         new_chat_members=[person(BOT, "C4", "C4_Max_bot", is_bot=True)])
+            expect("служебное «добавил бота» из чужой группы дошло до обработчиков",
+                   not await passes(joined))
+            expect("на служебное «добавил бота» ушёл вопрос «кто добавил — не знаю» — "
+                   "рядом с событием о добавлении было бы два вопроса об одной группе",
+                   len(bot.sent) == sent_before)
+
+            # ── 7. Бота добавил владелец ──
+            sent_before = len(bot.sent)
+            await app.process_update(my_status(MINE, "Моя новая", person(OWNER, "Максим"),
+                                               "left", "member"))
+            expect("бота добавил ВЛАДЕЛЕЦ, а группа не стала своей — бот молчал бы в "
+                   "группе Максима", hist.is_known_chat(MINE))
+            expect("бота добавил владелец, а его всё равно спросили",
+                   len(bot.sent) == sent_before)
+            expect("сообщение из группы, куда бота добавил владелец, не дошло до обработчиков",
+                   await passes(msg(MINE, "Моя новая")))
+
+            # ── 8. Своя группа стала супергруппой ──
+            hist.remember_chat(OLD_BASIC, "Переезжающая")
+            sent_before = len(bot.sent)
+            await app.process_update(msg(NEW_SUPER, "Переезжающая", text=None,
+                                         migrate_from_chat_id=OLD_BASIC))
+            expect("своя группа стала супергруппой, а новый номер не стал своим — бот "
+                   "замолчал бы после переезда", hist.is_known_chat(NEW_SUPER))
+            expect("старый номер переехавшей группы остался в списке — вопрос дня рвался "
+                   "бы в мёртвую группу", not hist.is_known_chat(OLD_BASIC))
+            await app.process_update(msg(OLD_BASIC, "Переезжающая", text=None, kind="group",
+                                         migrate_to_chat_id=NEW_SUPER))
+            expect("о своей переехавшей группе спросили владельца",
+                   len(bot.sent) == sent_before)
+
+            # ── 9. Бота удалили ──
+            quiz_daily.remember(OWN, {"message_id": 1, "poll_id": "selftest-poll"})
+            sent_before = len(bot.sent)
+            await app.process_update(my_status(OWN, "Своя", person(STRANGER, "Чужой", "stranger"),
+                                               "member", "left"))
+            expect("бота удалили из своей группы, а она осталась в списке — вопрос дня "
+                   "и дайджест шли бы туда дальше", not hist.is_known_chat(OWN))
+            expect("бота удалили, а запись о вопросе дня той группы осталась висеть",
+                   str(OWN) not in quiz_daily.active())
+            new = bot.sent[sent_before:]
+            expect("бота удалил из своей группы чужой, а владельцу не сообщили (или "
+                   "сообщили без группы и того, кто удалил)",
+                   len(new) == 1 and "Меня удалили из группы «Своя»" in new[0]["text"]
+                   and "Удалил: Чужой (@stranger)" in new[0]["text"])
+            sent_before = len(bot.sent)
+            await app.process_update(my_status(OWN2, "Своя вторая", person(OWNER, "Максим"),
+                                               "member", "left"))
+            expect("владелец сам удалил бота, а группа осталась в списке",
+                   not hist.is_known_chat(OWN2))
+            expect("владелец сам удалил бота — и получил об этом сообщение",
+                   len(bot.sent) == sent_before)
+
+            # ── 10. Сбой проверки пропускает, а не запирает ──
+            real = gg.is_known_chat
+
+            def _broken(chat_id):
+                raise RuntimeError("база не ответила")
+
+            gg.is_known_chat = _broken
+            try:
+                expect("проверка группы сломалась — и сообщение не прошло: сбой заслона "
+                       "обязан пропускать, иначе бот замолчит во всех группах сразу",
+                       await passes(msg(FAILOPEN, "Любая")))
+            finally:
+                gg.is_known_chat = real
+        finally:
+            await app.shutdown()
+
+        # ── 11. Кнопки «✅ Остаться» и «🚪 Выйти» ──
+        ctx = _Ctx(bot)
+        q = _Query(f"grp:stay:{FOREIGN}")
+        await gg.handle_group_callback(q, ctx, q.data, OWNER)
+        expect("«✅ Остаться» не сделал группу своей", hist.is_known_chat(FOREIGN))
+        expect("после «✅ Остаться» группа осталась ждать решения — напоминания шли бы дальше",
+               str(FOREIGN) not in gg._pending())
+        expect("после «✅ Остаться» вопрос не сменился итогом — кнопки остались бы висеть",
+               bool(q.edited) and "Остаюсь" in q.edited[-1])
+
+        q = _Query(f"grp:leave:{UNKNOWN}")
+        await gg.handle_group_callback(q, ctx, q.data, OWNER)
+        expect("«🚪 Выйти» не вывел бота из группы", bot.left == [UNKNOWN])
+        expect("после «🚪 Выйти» группа в списке своих", not hist.is_known_chat(UNKNOWN))
+        expect("после «🚪 Выйти» группа осталась ждать решения", str(UNKNOWN) not in gg._pending())
+        expect("после «🚪 Выйти» вопрос не сменился итогом",
+               bool(q.edited) and "Вышел из «Незнакомая»" in q.edited[-1])
+
+        # Бота удалили раньше, чем владелец нажал «Остаться».
+        gg._mark_asked(GONE, "Ушедшая")
+        bot.member_error = Forbidden("bot is not a member of the supergroup chat")
+        q = _Query(f"grp:stay:{GONE}")
+        await gg.handle_group_callback(q, ctx, q.data, OWNER)
+        expect("«✅ Остаться» внёс в свои группу, откуда бота уже удалили — вопрос дня "
+               "рвался бы туда", not hist.is_known_chat(GONE))
+        expect("владельцу не сказали, что бота в той группе уже нет",
+               bool(q.edited) and "уже нет" in q.edited[-1])
+
+        # Telegram не ответил — решение не должно ни засчитаться, ни пропасть.
+        gg._mark_asked(NETFAIL, "Без связи")
+        bot.member_error = RuntimeError("сеть")
+        q = _Query(f"grp:stay:{NETFAIL}")
+        await gg.handle_group_callback(q, ctx, q.data, OWNER)
+        expect("Telegram не ответил на «Остаться», а группа всё равно стала своей",
+               not hist.is_known_chat(NETFAIL))
+        expect("Telegram не ответил на «Остаться», а группа пропала из ждущих решения — "
+               "напоминаний о ней больше не будет, хотя решение не принято",
+               str(NETFAIL) in gg._pending())
+        expect("Telegram не ответил на «Остаться», а владельцу не сказали нажать ещё раз",
+               bool(q.alerts) and "ещё раз" in q.alerts[-1])
+        bot.member_error = None
+
+        with hist._lock:
+            conn = hist._get_connection()
+            details = [r[0] for r in conn.execute(
+                "SELECT details FROM staff_log WHERE action = 'group' AND actor_id = ?",
+                (OWNER,)).fetchall()]
+        expect(f"в журнал персонала записано решений по группам: {len(details)}, а "
+               f"принято два (остаться и выйти)",
+               len(details) == 2 and any("остался" in d for d in details)
+               and any("вышел" in d for d in details))
+
+    saved_cfg_admins, saved_roles_admins = config.ADMIN_IDS, roles.ADMIN_IDS
+    saved_time = gg.time
+    saved_settings = {key: hist.get_setting(key, None)
+                      for key in (gg.PENDING_KEY, quiz_daily.ACTIVE_KEY)}
+    config.ADMIN_IDS = [OWNER]
+    roles.ADMIN_IDS = (OWNER,)
+    clock = _Clock()
+    gg.time = clock
+    try:
+        asyncio.run(scenario(clock))
+    finally:
+        config.ADMIN_IDS, roles.ADMIN_IDS = saved_cfg_admins, saved_roles_admins
+        gg.time = saved_time
+        with hist._lock:
+            conn = hist._get_connection()
+            conn.executemany("DELETE FROM known_chats WHERE chat_id = ?",
+                             [(c,) for c in ALL_CHATS])
+            conn.execute("DELETE FROM staff_log WHERE actor_id = ?", (OWNER,))
+            for key, value in saved_settings.items():
+                if value is None:
+                    conn.execute("DELETE FROM settings WHERE key = ?", (key,))
+                else:
+                    conn.execute("UPDATE settings SET value = ? WHERE key = ?", (value, key))
+            conn.commit()
+
+    return problems, (f"{done} проверок: своя группа и личка проходят, чужая и "
+                      f"незнакомая молчат, вопрос владельцу раз в сутки, добавил "
+                      f"владелец, переезд в супергруппу, удаление, сбой пропускает, "
+                      f"кнопки и журнал")
 
 
 def check_parsing():
@@ -2838,8 +3283,12 @@ def check_audit_codes():
     problems = []
     done = 0
 
-    # Все места, где пишут в журнал: панели бота и действия сайта.
+    # Все места, где пишут в журнал: панели бота, действия сайта и службы.
+    # ⚠️ Службы добавлены 15.09.2026: кнопки чужих групп пишут в журнал из
+    # services/group_guard.py, и без этой строки их код проверка не видела бы
+    # вовсе — пропала бы подпись, а проверка осталась бы зелёной.
     files = sorted(pathlib.Path(ROOT, "handlers", "admin").glob("*.py"))
+    files += sorted(pathlib.Path(ROOT, "services").glob("*.py"))
     files += [pathlib.Path(ROOT, "web", "actions.py")]
 
     # _audit(user_id, "код", …) / write_audit(…) / _staff_audit(…)
@@ -5016,6 +5465,7 @@ CHECKS = (
     ("копилка альбома — все кадры уходят модели", check_album_collect),
     ("фильтр ссылок — белый список и мут за повторы", check_link_filter),
     ("приветствие новичков и проверка «я не бот»", check_greeter),
+    ("чужие группы — бот молчит, пока владелец не решит", check_group_guard),
     ("разбор статей и вопросов викторины", check_parsing),
     ("отчёт — ни один провайдер не теряется", check_report_render),
     ("рассылка новостей — текст не пропадает", check_news_send),

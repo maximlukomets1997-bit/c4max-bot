@@ -1,4 +1,5 @@
-from telegram.ext import CommandHandler, MessageHandler, CallbackQueryHandler, ChatMemberHandler, InlineQueryHandler, PollAnswerHandler, filters
+from telegram import Update
+from telegram.ext import CommandHandler, MessageHandler, CallbackQueryHandler, ChatMemberHandler, InlineQueryHandler, PollAnswerHandler, TypeHandler, filters
 from .commands import cmd_start, cmd_help, cmd_clear, cmd_subscribe, cmd_unsubscribe, handle_unknown_command, log_incoming_command
 from .admin import cmd_prompt_set, cmd_prompt_add, cmd_prompt_reset, cmd_stats, cmd_mod, cmd_adm, cmd_rag, cmd_unmute, cmd_users, handle_callback_query, cmd_news_prompt_set, cmd_news_prompt_reset, cmd_rag_prompt_set, cmd_rag_prompt_reset, cmd_proactive_prompt_set, cmd_proactive_prompt_reset, cmd_author_prompt_set, cmd_author_prompt_reset, cmd_quiz_admin, handle_kb_document
 from .media import cmd_imagine
@@ -6,6 +7,7 @@ from .messages import handle_message, handle_photo, handle_voice, handle_video, 
 from .quiz import cmd_rank, handle_poll_answer
 from .tech import cmd_ttx, inline_ttx
 from services.greeter import on_chat_member
+from services.group_guard import gate as group_gate, on_my_chat_member
 
 
 async def _note_chat_activity(update, context):
@@ -109,3 +111,16 @@ def setup_handlers(application):
     # ПЕРВЫЙ подходящий обработчик, и filters.ALL рядом с регистратором команд
     # отобрал бы у него все команды — лог команд молча опустел бы.
     application.add_handler(MessageHandler(filters.ALL, _note_chat_activity), group=-2)
+
+    # Handler group=-3: 🚪 заслон от чужих групп (2026-09-15, services/group_guard.py).
+    # САМАЯ ПЕРВАЯ группа: обновление из группы, которую владелец не
+    # одобрял, дальше не идёт вовсе — ни в отметку активности, ни в лог
+    # команд, ни в ответы, ни в архив.
+    # ⚠️ ПОРЯДОК ВНУТРИ ГРУППЫ ВАЖЕН: событие «сменился статус самого бота»
+    # стоит ПЕРВЫМ. В одной группе срабатывает только первый подходящий
+    # обработчик, и заслон впереди съел бы событие «бота добавили» — вопрос
+    # владельцу не ушёл бы никогда.
+    # ⚠️ Оба БЛОКИРУЮЩИЕ (без block=False): в неблокирующем обработчике
+    # ApplicationHandlerStop не действует, и заслон молча стал бы дыркой.
+    application.add_handler(ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER), group=-3)
+    application.add_handler(TypeHandler(Update, group_gate), group=-3)

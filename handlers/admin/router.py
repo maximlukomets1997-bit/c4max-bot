@@ -767,6 +767,14 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await _handle_updates_callback(query, context, data, chat_id, user_id)
         return
 
+    # ── 🚪 Чужие группы (вопрос владельцу «остаться или выйти») ──────────
+    # Префикс grp:<действие>:<чат> — обработчик в services/group_guard.py.
+    # Стоит ПОСЛЕ гейта прав: `grp:` в таблице прав — только владелец.
+    if data.startswith("grp:"):
+        from services.group_guard import handle_group_callback
+        await handle_group_callback(query, context, data, user_id)
+        return
+
     # ── Панель модерации (/mod) ─────────────────────────────────────────
     # Префикс mod:<секция>:<действие> — задел под будущие ветки
     # (mod:mute:..., mod:ban:...). Сейчас реализована секция antispam.

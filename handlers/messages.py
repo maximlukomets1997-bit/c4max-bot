@@ -475,7 +475,8 @@ async def collect_group_message(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception as e:
         logger.debug("👥 Не удалось обновить личное дело: %s", e)
 
-    # Список групп бота (карточка пользователя: где выдавать мут/кик/бан).
+    # Список своих групп: обновляет название и время. Чужая группа сюда не
+    # попадёт — её сообщения останавливает заслон services/group_guard.py.
     try:
         from database.history import remember_chat
         remember_chat(chat.id, chat.title or "")
