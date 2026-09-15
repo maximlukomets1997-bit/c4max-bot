@@ -255,6 +255,30 @@ def _icon_of(model_name: str) -> str:
     return PROVIDER_ICONS.get(info.get("provider"), PROVIDER_ICON_FALLBACK)
 
 
+def _took(own: float, total: float = 0.0, what: str = "") -> str:
+    """
+    Время для строки «Ответ от …»: «7.0 с» — сколько работала САМА ответившая
+    модель, от начала её удачной попытки. Если по дороге были отказы (другой
+    модели или первой попытки этой же), в скобках добавляется весь перебор:
+    «7.0 с (всего с отказами 98.5 с)». total = 0 — отказов не было, скобок нет.
+    what — вид запроса, встаёт в те же скобки: «4.0 с (аудио, всего с отказами …)».
+
+    ⚠️ ДО 15.09.2026 В ЛОГ ШЛО ОДНО ЧИСЛО — ВРЕМЯ ВСЕЙ ОЧЕРЕДИ под именем
+    последней модели. Секундомер запускался один раз на весь перебор и при
+    переходе к запасной не сбрасывался: DeepSeek висела 90 с, Gemini 3.8 Flash
+    отвечала за 7 — в логе стояло «Ответ от gemini-3.8-flash за 98.9 с».
+    Запасные выглядели в десять раз медленнее, чем есть, а по этим числам
+    выбирали, кого ставить первым в очередь. К одному числу не возвращать.
+
+    Те же слова пометки — в журнале разговоров (services/chat_log.py::note_answer):
+    меняешь здесь — поменяй и там.
+    """
+    notes = [what] if what else []
+    if total:
+        notes.append(f"всего с отказами {total:.1f} с")
+    return f"{own:.1f} с" + (f" ({', '.join(notes)})" if notes else "")
+
+
 def thinking_level(provider: str) -> str:
     """
     Глубина раздумий провайдера — та, что выбрана кнопкой глубины раздумий
@@ -1391,7 +1415,8 @@ def _native_answer_with_thoughts(data: dict) -> str:
 
 def _gemini_chat_request(messages: list, kind: str = "текст", has_image: bool = False,
                          thinking_override: bool | None = None,
-                         chain_override: list[str] | None = None):
+                         chain_override: list[str] | None = None,
+                         timing: dict | None = None):
     """
     Запрос к моделям с устойчивой стратегией (цепочка, схема B):
       1. Активная модель: до 2 попыток.
@@ -1417,6 +1442,13 @@ def _gemini_chat_request(messages: list, kind: str = "текст", has_image: bo
     chain_override не передаёт по-прежнему НИКТО — механизм живой, но спит
     (оставлен на будущее: пригодится любой служебной проверке без размышлений).
 
+    timing (15.09.2026) — словарь, в который кладётся время запроса: "own" —
+    сколько работала ответившая модель (0, если не ответил никто), "total" —
+    весь перебор, если по дороге были отказы (иначе 0). Нужен тому, кто пишет
+    время своей строкой, — журналу разговоров «Сам в разговор». ⚠️ Засекать
+    время ВОКРУГ этого вызова нельзя: выйдет время всей очереди подстраховки
+    под именем последней модели (см. _took).
+
     Возвращает кортеж (data | None, used_model).
     data is None означает, что недоступны все варианты — решение, что показать
     пользователю, принимает вызывающий код (мягкое сообщение, без деталей ошибки).
@@ -1433,11 +1465,16 @@ def _gemini_chat_request(messages: list, kind: str = "текст", has_image: bo
     """
 
     failures = []          # [(модель, причина)] — для уведомления владельцу
+    # Секундомер ОДНОЙ попытки и счёт отказов по дороге — для строки лога (см. _took).
+    attempt_started = 0.0
+    refusals = 0
 
     def _try_model(model_name: str, attempts: int = 2):
+        nonlocal attempt_started, refusals
         provider = _provider_of(model_name)
         last_error = None
         for attempt in range(attempts):
+            attempt_started = time.perf_counter()
             try:
                 if provider == "qwen":
                     data = _qwen_chat_request(model_name, messages, thinking_override)
@@ -1494,6 +1531,7 @@ def _gemini_chat_request(messages: list, kind: str = "текст", has_image: bo
                 return response.json()
             except Exception as e:
                 last_error = e
+                refusals += 1
                 logger.warning(
                     "⚠️ Модель %s не ответила (попытка %s из %s, %s): %s%s",
                     model_name, attempt + 1, attempts, _err_code(e), _err_short(e), _err_body(e),
@@ -1596,6 +1634,15 @@ def _gemini_chat_request(messages: list, kind: str = "текст", has_image: bo
     for i, model_name in enumerate(chain):
         data = _try_model(model_name, attempts=(2 if model_name == active_model else 1))
         if data is not None:
+            # Секундомер останавливается СРАЗУ, до учёта и письма владельцу:
+            # письмо уходит в Telegram по сети, и до 15.09.2026 его время
+            # попадало во «время ответа» модели.
+            now = time.perf_counter()
+            own_sec = now - attempt_started
+            total_sec = (now - start) if refusals else 0.0
+            if timing is not None:
+                timing.update(own=own_sec, total=total_sec)
+            took = _took(own_sec, total_sec)
             # ⚠️ Учёт вызова — под своим try, как соседние записи расхода ниже.
             # Модель уже ответила, токены потрачены: сорвавшаяся запись в
             # статистику не вправе уронить функцию и отобрать у человека
@@ -1610,7 +1657,6 @@ def _gemini_chat_request(messages: list, kind: str = "текст", has_image: bo
             # а обход «слепой» модели отказом не является и копилку не трогает.
             _notify_models_failed(kind, failures, used_model=model_name,
                                   active_model=active_model)
-            elapsed = time.perf_counter() - start
             # Модель + время ответа + токены в одной строке.
             # контекст=вход, ответ=видимый текст, размышления=скрытые токены «думающих»
             # моделей, всего=полный расход. Размышления считаются двумя способами:
@@ -1643,8 +1689,8 @@ def _gemini_chat_request(messages: list, kind: str = "текст", has_image: bo
                     except Exception as e:
                         logger.warning("⚠️ Не удалось записать расход DeepSeek в БД: %s", e)
                 _hit = _u.get("prompt_cache_hit_tokens", 0) or 0
-                logger.info("%s Ответ от %s за %.1f с | контекст=%s (из кэша %s) | ответ=%s | размышления=%s | всего=%s | ≈$%.6f (%s)",
-                            _icon_of(model_name), model_name, elapsed, _pt, _hit, _ct, _think, _tt,
+                logger.info("%s Ответ от %s за %s | контекст=%s (из кэша %s) | ответ=%s | размышления=%s | всего=%s | ≈$%.6f (%s)",
+                            _icon_of(model_name), model_name, took, _pt, _hit, _ct, _think, _tt,
                             _cost or 0.0, "пик" if _peak else "вне пика")
             elif _provider_of(model_name) == "xiaomi":
                 # Xiaomi MiMo: точная стоимость по XIAOMI_PRICES (кэш из
@@ -1659,8 +1705,8 @@ def _gemini_chat_request(messages: list, kind: str = "текст", has_image: bo
                     except Exception as e:
                         logger.warning("⚠️ Не удалось записать расход Xiaomi в БД: %s", e)
                 _cached = (_u.get("prompt_tokens_details") or {}).get("cached_tokens", 0) or 0
-                logger.info("%s Ответ от %s за %.1f с | контекст=%s (из кэша %s) | ответ=%s | размышления=%s | всего=%s | ≈$%.6f",
-                            _icon_of(model_name), model_name, elapsed, _pt, _cached, _ct, _think, _tt, _cost or 0.0)
+                logger.info("%s Ответ от %s за %s | контекст=%s (из кэша %s) | ответ=%s | размышления=%s | всего=%s | ≈$%.6f",
+                            _icon_of(model_name), model_name, took, _pt, _cached, _ct, _think, _tt, _cost or 0.0)
             elif _provider_of(model_name) == "qwen":
                 # Qwen: точная стоимость по QWEN_PRICES (кэш из prompt_tokens_details,
                 # рассуждения оплачиваются как выход) — копим в settings для панели API.
@@ -1682,18 +1728,21 @@ def _gemini_chat_request(messages: list, kind: str = "текст", has_image: bo
                 except Exception as e:
                     logger.warning("⚠️ Не удалось списать токены Qwen в БД: %s", e)
                 _cached = (_u.get("prompt_tokens_details") or {}).get("cached_tokens", 0) or 0
-                logger.info("%s Ответ от %s за %.1f с | контекст=%s (из кэша %s) | ответ=%s | размышления=%s | всего=%s | ≈$%.6f",
-                            _icon_of(model_name), model_name, elapsed, _pt, _cached, _ct, _think, _tt, _cost or 0.0)
+                logger.info("%s Ответ от %s за %s | контекст=%s (из кэша %s) | ответ=%s | размышления=%s | всего=%s | ≈$%.6f",
+                            _icon_of(model_name), model_name, took, _pt, _cached, _ct, _think, _tt, _cost or 0.0)
             else:
-                logger.info("%s Ответ от %s за %.1f с | контекст=%s | ответ=%s | размышления=%s | всего=%s",
-                            _icon_of(model_name), model_name, elapsed, _pt, _ct, _think, _tt)
+                logger.info("%s Ответ от %s за %s | контекст=%s | ответ=%s | размышления=%s | всего=%s",
+                            _icon_of(model_name), model_name, took, _pt, _ct, _think, _tt)
             return data, model_name
         if i < len(chain) - 1:
             logger.warning("⚠️ Переключаюсь на запасную модель %s (активная %s не меняется)", chain[i + 1], active_model)
             time.sleep(1.5)
 
-    # Не ответил НИКТО — раньше владелец об этом не узнавал вовсе: человек
-    # получал заглушку, а в личку не приходило ничего (2026-08-18, исправлено).
+    # Не ответил НИКТО. Время — до письма владельцу, как и на удачном пути.
+    if timing is not None:
+        timing.update(own=0.0, total=time.perf_counter() - start)
+    # Раньше владелец об этом не узнавал вовсе: человек получал заглушку,
+    # а в личку не приходило ничего (2026-08-18, исправлено).
     _notify_models_failed(kind, failures, active_model=active_model)
     return None, active_model
 
@@ -1894,8 +1943,12 @@ def ask_gemini_audio(chat_id: int, user_id: int, audio_base64: str) -> str:
     headers = {"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY}
 
     audio_failures = []    # [(модель, причина)] — для уведомления владельцу
+    # Секундомер ОДНОЙ попытки и счёт отказов — как в текстовом пути (см. _took).
+    attempt_started = 0.0
+    refusals = 0
 
     def _try_audio(model_name: str, attempts: int = 2, timeout: int = GEMINI_TIMEOUT):
+        nonlocal attempt_started, refusals
         last_error = None
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
         # Просьба о размышлениях зависит от МОДЕЛИ, а payload общий на всю
@@ -1905,11 +1958,13 @@ def ask_gemini_audio(chat_id: int, user_id: int, audio_base64: str) -> str:
         if thinking:
             req["generationConfig"] = thinking
         for attempt in range(attempts):
+            attempt_started = time.perf_counter()
             try:
                 response = _http().post(url, json=req, headers=headers, timeout=timeout)
                 response.raise_for_status()
                 return response.json()
             except Exception as e:
+                refusals += 1
                 logger.warning(
                     "⚠️ Модель %s не ответила (попытка %s из %s, %s): %s%s",
                     model_name, attempt + 1, attempts, _err_code(e), _err_short(e), _err_body(e),
@@ -1940,7 +1995,7 @@ def ask_gemini_audio(chat_id: int, user_id: int, audio_base64: str) -> str:
 
     data = None
     used_model = active_model
-    elapsed = 0.0
+    took = ""
     start = time.perf_counter()
     # Общий потолок перебора (28.08.2026): без него потолки моделей
     # складывались и человек ждал до 4 минут — см. _DIRECT_AUDIO_BUDGET_SEC.
@@ -1955,7 +2010,8 @@ def ask_gemini_audio(chat_id: int, user_id: int, audio_base64: str) -> str:
         data = _try_audio(model_name, attempts=1, timeout=attempt_timeout)
         if data is not None:
             used_model = model_name
-            elapsed = time.perf_counter() - start
+            now = time.perf_counter()
+            took = _took(now - attempt_started, (now - start) if refusals else 0.0, "аудио")
             break
         if i < len(chain) - 1:
             logger.warning("⚠️ Переключаюсь на запасную модель %s (активная %s не меняется)", chain[i + 1], active_model)
@@ -1991,8 +2047,8 @@ def ask_gemini_audio(chat_id: int, user_id: int, audio_base64: str) -> str:
     total_tokens = usage.get("totalTokenCount", 0)
     thought_tokens = usage.get("thoughtsTokenCount", 0)
     # Модель + время ответа + токены в одной строке.
-    logger.info("%s Ответ от %s за %.1f с (аудио) | контекст=%s | размышления=%s | всего=%s",
-                _icon_of(used_model), used_model, elapsed, prompt_tokens, thought_tokens, total_tokens)
+    logger.info("%s Ответ от %s за %s | контекст=%s | размышления=%s | всего=%s",
+                _icon_of(used_model), used_model, took, prompt_tokens, thought_tokens, total_tokens)
 
     # В историю — без блока мыслей: он нужен только на экране, а в контексте
     # диалога занимал бы место (тот же порядок, что в ask_gemini).
@@ -2080,8 +2136,12 @@ def ask_gemini_video(chat_id: int, user_id: int, video_base64: str,
     headers = {"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY}
 
     video_failures = []    # [(модель, причина)] — для уведомления владельцу
+    # Секундомер ОДНОЙ попытки и счёт отказов — как в текстовом пути (см. _took).
+    attempt_started = 0.0
+    refusals = 0
 
     def _try_video(model_name: str, attempts: int = 1, timeout: int = VIDEO_TIMEOUT):
+        nonlocal attempt_started, refusals
         last_error = None
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
         # Конфиг размышлений — свой на каждое звено цепочки (см. _try_audio).
@@ -2090,11 +2150,13 @@ def ask_gemini_video(chat_id: int, user_id: int, video_base64: str,
         if thinking:
             req["generationConfig"] = thinking
         for attempt in range(attempts):
+            attempt_started = time.perf_counter()
             try:
                 response = _http().post(url, json=req, headers=headers, timeout=timeout)
                 response.raise_for_status()
                 return response.json()
             except Exception as e:
+                refusals += 1
                 logger.warning(
                     "⚠️ Модель %s не ответила на видео (попытка %s из %s, %s): %s%s",
                     model_name, attempt + 1, attempts, _err_code(e), _err_short(e), _err_body(e),
@@ -2125,7 +2187,7 @@ def ask_gemini_video(chat_id: int, user_id: int, video_base64: str,
 
     data = None
     used_model = active_model
-    elapsed = 0.0
+    took = ""
     start = time.perf_counter()
     # Общий потолок перебора (28.08.2026): без него потолки моделей
     # складывались и человек ждал до 12 минут — см. _DIRECT_VIDEO_BUDGET_SEC.
@@ -2140,7 +2202,8 @@ def ask_gemini_video(chat_id: int, user_id: int, video_base64: str,
         data = _try_video(model_name, attempts=1, timeout=attempt_timeout)
         if data is not None:
             used_model = model_name
-            elapsed = time.perf_counter() - start
+            now = time.perf_counter()
+            took = _took(now - attempt_started, (now - start) if refusals else 0.0, "видео")
             break
         if i < len(chain) - 1:
             logger.warning("⚠️ Переключаюсь на запасную модель %s (активная %s не меняется)",
@@ -2173,8 +2236,8 @@ def ask_gemini_video(chat_id: int, user_id: int, video_base64: str,
     prompt_tokens = usage.get("promptTokenCount", 0)
     total_tokens = usage.get("totalTokenCount", 0)
     thought_tokens = usage.get("thoughtsTokenCount", 0)
-    logger.info("%s Ответ от %s за %.1f с (видео) | контекст=%s | размышления=%s | всего=%s",
-                _icon_of(used_model), used_model, elapsed, prompt_tokens, thought_tokens, total_tokens)
+    logger.info("%s Ответ от %s за %s | контекст=%s | размышления=%s | всего=%s",
+                _icon_of(used_model), used_model, took, prompt_tokens, thought_tokens, total_tokens)
 
     # В контекст диалога пишем пометку с подписью пользователя, если она была, —
     # иначе в истории останется голое «[Видео]» без вопроса, к которому был ответ.
@@ -2976,27 +3039,31 @@ def ask_group_proactive(chat_id: int, bot_id: int, trigger_text: str,
     # Что уходит модели, показывает панель промптов (блок «📦 ЧТО УХОДИТ
     # МОДЕЛИ В РЕЖИМЕ „САМ В РАЗГОВОР“») — там же и живые размеры, а дословный
     # текст — в отдельном файле logs/chat (см. импорт chat_log выше).
-    started_at = time.perf_counter()
-    data, used_model = _gemini_chat_request(messages, kind="группа (сам)")
-    elapsed = time.perf_counter() - started_at
+    # ⚠️ ВРЕМЯ ОТДАЁТ САМА ЦЕПОЧКА, секундомера вокруг вызова здесь нет
+    # (15.09.2026). Он стоял до этого дня и засекал всю очередь подстраховки,
+    # а журнал подписывал её именем последней модели: «gemini-3.8-flash,
+    # 114.9 с», хотя сама она работала около 17 с — см. _took.
+    timing = {"own": 0.0, "total": 0.0}
+    data, used_model = _gemini_chat_request(messages, kind="группа (сам)", timing=timing)
     # Пишем ПОСЛЕ запроса, а не до: имя ответившей модели известно только
     # теперь — цепочка подстраховки могла увести запрос на запасную.
     chat_log.note_request(used_model or "—", "\n\n".join(log_parts))
     if data is None:
         # Все модели цепочки недоступны — молчим (тишина = штатный исход,
         # никакого SOFT_FAIL_MESSAGE в чат).
-        chat_log.note_answer(used_model or "—", elapsed,
-                             "(ни одна модель цепочки не ответила)")
+        chat_log.note_answer(used_model or "—", timing["own"],
+                             "(ни одна модель цепочки не ответила)", timing["total"])
         return None
 
     try:
         raw_answer = data["choices"][0]["message"]["content"].strip()
     except (KeyError, IndexError):
         logger.error("⚠️ Неожиданный формат ответа при проактивной проверке: %s", str(data)[:300])
-        chat_log.note_answer(used_model or "—", elapsed, "(неожиданный формат ответа)")
+        chat_log.note_answer(used_model or "—", timing["own"], "(неожиданный формат ответа)",
+                             timing["total"])
         return None
 
-    chat_log.note_answer(used_model or "—", elapsed, raw_answer)
+    chat_log.note_answer(used_model or "—", timing["own"], raw_answer, timing["total"])
 
     answer = compress_newlines(raw_answer)
 

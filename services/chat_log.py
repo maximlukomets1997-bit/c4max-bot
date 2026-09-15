@@ -158,9 +158,16 @@ def note_request(model: str, prompt: str) -> None:
     _write(f"── УХОДИТ МОДЕЛИ ({model}, {len(prompt)} симв.) ──\n{prompt}\n")
 
 
-def note_answer(model: str, seconds: float, answer: str) -> None:
+def note_answer(model: str, seconds: float, answer: str, total: float = 0.0) -> None:
     """
     Ответ модели: сама реплика или слово «ПРОПУСК».
+
+    seconds — сколько работала САМА ответившая модель; total — весь перебор
+    очереди подстраховки, если по дороге были отказы (0 — отказов не было):
+    «(gemini-3.8-flash, 7.0 с, всего с отказами 98.5 с)».
+    ⚠️ До 15.09.2026 сюда шло одно число — время всей очереди под именем
+    последней модели. Разбор и те же слова пометки — services/gemini.py::_took:
+    меняешь слова здесь — поменяй и там.
 
     ⚠️ РАЗМЫШЛЕНИЯ СРЕЗАЮТСЯ (решение Максима 2026-08-16). Блок <thought>
     бывает длиннее самой реплики в разы, а читают запись ради того, ЧТО бот
@@ -170,6 +177,8 @@ def note_answer(model: str, seconds: float, answer: str) -> None:
     """
     from utils_format import strip_thoughts
     took = f", {seconds:.1f} с" if seconds else ""
+    if total:
+        took += f", всего с отказами {total:.1f} с"
     _write(f"── ВЕРНУЛА МОДЕЛЬ ({model}{took}) ──\n"
            f"{strip_thoughts(answer) or '(пусто — весь ответ был размышлением)'}\n")
 

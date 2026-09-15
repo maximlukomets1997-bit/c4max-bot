@@ -4660,6 +4660,350 @@ def check_photo_route():
                       f"в цепочке нет слепых ни у кого, текст обходом не задет")
 
 
+def check_stopwatch():
+    """
+    Время в строке «Ответ от …» и в журнале разговоров — время САМОЙ ответившей
+    модели; после отказов весь перебор стоит рядом отдельным числом (15.09.2026).
+
+    ⚠️ Ради чего проверка существует. Секундомер запускался один раз на всю
+    очередь подстраховки и при переходе к запасной не сбрасывался: DeepSeek
+    висела 90 с, Gemini 3.8 Flash отвечала за 7 — в логе стояло «Ответ от
+    gemini-3.8-flash за 98.9 с». Ошибка жила в трёх очередях (текст, голосовое,
+    видео) и в журнале разговоров. Живьём её не поймать — подстраховка
+    включается только на отказе, — а по этим числам выбирали, кого ставить
+    первым в очередь.
+
+    ⚠️ Гоняются НАСТОЯЩИЕ очереди на поддельных часах: каждая «модель» двигает
+    их ровно на своё время. Сверяются СТРОКИ, которые ушли бы в лог и в журнал,
+    а не переменные внутри: число могло бы считаться верно, а в строку уходить
+    другое. Письмо владельцу тоже двигает часы — попадёт его время в перебор,
+    проверка это назовёт.
+
+    ⚠️ Ожидаемый перебор — до конца последней попытки по поддельным часам, а НЕ
+    сумма пауз, переписанная сюда: паузы между попытками — дело очереди, и
+    проверка секундомера не должна краснеть от их смены.
+
+    ⚠️ Поддельное письмо владельцу уходит ТОЛЬКО при отказах, как настоящее.
+    Иначе проверка ловила бы «время письма» там, где письма в жизни нет, —
+    и краснела бы на верных строках.
+    """
+    import requests
+    import config as cfg
+    from database import history as hist
+    from services import chat_log
+    from services import gemini as g
+
+    problems = []
+    done = 0
+    NOTIFY_SEC = 3.0          # сколько «идёт» письмо владельцу на поддельных часах
+    USER = -777031            # свой id: чужую переписку во временной базе не трогаем
+    MSG = [{"role": "user", "content": "неважно"}]
+
+    class Clock:
+        def __init__(self): self.t = 1000.0
+        def monotonic(self): return self.t
+        def perf_counter(self): return self.t
+        def sleep(self, s): self.t += s
+        def time(self): return 1700000000.0
+
+    clock = Clock()
+
+    class Log:
+        """Вместо логгера: строки ровно такими, какими ушли бы в лог."""
+        def __init__(self): self.lines = []
+
+        def _note(self, msg, *args, **kw):
+            # Настоящий logging на кривом формате не падает — не падаем и мы,
+            # но строку помечаем: разбор её не узнает и назовёт.
+            try:
+                self.lines.append(msg % args if args else msg)
+            except Exception:
+                self.lines.append(f"ОШИБКА ФОРМАТА СТРОКИ ЛОГА: {msg!r} % {args!r}")
+
+        debug = info = warning = error = exception = _note
+
+    log = Log()
+    written = []              # куски журнала разговоров
+    step_ends = []            # когда кончилась каждая попытка — по поддельным часам
+    answered = []             # кто из «моделей» ответил
+
+    # Поведение «моделей» по провайдерам: очередь исходов попыток (секунд,
+    # "ok" | "503" | "timeout"); последний исход повторяется. Провайдер без
+    # сценария отказывает сразу — неожиданный звонок не зависнет и не ответит.
+    script = {}
+
+    def _step(provider, model):
+        queue = script.get(provider) or [(0.0, "503")]
+        seconds, outcome = queue.pop(0) if len(queue) > 1 else queue[0]
+        clock.t += seconds
+        step_ends.append(clock.t)
+        if outcome == "timeout":
+            raise requests.exceptions.Timeout(f"{model}: подставной таймаут")
+        if outcome == "503":
+            raise requests.exceptions.HTTPError(f"503 Server Error: подставной отказ {model}")
+        answered.append(model)
+
+    # Один ответ на оба формата: OpenAI-совместимый (choices) и родной Gemini
+    # (candidates) — голосовое и видео читают второй.
+    def _answer_json():
+        return {
+            "choices": [{"message": {"content": "подставной ответ"}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            "candidates": [{"content": {"parts": [{"text": "подставной ответ"}]}}],
+            "usageMetadata": {"promptTokenCount": 10, "totalTokenCount": 15},
+        }
+
+    def _provider_request(provider):
+        def fake(model_name, messages, thinking_override=None):
+            _step(provider, model_name)
+            return _answer_json()
+        return fake
+
+    class _Resp:
+        @staticmethod
+        def raise_for_status():
+            pass
+
+        @staticmethod
+        def json():
+            return _answer_json()
+
+    class _Session:
+        @staticmethod
+        def post(url, json=None, **kw):
+            found = re.search(r"/models/([^:/]+):", url)
+            _step("gemini", found.group(1) if found else (json or {}).get("model", "?"))
+            return _Resp()
+
+    def _notify(kind, failures, **kw):
+        if failures:          # настоящее письмо без отказов не уходит
+            clock.t += NOTIFY_SEC
+
+    def run(fn):
+        """Один сценарий с чистого листа. Возвращает момент его начала."""
+        log.lines.clear()
+        written.clear()
+        step_ends.clear()
+        answered.clear()
+        t0 = clock.t
+        fn()
+        return t0
+
+    answer_line = re.compile(r"Ответ от (\S+) за (\d+\.\d) с(?: \(([^)]*)\))?")
+    seconds_in = re.compile(r"(\d+\.\d) с")
+
+    def from_log():
+        """(модель, своё время, весь перебор | None, скобки) из строки «Ответ от …»."""
+        lines = [ln for ln in log.lines if "Ответ от " in ln]
+        if len(lines) != 1:
+            return None, f"строк «Ответ от …» в логе {len(lines)}, а должна быть одна"
+        found = answer_line.search(lines[0])
+        if not found:
+            return None, f"строку лога не разобрать: {lines[0]!r}"
+        notes = found.group(3) or ""
+        total = None
+        for part in notes.split(", "):
+            sec = seconds_in.search(part)
+            if sec:
+                total = float(sec.group(1))
+        return (found.group(1), float(found.group(2)), total, notes), ""
+
+    def from_chat_log():
+        """(модель, своё время | None, весь перебор | None) из «ВЕРНУЛА МОДЕЛЬ (…)»."""
+        found = re.search(r"ВЕРНУЛА МОДЕЛЬ \((.*)\) ──", "".join(written))
+        if not found:
+            return None, "в журнале разговоров нет строки «ВЕРНУЛА МОДЕЛЬ»"
+        model, *parts = found.group(1).split(", ")
+        own = total = None
+        for part in parts:
+            sec = seconds_in.search(part)
+            if not sec:
+                continue
+            if part.strip() == sec.group(0):      # голое «7.0 с» — время самой модели
+                own = float(sec.group(1))
+            else:                                 # с подписью — весь перебор
+                total = float(sec.group(1))
+        return (model, own, total, ""), ""
+
+    def near(a, b):
+        return a is not None and b is not None and abs(a - b) < 0.05
+
+    def expect(title, parsed, err, model, own, t0=None):
+        """own — сколько работала ответившая (None — не ответил никто).
+        t0 — начало сценария, если по дороге были отказы: тогда в строке обязан
+        стоять весь перебор; без t0 отказов не было и второго числа быть не должно."""
+        nonlocal done
+        done += 2
+        if parsed is None:
+            problems.append(f"{title}: {err}")
+            return
+        got_model, got_own, got_total, _ = parsed
+        total = None
+        if t0 is not None:
+            if not step_ends:
+                problems.append(f"{title}: ни одна модель не вызывалась — перебора не было")
+                return
+            total = step_ends[-1] - t0
+        if model is not None and got_model != model:
+            problems.append(f"{title}: в строке стоит {got_model}, а ответила {model}")
+        if own is None:
+            if got_own is not None:
+                problems.append(f"{title}: не ответил никто, а записано время модели "
+                                f"{got_own} с — будто она ответила")
+        elif not near(got_own, own):
+            hint = ""
+            if total is not None and (near(got_own, total) or near(got_own, total + NOTIFY_SEC)):
+                hint = " — это время ВСЕЙ очереди подстраховки под именем последней модели"
+            problems.append(f"{title}: у ответившей модели записано "
+                            f"{'ничего' if got_own is None else f'{got_own} с'}, "
+                            f"а она работала {own:.1f} с{hint}")
+        if total is None:
+            if got_total is not None:
+                problems.append(f"{title}: отказов не было, а в строке стоит общее время "
+                                f"{got_total} с")
+        elif got_total is None:
+            problems.append(f"{title}: были отказы, а общего времени перебора в строке нет")
+        elif not near(got_total, total):
+            hint = " — в него попало письмо владельцу" if near(got_total, total + NOTIFY_SEC) else ""
+            problems.append(f"{title}: весь перебор записан как {got_total} с, "
+                            f"а занял {total:.1f} с{hint}")
+
+    def expect_label(title, parsed, label):
+        nonlocal done
+        done += 1
+        if parsed is not None and label not in parsed[3]:
+            problems.append(f"{title}: из строки пропала пометка «{label}»: ({parsed[3]})")
+
+    def model_of(provider):
+        return next((m for m, info in cfg.AVAILABLE_MODELS.items()
+                     if info.get("provider", "gemini") == provider), None)
+
+    # Медленная активная — любая не-Gemini: у неё запасные из Gemini, как в жизни.
+    slow = model_of("deepseek") or model_of("qwen") or model_of("xiaomi") or cfg.FALLBACK_MODEL
+    slow_provider = g._provider_of(slow)
+
+    def fallback_script(first_sec, first_outcome, answer_sec):
+        """Первая попытка медленной активной — first_*, запасная Gemini отвечает за answer_sec."""
+        script.clear()
+        if slow_provider == "gemini":
+            script["gemini"] = [(first_sec, first_outcome), (answer_sec, "ok")]
+        else:
+            script[slow_provider] = [(first_sec, first_outcome)]
+            script["gemini"] = [(answer_sec, "ok")]
+
+    saved = {name: getattr(g, name) for name in (
+        "time", "logger", "_http", "_qwen_chat_request", "_deepseek_chat_request",
+        "_xiaomi_chat_request", "_notify_models_failed", "_notify_chain_dead",
+        "_build_proactive_parts", "RAG_ENABLED")}
+    saved_hist = {name: getattr(hist, name) for name in (
+        "register_api_call", "add_provider_cost", "spend_qwen_tokens", "add_messages")}
+    saved_write = chat_log._write
+    saved_active = hist.get_setting("active_model", "")
+    try:
+        g.time = clock
+        g.logger = log
+        g._http = lambda: _Session()
+        g._qwen_chat_request = _provider_request("qwen")
+        g._deepseek_chat_request = _provider_request("deepseek")
+        g._xiaomi_chat_request = _provider_request("xiaomi")
+        g._notify_models_failed = _notify
+        g._notify_chain_dead = lambda *a, **kw: None
+        g._build_proactive_parts = lambda *a, **kw: (["характер"], "стенограмма", ["запрос"])
+        # Поиск по базе на голосовом и видео сам зовёт модели — здесь он лишний шум.
+        g.RAG_ENABLED = False
+        for name in saved_hist:
+            setattr(hist, name, lambda *a, **kw: None)
+        chat_log._write = written.append
+
+        # ── 1. Ответила сама активная: время прежнее, скобок нет ──
+        # Каждый провайдер пишет СВОЮ строку лога — проверяются все четыре.
+        for provider in ("deepseek", "qwen", "xiaomi", "gemini"):
+            model = cfg.FALLBACK_MODEL if provider == "gemini" else model_of(provider)
+            if not model:
+                continue
+            hist.set_setting("active_model", model)
+            script.clear()
+            script[provider] = [(5.0, "ok")]
+            run(lambda: g._gemini_chat_request(MSG, kind="проверка"))
+            parsed, err = from_log()
+            expect(f"текст, {model} ответила сама", parsed, err, model, 5.0)
+
+        # ── 2. Активная зависла, ответила запасная ──
+        hist.set_setting("active_model", slow)
+        fallback_script(90.0, "timeout", 7.0)
+        t0 = run(lambda: g._gemini_chat_request(MSG, kind="проверка"))
+        parsed, err = from_log()
+        expect("текст, запасная после зависшей активной", parsed, err,
+               answered[-1] if answered else None, 7.0, t0)
+
+        # ── 3. Первая попытка той же модели отказала, вторая ответила ──
+        hist.set_setting("active_model", cfg.FALLBACK_MODEL)
+        script.clear()
+        script["gemini"] = [(2.0, "503"), (5.0, "ok")]
+        t0 = run(lambda: g._gemini_chat_request(MSG, kind="проверка"))
+        parsed, err = from_log()
+        expect("текст, повтор той же модели после отказа", parsed, err,
+               cfg.FALLBACK_MODEL, 5.0, t0)
+
+        # ── 4–5. Голосовое и видео в личке ──
+        hist.set_setting("active_model", slow)
+        for label, ask, chain in (
+                ("аудио", lambda: g.ask_gemini_audio(USER, USER, "QQ"),
+                 [m for m in cfg.AUDIO_FALLBACK_CHAIN if m in cfg.AVAILABLE_MODELS]),
+                ("видео", lambda: g.ask_gemini_video(USER, USER, "QQ"),
+                 [m for m in cfg.VIDEO_FALLBACK_CHAIN
+                  if cfg.AVAILABLE_MODELS.get(m, {}).get("video")])):
+            script.clear()
+            script["gemini"] = [(4.0, "ok")]
+            run(ask)
+            parsed, err = from_log()
+            expect(f"{label}, ответила первая модель очереди", parsed, err,
+                   answered[-1] if answered else None, 4.0)
+            expect_label(f"{label}, ответила первая модель очереди", parsed, label)
+
+            if len(chain) < 2:
+                continue          # подстраховки нет — и перебора нет
+            script.clear()
+            script["gemini"] = [(30.0, "503"), (4.0, "ok")]
+            t0 = run(ask)
+            parsed, err = from_log()
+            expect(f"{label}, запасная после отказа", parsed, err,
+                   answered[-1] if answered else None, 4.0, t0)
+            expect_label(f"{label}, запасная после отказа", parsed, label)
+
+        # ── 6. Журнал разговоров «Сам в разговор» ──
+        hist.set_setting("active_model", slow)
+        fallback_script(90.0, "timeout", 7.0)
+        t0 = run(lambda: g.ask_group_proactive(-777032, 1, "повод"))
+        parsed, err = from_chat_log()
+        expect("журнал разговоров, запасная после зависшей активной", parsed, err,
+               answered[-1] if answered else None, 7.0, t0)
+
+        script.clear()
+        script[slow_provider] = [(5.0, "ok")]
+        run(lambda: g.ask_group_proactive(-777032, 1, "повод"))
+        parsed, err = from_chat_log()
+        expect("журнал разговоров, ответила сама активная", parsed, err, slow, 5.0)
+
+        script.clear()
+        script[slow_provider] = [(90.0, "timeout")]
+        script["gemini"] = [(2.0, "503")]
+        t0 = run(lambda: g.ask_group_proactive(-777032, 1, "повод"))
+        parsed, err = from_chat_log()
+        expect("журнал разговоров, не ответил никто", parsed, err, slow, None, t0)
+    finally:
+        for name, value in saved.items():
+            setattr(g, name, value)
+        for name, value in saved_hist.items():
+            setattr(hist, name, value)
+        chat_log._write = saved_write
+        hist.set_setting("active_model", saved_active)
+
+    return problems, (f"{done} проверок: текст у каждого провайдера, запасная после "
+                      f"зависания, повтор той же модели, голосовое, видео, журнал "
+                      f"разговоров; письмо владельцу в перебор не входит")
+
+
 CHECKS = (
     ("деньги — расчёт стоимости запросов", check_money),
     ("деньги — сам прайс не менялся", check_price_list),
@@ -4695,6 +5039,7 @@ CHECKS = (
     ("ручная правка счёта викторины", check_quiz_score),
     ("уведомления о базе знаний живут по сроку", check_rag_notice),
     ("фото уходит зрячей модели, а не в пустоту", check_photo_route),
+    ("секундомер — время ответившей модели, а не всей очереди", check_stopwatch),
 )
 
 
