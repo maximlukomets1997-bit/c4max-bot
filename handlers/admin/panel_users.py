@@ -1027,6 +1027,29 @@ def _target_name(target_id: int) -> str:
     return _display_name(info) if info else str(target_id)
 
 
+def target_name_with_nick(target_id: int) -> str:
+    """
+    Имя с ником в скобках — «Максим (@c4nightmare)», сырой текст без HTML.
+    Так подписана шапка карточки участника, и так же подписан мут, который бот
+    выдал сам (16.09.2026, просьба Максима: «вместо цифр ник как в карточках»).
+
+    ⚠️ ЗДЕСЬ, А НЕ У ЗВОНЯЩЕГО: правило «что показывать вместо человека» в
+    проекте одно на все экраны (`_display_name`). Собрать эту же строку на
+    месте — значит завести второе правило, которое разъедется с карточкой на
+    первой же правке.
+
+    Ника нет — остаётся одно имя. Имени нет — именем СТАНОВИТСЯ «@ник», и в
+    скобки второй раз он не берётся. Бот не знает о человеке ничего — остаётся
+    номер, как было до этой правки.
+    """
+    info = next((u for u in list_known_users(1000) if u["user_id"] == target_id), None)
+    if not info:
+        return str(target_id)
+    name = _display_name(info)
+    nick = info.get("username") or ""
+    return f"{name} (@{nick})" if nick and name != f"@{nick}" else name
+
+
 def _target_label(target_id: int) -> str:
     """Имя с id для логов."""
     return f"{_target_name(target_id)} ({target_id})"

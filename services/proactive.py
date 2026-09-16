@@ -232,16 +232,26 @@ async def _apply_mute(bot, chat_id: int, user_id: int | None, seconds: int,
     if not user_id:
         return False
     from services.antispam import mute_user, notify_owners_ai_mute
+    from handlers.admin.panel_users import target_name_with_nick
+
+    # ⚠️ ИМЯ, А НЕ НОМЕР (16.09.2026, просьба Максима). До этой правки сюда
+    # уходил str(user_id), и цифры видели ОБА получателя строки: владелец в
+    # письме «Бот сам выдал мут: 5288487947» и журнал наказаний, где такая
+    # запись стоит рядом с ручными мутами, подписанными по-человечески.
+    # Имя спрашиваем ОДИН раз и отдаём в оба места: разойтись они не должны.
+    name = target_name_with_nick(user_id)
 
     err = await mute_user(bot, chat_id, user_id, seconds,
-                          name=str(user_id), admin_name="бот (сам)",
+                          name=name, admin_name="бот (сам)",
                           actor_id=None, action="mute_ai")
     if err:
         logger.warning("🤖 Чат %s: бот решил замутить %s, но не вышло: %s", chat_id, user_id, err)
         return False
 
-    logger.info("🤖 Чат %s: бот сам выдал мут %s на %d сек", chat_id, user_id, seconds)
-    await notify_owners_ai_mute(bot, chat_id, user_id, str(user_id), seconds, trigger_text)
+    # В логе имя И номер: по имени понятно, о ком речь, по номеру ищется всё
+    # остальное про этого человека.
+    logger.info("🤖 Чат %s: бот сам выдал мут %s (%s) на %d сек", chat_id, name, user_id, seconds)
+    await notify_owners_ai_mute(bot, chat_id, user_id, name, seconds, trigger_text)
 
     # Сносим все кадры отправления. Порядок важен только для возвращаемого
     # признака: он про сообщение-триггер, на которое иначе пошёл бы Reply.

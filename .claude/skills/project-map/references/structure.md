@@ -35,7 +35,7 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 | `utils_format.py` | 313 | 9 | `strip_thoughts`, `thoughts_enabled`, `build_text_and_entities`, `send_formatted`, `convert_md`, `fits_caption`, `reply_md` |
 | `logging_setup.py` | 255 | 3 | `archive_old_logs`, `setup_logging` |
 | `preflight.py` | 719 | 0 | `check_imports`, `check_models`, `check_providers`, `check_tables`, `check_ranks`, `check_callbacks`, `check_panels`, `check_handlers`, `check_web`, `main` |
-| `selftest.py` | 5699 | 0 | проверки ПОВЕДЕНИЯ (28.08.2026), **36 групп** — перечислять их здесь перестали 08.09.2026: список рос вчетверо быстрее, чем его переписывали, и врал уже на четырнадцать имён. Живой список отдаёт сам файл — кортеж `CHECKS` в его конце, где рядом с каждой проверкой стоит её человеческое название; что каждая ловит, а что нет — `references/checks.md`. Отвечает на «правильно ли считает», тогда как `preflight.py` — на «запустится ли». Зовётся из `deploy.sh` и CI, красный откатывает выкатку |
+| `selftest.py` | 5699 | 0 | проверки ПОВЕДЕНИЯ (28.08.2026), **37 групп** — перечислять их здесь перестали 08.09.2026: список рос вчетверо быстрее, чем его переписывали, и врал уже на четырнадцать имён. Живой список отдаёт сам файл — кортеж `CHECKS` в его конце, где рядом с каждой проверкой стоит её человеческое название; что каждая ловит, а что нет — `references/checks.md`. Отвечает на «правильно ли считает», тогда как `preflight.py` — на «запустится ли». Зовётся из `deploy.sh` и CI, красный откатывает выкатку |
 | `reset_db.py` | 81 | 0 | `main` |
 | `watchdog_local.py` | 297 | 0 | `main` |
 
@@ -105,7 +105,7 @@ database.history import add_messages` работает как работал; т
 | `handlers/admin/router.py` | 807 | 2 | `handle_callback_query` — единственный роутер всех кнопок |
 | `handlers/admin/panel_main.py` | 544 | 4 | `send_stats_panel`, `send_api_panel`, `send_daily_report_panel`, `send_weekly_report_panel`, `cmd_stats`, `build_adm_keyboard`, `send_adm_panel`, `cmd_adm` |
 | `handlers/admin/panel_prompts.py` | 1326 | 6 | `send_prompt_files`, `send_prompts_panel`, `handle_prompt_reset`, `cmd_prompt_set/add/reset`, `cmd_news_prompt_set/reset`, `cmd_rag_prompt_set/reset`, `cmd_author_prompt_set/reset`, `cmd_proactive_prompt_set/reset` |
-| `handlers/admin/panel_users.py` | 1644 | 7 | `send_users_panel`, `send_user_card`, `cmd_users`, `handle_quiz_score_input` + правила счёта викторины, общие с сайтом (`_set_quiz_score`, `fix_quiz_misses`, `quiz_score_summary`, `_QUIZ_FIELDS`, `_QUIZ_SCORE_MAX`) |
+| `handlers/admin/panel_users.py` | 1644 | 7 | `send_users_panel`, `send_user_card`, `cmd_users`, `handle_quiz_score_input`, `target_name_with_nick` (имя человека с ником — одна подпись на карточку, журнал наказаний и письмо о муте от бота) + правила счёта викторины, общие с сайтом (`_set_quiz_score`, `fix_quiz_misses`, `quiz_score_summary`, `_QUIZ_FIELDS`, `_QUIZ_SCORE_MAX`) |
 | `handlers/admin/panel_rag.py` | 988 | 7 | `send_rag_panel`, `cmd_rag`, `handle_kb_document`, `handle_kb_test_query` (панель из трёх экранов: разделы → список раздела → настройки поиска) |
 | `handlers/admin/panel_mod.py` | 586 | 5 | `send_mod_panel`, `cmd_mod`, `cmd_unmute`, `MOD_ACTION_TITLES` и `MOD_ACTIONS_WITH_EVIDENCE` — названия видов записей журнала и список тех, у кого бывают улики; их же читает страница журналов на сайте |
 | `handlers/admin/panel_quiz.py` | 643 | 3 | `send_quiz_panel`, `cmd_quiz_admin` |

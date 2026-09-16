@@ -366,6 +366,115 @@ def check_mute_tag():
     return problems, f"{done} проверок: потолок, регистр, латиница, мысли, мусор"
 
 
+def check_ai_mute_name():
+    """
+    Мут от бота подписан человеком, а не номером (16.09.2026).
+
+    ⚠️ РАДИ ЧЕГО. Строку «🗣 Бот сам выдал мут: 5288487947» Максим читает в
+    личке, а такую же подпись получает запись журнала наказаний «🤚 мут от
+    бота» — в боте и на сайте. Из всех наказаний номер вместо имени стоял
+    ТОЛЬКО здесь: антифлуд, фильтр ссылок и ручной мут имя подставляют. Ошибка
+    тихая — бот работает, наказание выдано, просто по строке не понять, кого
+    наказали.
+
+    ⚠️ ГОНЯЕТСЯ НАСТОЯЩИЙ ПУТЬ ВЫДАЧИ (`proactive._apply_mute`), поддельные
+    только Telegram и получатели письма. Проверять `target_name_with_nick`
+    отдельно значило бы не заметить, что её забыли позвать или отдали имя
+    в письмо, а в журнал — по-прежнему номер: это и есть та поломка, ради
+    которой проверка написана.
+
+    ⚠️ ОЖИДАЕМЫЕ СТРОКИ ВЫПИСАНЫ ЗДЕСЬ РУКАМИ, а не собраны тем же кодом:
+    иначе обе стороны ошиблись бы одинаково и проверка позеленела бы на
+    любой подписи.
+    """
+    import asyncio
+
+    import config
+    from database import history as hist
+    from services import proactive
+
+    problems = []
+    done = 0
+
+    def expect(title, ok):
+        nonlocal done
+        done += 1
+        if not ok:
+            problems.append(title)
+
+    CHAT, OWNER, BOT_ID = -1009991001, 555100001, 555100999
+    # Трое: с именем и ником, только с ником, и вовсе не известный боту.
+    FULL, NICK_ONLY, STRANGER = 555100011, 555100012, 555100013
+    QUOTE = "Допизделся что-ли"
+
+    class _Bot:
+        """Telegram без сети: муты и письма ложатся в записную книжку."""
+        id = BOT_ID
+
+        def __init__(self):
+            self.sent = []
+            self.muted = []
+
+        async def restrict_chat_member(self, chat_id, user_id, permissions, until_date=None, **kw):
+            self.muted.append((chat_id, user_id))
+            return True
+
+        async def send_message(self, chat_id, text, reply_markup=None, **kw):
+            self.sent.append({"chat_id": chat_id, "text": text})
+            return True
+
+        async def delete_message(self, chat_id, message_id, **kw):
+            return True
+
+    saved_admins = config.ADMIN_IDS
+    try:
+        # Владелец нужен, чтобы письму было куда уйти: без получателей
+        # notify_owners_ai_mute выходит молча, и проверять было бы нечего.
+        config.ADMIN_IDS = (OWNER,)
+        hist.dossier_add_message(FULL, username="c4nightmare", first_name="Максим")
+        hist.dossier_add_message(NICK_ONLY, username="ghost", first_name="")
+
+        for uid, want in ((FULL, "Максим (@c4nightmare)"),
+                          (NICK_ONLY, "@ghost"),
+                          (STRANGER, str(STRANGER))):
+            bot = _Bot()
+            asyncio.run(proactive._apply_mute(bot, CHAT, uid, 600, QUOTE))
+
+            expect(f"мут {uid}: сам мут не выдан — проверять подпись не на чем",
+                   bot.muted == [(CHAT, uid)])
+
+            letters = [m["text"] for m in bot.sent if m["chat_id"] == OWNER]
+            expect(f"мут {uid}: владельцу не ушло письмо о муте от бота", len(letters) == 1)
+            if letters:
+                first = letters[0].splitlines()[0]
+                expect(f"мут {uid}: в письме «{first}», а ждали "
+                       f"«🗣 Бот сам выдал мут: {want} на 10 мин 0 сек.»",
+                       first == f"🗣 Бот сам выдал мут: {want} на 10 мин 0 сек.")
+                expect(f"мут {uid}: в письме пропала цитата, за которую наказали",
+                       QUOTE in letters[0])
+
+            entry = next((e for e in hist.get_recent_moderation_actions(10)
+                          if e["action"] == "mute_ai" and e["user_id"] == uid), None)
+            expect(f"мут {uid}: в журнале наказаний нет записи «мут от бота»",
+                   entry is not None)
+            if entry:
+                expect(f"мут {uid}: в журнале подпись «{entry['name']}», "
+                       f"а ждали «{want}»", entry["name"] == want)
+
+        # Отдельно: у известного человека номера в письме быть НЕ ДОЛЖНО —
+        # ровно с этого началась правка.
+        bot = _Bot()
+        asyncio.run(proactive._apply_mute(bot, CHAT, FULL, 600, QUOTE))
+        letter = next((m["text"] for m in bot.sent if m["chat_id"] == OWNER), "")
+        expect("мут известного человека: в письме остался его номер вместо имени",
+               str(FULL) not in letter)
+    finally:
+        config.ADMIN_IDS = saved_admins
+
+    return problems, (f"{done} проверок: имя с ником, один ник без скобок, "
+                      f"неизвестный остаётся номером; письмо и журнал наказаний")
+
+
 # ───────────────────────────────────────────────
 #  3. ПРАВА ДОСТУПА
 # ─────────────────────────────────────────────
@@ -5605,6 +5714,7 @@ CHECKS = (
     ("деньги — расчёт стоимости запросов", check_money),
     ("деньги — сам прайс не менялся", check_price_list),
     ("пометка мута — разбор ответа модели", check_mute_tag),
+    ("мут от бота подписан человеком, а не номером", check_ai_mute_name),
     ("права доступа — кнопки и иерархия", check_permissions),
     ("размышления модели не утекают в чат", check_thoughts),
     ("длинные ответы — разметка не разъезжается", check_long_answers),
