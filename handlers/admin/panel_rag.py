@@ -439,7 +439,14 @@ def _kb_card_keyboard(token: str, folder: str, confirm_delete: bool = False):
         InlineKeyboardButton("📝 Заменить", callback_data=f"kb_replace:{token}"),
         InlineKeyboardButton("🗑 Удалить", callback_data=f"kb_delete:{token}"),
     ])
-    rows.append([InlineKeyboardButton("⬅️ К списку", callback_data="kb_panel")])
+    # ⚠️ Обе кнопки возврата ПРИСЫЛАЮТ панель заново, а не перерисовывают
+    # карточку: карточка статьи — сообщение С ФАЙЛОМ, и текст у него сменить
+    # нельзя. Кнопка с обычным переходом между экранами (kb_open) здесь
+    # нажималась бы и молча ничего не делала.
+    rows.append([
+        InlineKeyboardButton("⬅️ К списку", callback_data="kb_panel"),
+        InlineKeyboardButton("⬅️ К разделам", callback_data="kb_sections"),
+    ])
     return InlineKeyboardMarkup(rows)
 
 
@@ -549,6 +556,18 @@ async def _handle_kb_callback(query, context, data: str, chat_id: int, user_id: 
         # трогаем): открыл статью из раздела «Корабли» — вернулся в «Корабли».
         # ⚠️ Ветка нужна явная: без неё kb_panel доходил до разбора токена,
         # не находил пустой токен в карте и всплывал ложным «Список устарел».
+        await query.answer()
+        await send_rag_panel(context.bot, chat_id, context)
+        return
+
+    if action == "kb_sections":
+        # «⬅️ К разделам» из карточки статьи (17.09.2026, просьба Максима):
+        # то же, что kb_panel, но экран сбрасывается на разделы.
+        # ⚠️ Панель ПРИСЫЛАЕТСЯ заново, а не перерисовывается на месте, как в
+        # ветке kb_open: карточка статьи — сообщение с файлом, менять её текст
+        # Telegram не даёт.
+        context.user_data["kb_screen"] = ""
+        context.user_data["kb_page"] = 0
         await query.answer()
         await send_rag_panel(context.bot, chat_id, context)
         return

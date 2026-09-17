@@ -2201,6 +2201,159 @@ def check_group_guard():
                       f"кнопки и журнал")
 
 
+def check_kb_card():
+    """
+    Кнопки карточки статьи в панели базы знаний (17.09.2026).
+
+    ⚠️ РАДИ ЧЕГО. Кнопка панели без своей ветки в обработчике нажимается и
+    МОЛЧА НИЧЕГО НЕ ДЕЛАЕТ: `preflight` сверяет кнопку только с общей веткой
+    роутера (приставка `kb_`), а что внутри панели — не видит никто.
+
+    ⚠️ Вторая половина — про саму карточку: это сообщение С ФАЙЛОМ, и
+    перерисовать его текстом, как остальные экраны панели, Telegram не даёт.
+    Кнопки возврата обязаны ПРИСЫЛАТЬ панель заново; сделанная «как на
+    соседних экранах» (kb_open), кнопка снова нажималась бы впустую.
+    """
+    import asyncio
+    import shutil
+    import tempfile
+
+    from database import history as hist
+    from handlers.admin import panel_rag as rag
+    import services.knowledge_store as ks
+
+    problems = []
+    done = 0
+
+    def expect(title, ok):
+        nonlocal done
+        done += 1
+        if not ok:
+            problems.append(title)
+
+    OWNER = 555000333
+    src = pathlib.Path(ROOT, "handlers", "admin", "panel_rag.py").read_text(encoding="utf-8")
+
+    # ── 1. Каждая кнопка карточки разбирается обработчиком ──
+    cards = {
+        "статья в базе": rag._kb_card_keyboard("7", "approved"),
+        "статья в очереди": rag._kb_card_keyboard("7", "pending"),
+        "подтверждение удаления": rag._kb_card_keyboard("7", "approved", confirm_delete=True),
+    }
+    actions = {}
+    for what, markup in cards.items():
+        for row in markup.inline_keyboard:
+            for button in row:
+                actions.setdefault(button.callback_data.partition(":")[0], what)
+    for action, what in sorted(actions.items()):
+        expect(f"кнопка «{action}» ({what}) не разбирается обработчиком панели базы "
+               f"знаний — нажатие молча ничего не сделает",
+               f'action == "{action}"' in src)
+    expect("в карточке статьи нет кнопки возврата к списку раздела",
+           "kb_panel" in actions)
+    expect("обработчик kb_sections есть, а кнопки «⬅️ К разделам» в карточке статьи "
+           "нет — возвращаться к разделам нечем", "kb_sections" in actions)
+
+    # ── 2. Поведение: что кнопки возврата делают на самом деле ──
+    art_dir = tempfile.mkdtemp(prefix="c4max-selftest-kbcard-")
+    saved_folders = dict(ks._FOLDERS)
+    ks._FOLDERS["pending"] = os.path.join(art_dir, "pending")
+    ks._FOLDERS["approved"] = os.path.join(art_dir, "approved")
+    os.makedirs(ks._FOLDERS["pending"], exist_ok=True)
+    os.makedirs(ks._FOLDERS["approved"], exist_ok=True)
+    with open(os.path.join(ks._FOLDERS["approved"], "Проверочный_танк.md"), "w",
+              encoding="utf-8") as f:
+        f.write("# Проверочный танк\n\nПроверочный танк — советский основной боевой "
+                "танк (ОБТ) X ранга в War Thunder Mobile. Статья для проверки.\n")
+
+    class _Bot:
+        """Telegram без сети: панель, которую бот прислал, ложится в записную книжку."""
+        def __init__(self):
+            self.sent = []
+            self._next_id = 700
+
+        async def send_message(self, chat_id, text, parse_mode=None, reply_markup=None, **kw):
+            self._next_id += 1
+            self.sent.append({"chat_id": chat_id, "text": text, "markup": reply_markup})
+
+            class _Sent:
+                message_id = self._next_id
+            return _Sent()
+
+        async def delete_message(self, chat_id, message_id):
+            return True
+
+    class _App:
+        def __init__(self):
+            self.bot_data = {}
+
+    class _Ctx:
+        def __init__(self, bot):
+            self.bot = bot
+            self.user_data = {}
+            self.application = _App()
+
+    class _Query:
+        def __init__(self):
+            self.edits = 0
+            self.answers = []
+
+        async def answer(self, text="", show_alert=False):
+            self.answers.append(text)
+
+        async def edit_message_text(self, *a, **kw):
+            self.edits += 1
+
+        async def edit_message_reply_markup(self, *a, **kw):
+            self.edits += 1
+
+    async def press(data: str, screen: str):
+        bot = _Bot()
+        ctx = _Ctx(bot)
+        ctx.user_data["kb_screen"] = screen
+        ctx.user_data["kb_page"] = 3
+        query = _Query()
+        await rag._handle_kb_callback(query, ctx, data, OWNER, OWNER)
+        return bot, ctx, query
+
+    def datas(markup):
+        rows = getattr(markup, "inline_keyboard", None) or ()
+        return [b.callback_data for row in rows for b in row]
+
+    try:
+        bot, ctx, query = asyncio.run(press("kb_sections", "ground"))
+        expect("«⬅️ К разделам» не открыл экран разделов — остался прежний раздел",
+               ctx.user_data.get("kb_screen") == "")
+        expect("«⬅️ К разделам» не сбросил номер страницы — на разделах он не нужен, "
+               "а в следующем разделе откроется пустая страница",
+               ctx.user_data.get("kb_page") == 0)
+        expect("«⬅️ К разделам» не прислал панель новым сообщением",
+               len(bot.sent) == 1)
+        expect("«⬅️ К разделам» попытался ПЕРЕРИСОВАТЬ карточку: это сообщение с "
+               "файлом, Telegram менять его текст не даёт — кнопка молча не сработает",
+               query.edits == 0)
+        if bot.sent:
+            expect(f"после «⬅️ К разделам» пришёл не экран разделов: {datas(bot.sent[0]['markup'])}",
+                   any(str(d).startswith("kb_open:") for d in datas(bot.sent[0]["markup"])))
+
+        bot, ctx, query = asyncio.run(press("kb_panel", "ground"))
+        expect("«⬅️ К списку» сменил раздел — он обязан вернуть в тот же, откуда "
+               "открыли статью", ctx.user_data.get("kb_screen") == "ground")
+        expect("«⬅️ К списку» не прислал панель новым сообщением", len(bot.sent) == 1)
+    finally:
+        ks._FOLDERS.clear()
+        ks._FOLDERS.update(saved_folders)
+        shutil.rmtree(art_dir, ignore_errors=True)
+        with hist._lock:
+            conn = hist._get_connection()
+            conn.execute("DELETE FROM bot_sent_messages WHERE chat_id = ?", (OWNER,))
+            conn.commit()
+
+    return problems, (f"{done} проверок: у каждой кнопки карточки есть обработчик, "
+                      f"«К разделам» открывает разделы и присылает панель заново, "
+                      f"«К списку» остаётся в своём разделе")
+
+
 def check_parsing():
     """
     Разбор статьи базы знаний и разбор вопроса викторины (02.09.2026).
@@ -5724,6 +5877,7 @@ CHECKS = (
     ("фильтр ссылок — белый список и мут за повторы", check_link_filter),
     ("приветствие новичков и проверка «я не бот»", check_greeter),
     ("чужие группы — бот молчит, пока владелец не решит", check_group_guard),
+    ("кнопки карточки статьи базы знаний", check_kb_card),
     ("разбор статей и вопросов викторины", check_parsing),
     ("отчёт — ни один провайдер не теряется", check_report_render),
     ("рассылка новостей — текст не пропадает", check_news_send),
