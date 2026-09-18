@@ -44,6 +44,7 @@ from config import (
     GEMINI_IMAGEN_API_KEY,
     QWEN_API_URL,
     QWEN_API_KEY,
+    QWEN_CHARS_PER_TOKEN,
     DEEPSEEK_API_URL,
     DEEPSEEK_API_KEY,
     DEEPSEEK_PRICES,
@@ -984,6 +985,44 @@ def _describe_video(video_base64: str, mime_type: str = "video/mp4",
     return ""
 
 
+def _charge_broken_stream(model_name: str, messages: list,
+                          reasoning_parts: list, answer_parts: list) -> int:
+    """
+    Списывает ОЦЕНКУ токенов из бесплатной квоты Qwen за ОБОРВАННЫЙ ответ
+    (18.09.2026). Возвращает списанное число (0 — не списывали).
+
+    ⚠️ ЗАЧЕМ. Обычный расход берётся из отчёта провайдера в конце ответа и точен
+    до токена. Оборвался поток (потолок GEMINI_STREAM_DEADLINE, разрыв связи) —
+    отчёта нет, а Alibaba токены из квоты уже вычла. Сверка с консолью Model
+    Studio 18.09.2026: у qwen3.7-plus бот показывал на 92 тысячи токенов больше
+    правды, у qwen3.8-max — на 81 тысячу, и ровно у этих двух моделей в логе были
+    обрывы; у qwen3.7-max без обрывов цифры сошлись.
+
+    ⚠️ ТОЛЬКО QWEN. У DeepSeek та же беда чинится иначе — сверкой остатка счёта
+    с платформой (jobs/balance.py), у Xiaomi ни того, ни другого пока нет.
+
+    ⚠️ ЕСЛИ ОТЧЁТ ВСЁ-ТАКИ ПРИШЁЛ, оценку не списываем: звонящий передаёт сюда
+    пустые списки только в том случае, когда usage не получен, — иначе расход
+    спишется дважды.
+    """
+    if _provider_of(model_name) != "qwen":
+        return 0
+    sent = sum(len(str(m.get("content") or "")) for m in (messages or [])
+               if isinstance(m, dict))
+    got = sum(len(p) for p in (reasoning_parts or [])) + sum(len(p) for p in (answer_parts or []))
+    tokens = int((sent + got) / QWEN_CHARS_PER_TOKEN)
+    if tokens <= 0:
+        return 0
+    try:
+        hist.spend_qwen_tokens(model_name, tokens)
+    except Exception as e:
+        logger.warning("⚠️ Не удалось списать оценку токенов %s: %s", model_name, e)
+        return 0
+    logger.warning("⚠️ Ответ %s оборван — из квоты списано ОЦЕНОЧНО %d токенов "
+                   "(отправлено %d знаков, получено %d)", model_name, tokens, sent, got)
+    return tokens
+
+
 def _openai_stream_request(model_name: str, messages: list, api_url: str,
                            api_key: str, extra_payload: dict):
     """
@@ -1066,6 +1105,15 @@ def _openai_stream_request(model_name: str, messages: list, api_url: str,
                 c = delta.get("content")
                 if c:
                     answer_parts.append(c)
+    except Exception:
+        # Поток оборвался (потолок ожидания, разрыв связи) — отчёта о токенах
+        # не будет, а провайдер их уже списал. У Qwen это съедает бесплатную
+        # квоту молча, поэтому списываем оценку по знакам (_charge_broken_stream).
+        # Если отчёт УЖЕ пришёл (usage не пуст), оценка не нужна — расход
+        # посчитает обычный путь.
+        if not usage:
+            _charge_broken_stream(model_name, messages, reasoning_parts, answer_parts)
+        raise
     finally:
         response.close()
 

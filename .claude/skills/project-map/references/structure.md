@@ -35,7 +35,7 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 | `utils_format.py` | 313 | 9 | `strip_thoughts`, `thoughts_enabled`, `build_text_and_entities`, `send_formatted`, `convert_md`, `fits_caption`, `reply_md` |
 | `logging_setup.py` | 255 | 3 | `archive_old_logs`, `setup_logging` |
 | `preflight.py` | 719 | 0 | `check_imports`, `check_models`, `check_providers`, `check_tables`, `check_ranks`, `check_callbacks`, `check_panels`, `check_handlers`, `check_web`, `main` |
-| `selftest.py` | 5963 | 0 | проверки ПОВЕДЕНИЯ (28.08.2026), **38 групп** — перечислять их здесь перестали 08.09.2026: список рос вчетверо быстрее, чем его переписывали, и врал уже на четырнадцать имён. Живой список отдаёт сам файл — кортеж `CHECKS` в его конце, где рядом с каждой проверкой стоит её человеческое название; что каждая ловит, а что нет — `references/checks.md`. Отвечает на «правильно ли считает», тогда как `preflight.py` — на «запустится ли». Зовётся из `deploy.sh` и CI, красный откатывает выкатку |
+| `selftest.py` | 5963 | 0 | проверки ПОВЕДЕНИЯ (28.08.2026), **39 групп** — перечислять их здесь перестали 08.09.2026: список рос вчетверо быстрее, чем его переписывали, и врал уже на четырнадцать имён. Живой список отдаёт сам файл — кортеж `CHECKS` в его конце, где рядом с каждой проверкой стоит её человеческое название; что каждая ловит, а что нет — `references/checks.md`. Отвечает на «правильно ли считает», тогда как `preflight.py` — на «запустится ли». Зовётся из `deploy.sh` и CI, красный откатывает выкатку |
 | `reset_db.py` | 81 | 0 | `main` |
 | `watchdog_local.py` | 297 | 0 | `main` |
 

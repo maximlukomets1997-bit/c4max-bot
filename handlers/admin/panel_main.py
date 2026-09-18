@@ -273,6 +273,10 @@ async def send_api_panel(bot, chat_id: int, user_id: int):
             _left_str = "квота не задана"
         else:
             _left_str = "осталось <b>" + f"{_left:,}".replace(",", " ") + "</b>"
+        # Срок действия квоты, если он вписан (18.09.2026): у Alibaba квота
+        # сгорает по дате, и остаток без срока обманчив.
+        from handlers.admin.panel_balance import _quota_until
+        _left_str += _quota_until(model_name)
         groups["qwen"] += (f"  • <code>{model_name}</code>: "
                            f"<b>{qw_calls.get(model_name, 0)}</b> · {_left_str}\n")
     for model_name, tokens in qw_tokens.items():

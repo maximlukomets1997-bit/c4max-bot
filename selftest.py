@@ -280,6 +280,155 @@ def check_money():
                       f"сверка остатка с платформой")
 
 
+def check_qwen_quota():
+    """
+    Квота Qwen: оборванный ответ списывается ОЦЕНОЧНО, срок квоты виден.
+
+    ⚠️ РАДИ ЧЕГО. Обычный расход бот берёт из отчёта провайдера и тот точен до
+    токена, но при обрыве потока отчёта нет вовсе, а Alibaba токены уже вычла.
+    Сверка с консолью 18.09.2026: остаток в панели был завышен на 92 тысячи
+    токенов у qwen3.7-plus и на 81 тысячу у qwen3.8-max — ровно там, где в логе
+    были обрывы. Ошибка тихая: бот работает, счётчик просто врёт всё сильнее.
+
+    ⚠️ ГОНЯЕТСЯ НАСТОЯЩИЙ ПОТОК `_openai_stream_request` на поддельных часах и
+    поддельной сети: проверять `_charge_broken_stream` отдельно значило бы не
+    заметить, что её забыли позвать из обрыва, — а это и есть та поломка.
+
+    ⚠️ ТРИ ГРАНИЦЫ, без которых оценка вредит: не списывать дважды (отчёт уже
+    пришёл), не трогать чужих провайдеров (у DeepSeek свой путь — сверка счёта),
+    не списывать пустоту.
+    """
+    import json as _json
+    import requests
+    import config as c
+    from services import gemini as g
+    from database import history as hist
+    from handlers.admin.panel_balance import _split_quota_input, _quota_until, _build_balance_panel
+
+    problems = []
+    done = 0
+
+    def expect(title, ok):
+        nonlocal done
+        done += 1
+        if not ok:
+            problems.append(title)
+
+    QWEN = next((m for m, meta in c.AVAILABLE_MODELS.items()
+                 if meta.get("provider") == "qwen"), None)
+    OTHER = next((m for m, meta in c.AVAILABLE_MODELS.items()
+                  if meta.get("provider") == "deepseek"), None)
+    if not QWEN or not OTHER:
+        return ["в реестре не нашлось модели Qwen или DeepSeek — проверять нечего"], "пропущено"
+
+    class Clock:
+        def __init__(self): self.t = 1000.0
+        def monotonic(self): return self.t
+        def perf_counter(self): return self.t
+        def sleep(self, s): self.t += s
+        def time(self): return 1700000000.0
+
+    clock = Clock()
+    SENT = "запрос на сорок знаков ровно, без хвостов!"      # 41 знак
+    THINK = "мысли модели" * 10                              # 120 знаков
+    ANSWER = "кусок ответа" * 10                             # 120 знаков
+
+    def sse(obj):
+        return ("data: " + _json.dumps(obj, ensure_ascii=False)).encode()
+
+    class FakeResponse:
+        """Поток, который шлёт куски и «зависает»: часы уезжают за потолок."""
+        def __init__(self, with_usage=False):
+            self.with_usage = with_usage
+        def raise_for_status(self): pass
+        def close(self): pass
+        def iter_lines(self):
+            yield sse({"choices": [{"delta": {"reasoning_content": THINK}}]})
+            yield sse({"choices": [{"delta": {"content": ANSWER}}]})
+            if self.with_usage:
+                yield sse({"usage": {"prompt_tokens": 10, "completion_tokens": 20,
+                                     "total_tokens": 30}, "choices": []})
+            clock.t += c.GEMINI_STREAM_DEADLINE + 1      # провисли дольше потолка
+            yield sse({"choices": [{"delta": {"content": "хвост"}}]})
+
+    saved_time, saved_http = g.time, g._http
+    g.time = clock
+    try:
+        for model, with_usage, want_charge, title in (
+            (QWEN, False, True, "Qwen, поток оборван"),
+            (QWEN, True, False, "Qwen, отчёт о токенах уже пришёл"),
+            (OTHER, False, False, "DeepSeek, поток оборван"),
+        ):
+            key = f"qwen_tokens_{QWEN}"
+            hist.set_setting(key, "100000")
+            g._http = lambda wu=with_usage: type("H", (), {
+                "post": lambda self, *a, **kw: FakeResponse(wu)})()
+            clock.t = 1000.0
+            try:
+                g._openai_stream_request(model, [{"role": "user", "content": SENT}],
+                                         "http://example", "key", {})
+                broke = False
+            except requests.exceptions.Timeout:
+                broke = True
+            except Exception as e:
+                broke = False
+                problems.append(f"{title}: вместо таймаута вылетело {type(e).__name__}: {e}")
+            expect(f"{title}: обрыв не превратился в таймаут — цепочка подстраховки не сработает",
+                   broke)
+
+            left = int(hist.get_setting(key, "0") or 0)
+            spent = 100000 - left
+            want = int((len(SENT) + len(THINK) + len(ANSWER)) / c.QWEN_CHARS_PER_TOKEN) if want_charge else 0
+            expect(f"{title}: из квоты списано {spent} токенов, а ждали {want}", spent == want)
+
+        # ⚠️ ЧУЖОЙ ПРОВАЙДЕР — ПРОВЕРЯЕМ ВОЗВРАТ, А НЕ ОСТАТОК QWEN. Первая
+        # версия этой проверки смотрела только на ключ Qwen и на снятой защите
+        # НЕ КРАСНЕЛА: списание уходило в несуществующий ключ
+        # qwen_tokens_deepseek-… и молча ничего не меняло.
+        expect("DeepSeek: оценка вообще не должна считаться — у него сверка счёта",
+               g._charge_broken_stream(OTHER, [{"role": "user", "content": SENT}],
+                                       [THINK], [ANSWER]) == 0)
+        expect("DeepSeek: в настройках завёлся лишний ключ квоты",
+               hist.get_setting(f"qwen_tokens_{OTHER}", "") in ("", None))
+
+        # Пустой обрыв (не пришло ничего, кроме запроса) всё равно списывает
+        # отправленное: провайдер контекст уже прочитал.
+        hist.set_setting(f"qwen_tokens_{QWEN}", "100000")
+        spent = g._charge_broken_stream(QWEN, [{"role": "user", "content": SENT}], [], [])
+        expect(f"пустой обрыв: списано {spent}, а ждали {int(len(SENT) / c.QWEN_CHARS_PER_TOKEN)}",
+               spent == int(len(SENT) / c.QWEN_CHARS_PER_TOKEN))
+        expect("обрыв без текста вообще: списывать нечего",
+               g._charge_broken_stream(QWEN, [], [], []) == 0)
+    finally:
+        g.time, g._http = saved_time, saved_http
+
+    # ── Срок квоты: разбор ввода и показ на экране ──
+    for raw, want_num, want_date in (
+        ("66614 19.10.2026", "66614", "19.10.2026"),
+        ("66614 19.10.2026 ", "66614", "19.10.2026"),
+        ("66614 9.1.2027", "66614", "09.01.2027"),
+        ("66614", "66614", ""),
+        ("66614 завтра", "66614 завтра", ""),
+        ("66614 19.10.26", "66614 19.10.26", ""),
+    ):
+        got_num, got_date = _split_quota_input(raw)
+        expect(f"разбор «{raw}»: вышло число «{got_num}» и срок «{got_date}», "
+               f"а ждали «{want_num}» и «{want_date}»",
+               got_num.strip() == want_num.strip() and got_date == want_date)
+
+    hist.set_setting(f"qwen_quota_until_{QWEN}", "19.10.2026")
+    hist.set_setting(f"qwen_tokens_{QWEN}", "66614")
+    expect("срок квоты не попал в приписку", "19.10.2026" in _quota_until(QWEN))
+    text, _ = _build_balance_panel()
+    expect("на экране «Счета и квоты» не видно остатка квоты", "66 614" in text)
+    expect("на экране «Счета и квоты» не видно срока квоты", "квота до 19.10.2026" in text)
+    hist.delete_setting(f"qwen_quota_until_{QWEN}")
+    expect("срок убрали, а приписка осталась", _quota_until(QWEN) == "")
+
+    return problems, (f"{done} проверок: оценка на обрыве, отчёт не списывается дважды, "
+                      f"чужие провайдеры не задеты, разбор срока и показ на экране")
+
+
 # ───────────────────────────────────────────────
 #  2. ПОМЕТКА МУТА
 # ─────────────────────────────────────────────
@@ -5865,6 +6014,7 @@ def check_stopwatch():
 
 CHECKS = (
     ("деньги — расчёт стоимости запросов", check_money),
+    ("квота Qwen — оборванный ответ и срок", check_qwen_quota),
     ("деньги — сам прайс не менялся", check_price_list),
     ("пометка мута — разбор ответа модели", check_mute_tag),
     ("мут от бота подписан человеком, а не номером", check_ai_mute_name),

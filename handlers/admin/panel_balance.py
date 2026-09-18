@@ -8,6 +8,7 @@
 # ───────────────────────────────────────────────
 import html
 import logging
+import re
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
 from telegram.ext import ContextTypes
@@ -177,6 +178,43 @@ def _balance_field(field_id: str):
     return None
 
 
+def _quota_until_key(model: str) -> str:
+    """Ключ settings со СРОКОМ бесплатной квоты Qwen по модели (18.09.2026).
+    Дата хранится строкой ровно как её показывает консоль Model Studio
+    («19.10.2026») — бот её не считает, только показывает."""
+    return f"qwen_quota_until_{model}"
+
+
+def _quota_until(model: str) -> str:
+    """Приписка «· квота до 19.10.2026» или пустая строка, если срок не вписан.
+
+    ⚠️ ЗАЧЕМ. Квота Alibaba не вечная: у qwen3.7-max и qwen3.7-plus она сгорает
+    19.10.2026, у qwen3.8-max — 31.10.2026 (консоль Model Studio, 18.09.2026).
+    Бот сроков не знает и после этой даты показывал бы остаток, которого уже
+    нет. Дата вписывается руками — вторым словом к числу квоты."""
+    raw = (get_setting(_quota_until_key(model), "") or "").strip()
+    return f" · квота до {raw}" if raw else ""
+
+
+_DATE_RE = re.compile(r"^(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{4})$")
+
+
+def _split_quota_input(raw: str):
+    """
+    Делит ввод «66614 19.10.2026» на число и срок: (остаток текста, дата или "").
+    Дата необязательна — «66614» так и останется числом без срока. Мусор вместо
+    даты датой не считается: вернём его в числовой части, и разбор числа сам
+    объяснит человеку, что не так.
+    """
+    parts = (raw or "").strip().split()
+    if len(parts) >= 2:
+        m = _DATE_RE.match(parts[-1])
+        if m:
+            d, mth, y = m.groups()
+            return " ".join(parts[:-1]), f"{int(d):02d}.{int(mth):02d}.{y}"
+    return raw, ""
+
+
 def _parse_number(raw: str, kind: str):
     """
     Число из того, что прислал человек: (значение, текст ошибки).
@@ -240,7 +278,9 @@ def _build_balance_panel(flash: str = ""):
     known = get_qwen_tokens()
     for model in _qwen_model_keys():
         known.pop(model, None)
-        block += f"  • {model}: осталось {_value_str(f'qwen_tokens_{model}', 'tokens', 'квота не задана')}\n"
+        block += (f"  • {model}: осталось "
+                  f"{_value_str(f'qwen_tokens_{model}', 'tokens', 'квота не задана')}"
+                  f"{_quota_until(model)}\n")
     for model, tokens in known.items():
         block += (f"  • {html.escape(model)} (нет в конфиге): "
                   f"осталось <b>{_tokens_str(tokens)}</b>\n")
@@ -373,12 +413,21 @@ async def _handle_balance_callback(query, context, data: str, chat_id: int, user
         now = _value_str(info["key"], info["kind"], info["absent"])
         if info["kind"] == "tokens":
             now += " токенов"
+        # У квоты Qwen подсказываем, что вторым словом можно прислать срок её
+        # действия (он показан рядом с остатком на экране «Счета и квоты»).
+        date_hint = ""
+        if info["kind"] == "tokens" and field_id.startswith("qwen:"):
+            model = field_id[len("qwen:"):]
+            now += _quota_until(model)
+            date_hint = ("\nВторым словом можно прислать срок квоты: "
+                         f"<code>{info['example']} 19.10.2026</code>")
         text = (
             f"<b>{html.escape(info['title'])}</b>\n"
             "───────────────────────────\n"
             f"Сейчас: {now}\n\n"
             "Пришли новое число одним сообщением.\n"
-            f"Например: <code>{info['example']}</code>\n"
+            f"Например: <code>{info['example']}</code>"
+            f"{date_hint}\n"
             f"Прочерк <code>-</code> — {info['clear']}."
         )
         markup = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="bal:cancel")]])
@@ -419,6 +468,13 @@ async def handle_balance_input(update: Update, context: ContextTypes.DEFAULT_TYP
     raw = (text or "").strip()
     was_str = _value_str(info["key"], info["kind"], info["absent"])
 
+    # У квоты Qwen вторым словом можно прислать СРОК её действия: «66614
+    # 19.10.2026». Дата необязательна: без неё меняется только число, а ранее
+    # вписанный срок остаётся на месте (18.09.2026).
+    quota_date = ""
+    if info["kind"] == "tokens" and field_id.startswith("qwen:"):
+        raw, quota_date = _split_quota_input(raw)
+
     # Прочерк — убрать значение СОВСЕМ (не ноль: см. delete_setting).
     if raw in ("-", "–", "—"):
         delete_setting(info["key"])
@@ -447,9 +503,13 @@ async def handle_balance_input(update: Update, context: ContextTypes.DEFAULT_TYP
         return True
 
     set_setting(info["key"], str(int(value)) if info["kind"] == "tokens" else f"{value:.6f}")
+    if quota_date:
+        set_setting(_quota_until_key(field_id[len("qwen:"):]), quota_date)
     context.user_data.pop("balance_edit", None)
     new_str = (f"<b>{_tokens_str(value)}</b>" if info["kind"] == "tokens"
                else f"<b>{_money_str(value)}</b>")
+    if quota_date:
+        new_str += f" (квота до {quota_date})"
     logger.info("🔧 Владелец %s изменил %s: %s → %s",
                 update.effective_user.id, info["key"], raw, value)
     _audit(update.effective_user.id, "balance", 0,
