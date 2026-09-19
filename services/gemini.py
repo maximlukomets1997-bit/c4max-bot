@@ -45,6 +45,7 @@ from config import (
     QWEN_API_URL,
     QWEN_API_KEY,
     QWEN_CHARS_PER_TOKEN,
+    QWEN_QUOTA_WARN_TOKENS,
     DEEPSEEK_API_URL,
     DEEPSEEK_API_KEY,
     DEEPSEEK_PRICES,
@@ -138,7 +139,9 @@ def _notify_admins(text: str) -> None:
         try:
             _http().post(url, json={"chat_id": admin_id, "text": text}, timeout=10)
         except Exception as e:
-            logger.warning("⚠️ Не удалось уведомить админа %s о сбое модели: %s", admin_id, e)
+            # Текст без «о сбое модели»: с 19.09.2026 сюда же идут письма
+            # о квоте Qwen, и лог не должен называть их сбоем.
+            logger.warning("⚠️ Не удалось отправить письмо админу %s: %s", admin_id, e)
 
 
 def _model_title(model_name: str) -> str:
@@ -985,6 +988,113 @@ def _describe_video(video_base64: str, mime_type: str = "video/mp4",
     return ""
 
 
+# ───────────────────────────────────────────────
+#  Квота Qwen: списание и письмо владельцу (19.09.2026, просьба Максима)
+# ───────────────────────────────────────────────
+#
+#  Остаток бесплатной квоты уходит в минус молча — так задумано (минус = расход
+#  пошёл за деньги, см. database/money.py::spend_qwen_tokens), но узнать об этом
+#  можно было, только открыв «Счета и квоты». 18.09.2026 квота qwen3.7-plus
+#  кончилась посреди живого разговора в группе, и десять ответов подряд ушли
+#  за деньги незаметно.
+#
+#  Писем два: «на исходе» — остаток опустился до QWEN_QUOTA_WARN_TOKENS, и
+#  «кончилась» — дошёл до нуля.
+#  ⚠️ ПОВОД — ПЕРЕХОД ЧЕРЕЗ ЧЕРТУ, а не «остаток ниже черты»: иначе письмо
+#  уходило бы на каждый ответ в минусе. Помнить, что письмо уже ушло, НЕ НУЖНО:
+#  остаток только тает и переходит черту один раз, пока его не впишут заново
+#  кнопкой. Поэтому ни перезапуск бота, ни два потока разом второго письма не
+#  дают. Обратная сторона: вписали остаток уже ниже порога — письма «на исходе»
+#  не будет, только «кончилась».
+#  ⚠️ Списывать квоту — ТОЛЬКО через _spend_qwen_quota (обычный ответ и
+#  оборванный, _charge_broken_stream). Позовёшь hist.spend_qwen_tokens мимо —
+#  квота растает молча, без письма.
+
+
+def _tokens_num(value: int) -> str:
+    """Токены с пробелами по три разряда — как на экране «Счета и квоты»."""
+    return f"{int(value):,}".replace(",", " ")
+
+
+def _answers_left(left: int, per_answer: int) -> str:
+    """«примерно на 5 ответов» — сколько ещё влезет ответов того же размера,
+    что последний."""
+    n = left // per_answer if per_answer > 0 else 0
+    if n < 1:
+        return "меньше чем на один ответ"
+    if n % 10 == 1 and n % 100 != 11:
+        word = "ответ"
+    elif 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        word = "ответа"
+    else:
+        word = "ответов"
+    return f"примерно на {n} {word}"
+
+
+def _quota_letter(model_name: str, tokens: int, spent) -> str:
+    """
+    Текст письма о квоте Qwen — или пустая строка, если остаток черту не
+    перешагнул (см. шапку раздела).
+
+    spent — пара (было, стало) из spend_qwen_tokens. None — квота не заведена,
+    следить не за чем. ⚠️ Проверка на пару — не перестраховка: проверки
+    selftest подменяют списание пустышкой, и письмо обязано это пережить.
+    """
+    if not isinstance(spent, tuple) or len(spent) != 2:
+        return ""
+    before, after = spent
+    title = _model_title(model_name)
+    price = QWEN_PRICES.get(model_name) or {}
+    price_str = (f"${price['cache_miss']:g} за миллион входа, "
+                 f"${price['output']:g} за миллион ответа") if price else ""
+
+    if before > 0 >= after:
+        lines = [f"🎫 Кончилась бесплатная квота {title}",
+                 f"Остаток по счёту бота: {_tokens_num(after)}",
+                 f"Дальше ответы этой модели платные: {price_str}" if price_str
+                 else "Дальше ответы этой модели платные.",
+                 "(или Alibaba будет отказывать, если в консоли включена остановка)."]
+    elif before > QWEN_QUOTA_WARN_TOKENS >= after:
+        lines = [f"🎫 Квота {title} на исходе",
+                 f"Осталось {_tokens_num(after)} — {_answers_left(after, tokens)}.",
+                 f"Потом ответы этой модели пойдут за деньги: {price_str}." if price_str
+                 else "Потом ответы этой модели пойдут за деньги."]
+    else:
+        return ""
+
+    if hist.get_setting("active_model", GEMINI_MODEL) == model_name:
+        lines.append("Это активная модель — на ней идут все ответы бота.")
+
+    # Остатки остальных моделей — чтобы сразу было видно, на кого переключаться.
+    left = hist.get_qwen_tokens()
+    others = [f"• {m} — {_tokens_num(left[m]) if m in left else 'квота не задана'}"
+              for m, meta in AVAILABLE_MODELS.items()
+              if meta.get("provider") == "qwen" and m != model_name]
+    if others:
+        lines += ["", "Квота других Qwen:"] + others
+    return "\n".join(lines)
+
+
+def _spend_qwen_quota(model_name: str, tokens: int) -> None:
+    """
+    Списывает токены из бесплатной квоты Qwen и, если остаток перешагнул черту,
+    пишет владельцу (см. шапку раздела).
+
+    Ошибку СПИСАНИЯ не глушит — у каждого звонящего на неё своя строка в логе.
+    Ошибку ПИСЬМА глушит: сорвавшееся письмо не должно выглядеть в логе как
+    несписанные токены.
+    """
+    spent = hist.spend_qwen_tokens(model_name, tokens)
+    try:
+        text = _quota_letter(model_name, tokens, spent)
+        if text:
+            logger.warning("🎫 Квота %s перешла черту: было %s, стало %s — пишу владельцу",
+                           model_name, spent[0], spent[1])
+            _notify_admins(text)
+    except Exception as e:
+        logger.warning("⚠️ Не удалось написать владельцу о квоте %s: %s", model_name, e)
+
+
 def _charge_broken_stream(model_name: str, messages: list,
                           reasoning_parts: list, answer_parts: list) -> int:
     """
@@ -1014,7 +1124,7 @@ def _charge_broken_stream(model_name: str, messages: list,
     if tokens <= 0:
         return 0
     try:
-        hist.spend_qwen_tokens(model_name, tokens)
+        _spend_qwen_quota(model_name, tokens)
     except Exception as e:
         logger.warning("⚠️ Не удалось списать оценку токенов %s: %s", model_name, e)
         return 0
@@ -1770,9 +1880,10 @@ def _gemini_chat_request(messages: list, kind: str = "текст", has_image: bo
                 # Alibaba по КАЖДОЙ модели отдельно (вечный ключ settings
                 # qwen_tokens_<модель>) — в панели API это число «осталось».
                 # Берём «всего» (_tt): вход, ответ и размышления, ровно как
-                # в строке лога ниже.
+                # в строке лога ниже. Перешёл остаток черту — владельцу уйдёт
+                # письмо (19.09.2026, _spend_qwen_quota).
                 try:
-                    hist.spend_qwen_tokens(model_name, _tt)
+                    _spend_qwen_quota(model_name, _tt)
                 except Exception as e:
                     logger.warning("⚠️ Не удалось списать токены Qwen в БД: %s", e)
                 _cached = (_u.get("prompt_tokens_details") or {}).get("cached_tokens", 0) or 0

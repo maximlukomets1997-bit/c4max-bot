@@ -31,8 +31,10 @@
 #  ⚠️ ЗДЕСЬ ТОЛЬКО КОПИЛКИ, А НЕ АРИФМЕТИКА ЦЕНЫ. Сколько стоит конкретный
 #  запрос, считает services/gemini.py по прайсам из config, и вот ЭТО как раз
 #  покрыто selftest (группы «деньги — расчёт стоимости» и «деньги — сам прайс
-#  не менялся»). До самих копилок проверки НЕ ДОХОДЯТ — ни одного вызова
-#  функций этого файла в selftest нет. Правка здесь проверяется руками.
+#  не менялся»). Из копилок selftest видит только две функции:
+#  plan_balance_sync (группа «деньги») и spend_qwen_tokens (группа «квота
+#  Qwen», 19.09.2026 — от её пары «было → стало» зависят письма о квоте).
+#  Правка остальных проверяется руками.
 # ───────────────────────────────────────────────
 
 import logging
@@ -192,16 +194,35 @@ def spend_qwen_tokens(model_name: str, tokens: int):
     (вход + ответ + размышления), сверено с консолью Model Studio 2026-07-05.
     Уходит в МИНУС при исчерпанной квоте — честный сигнал, что расход пошёл
     за деньги; не «чинить» ограничением снизу.
-    Вычитание атомарно в SQL — без гонки между потоками."""
+    Вычитание атомарно в SQL — без гонки между потоками.
+
+    Возвращает пару (было, стало) — остаток до и после списания — или None,
+    если списывать было нечего (квота не заведена, ноль токенов). По этой паре
+    services/gemini.py::_spend_qwen_quota решает, перешагнул ли остаток черту и
+    пора ли писать владельцу (19.09.2026).
+    ⚠️ «Стало» ЧИТАЕТСЯ ИЗ БАЗЫ под тем же замком, что и вычитание, а «было»
+    выводится из него: так пара совпадает с тем, что посчитал SQL, и два потока
+    не могут увидеть один и тот же переход через черту — письмо уйдёт одно."""
     if not model_name or not tokens or tokens <= 0:
-        return
+        return None
+    key = f"qwen_tokens_{model_name}"
+    row = None
     with _lock:
         conn = _get_connection()
-        conn.execute(
+        cur = conn.execute(
             "UPDATE settings SET value = CAST(value AS INTEGER) - ? WHERE key = ?",
-            (int(tokens), f"qwen_tokens_{model_name}"),
+            (int(tokens), key),
         )
+        if cur.rowcount:
+            row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
         conn.commit()
+    if row is None:
+        return None
+    try:
+        after = int(float(row[0]))
+    except (TypeError, ValueError):
+        return None
+    return after + int(tokens), after
 
 
 def get_qwen_tokens() -> dict:

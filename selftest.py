@@ -282,7 +282,8 @@ def check_money():
 
 def check_qwen_quota():
     """
-    Квота Qwen: оборванный ответ списывается ОЦЕНОЧНО, срок квоты виден.
+    Квота Qwen: оборванный ответ списывается ОЦЕНОЧНО, срок квоты виден,
+    переход остатка через черту приносит владельцу ОДНО письмо (19.09.2026).
 
     ⚠️ РАДИ ЧЕГО. Обычный расход бот берёт из отчёта провайдера и тот точен до
     токена, но при обрыве потока отчёта нет вовсе, а Alibaba токены уже вычла.
@@ -425,8 +426,128 @@ def check_qwen_quota():
     hist.delete_setting(f"qwen_quota_until_{QWEN}")
     expect("срок убрали, а приписка осталась", _quota_until(QWEN) == "")
 
+    # ── Письма владельцу о квоте (19.09.2026) ──
+    # ⚠️ ПОВОД — ПЕРЕХОД ЧЕРЕЗ ЧЕРТУ, а не «остаток ниже черты»: иначе письмо
+    # уходило бы на каждый ответ в минусе. Поэтому главное здесь — не «письмо
+    # есть», а «письмо ОДНО»: второй ответ за чертой обязан промолчать.
+    # ⚠️ Письмо ловится подменой _notify_admins: настоящее ушло бы владельцу
+    # в Telegram, а selftest гоняется на сервере при каждой выкатке.
+    WARN = c.QWEN_QUOTA_WARN_TOKENS
+    key = f"qwen_tokens_{QWEN}"
+    others = [m for m, meta in c.AVAILABLE_MODELS.items()
+              if meta.get("provider") == "qwen" and m != QWEN]
+
+    def num(n):
+        return f"{n:,}".replace(",", " ")
+
+    letters = []
+    saved_notify, saved_request = g._notify_admins, g._qwen_chat_request
+    saved_active = hist.get_setting("active_model", "")
+    g._notify_admins = letters.append
+    try:
+        def spend(before, tokens):
+            """Ставит остаток (None — квоты нет), списывает и отдаёт письма."""
+            if before is None:
+                hist.delete_setting(key)
+            else:
+                hist.set_setting(key, str(before))
+            letters.clear()
+            g._spend_qwen_quota(QWEN, tokens)
+            return list(letters)
+
+        # Пара «было → стало» — на ней держится всё остальное.
+        hist.set_setting(key, "100")
+        got = hist.spend_qwen_tokens(QWEN, 30)
+        expect(f"списание вернуло {got}, а ждали пару (100, 70)", got == (100, 70))
+        hist.delete_setting(key)
+        got = hist.spend_qwen_tokens(QWEN, 30)
+        expect(f"квоты нет, а списание вернуло {got} вместо пустоты", got is None)
+
+        hist.set_setting("active_model", OTHER)
+        got = spend(5000, 8000)
+        expect(f"квота перешла ноль: писем {len(got)}, а ждали одно", len(got) == 1)
+        text = got[0] if got else ""
+        expect("письмо «кончилась»: нет заголовка", "Кончилась бесплатная квота" in text)
+        expect("письмо «кончилась»: нет имени модели",
+               c.AVAILABLE_MODELS[QWEN]["name"] in text)
+        expect("письмо «кончилась»: нет остатка -3 000", "Остаток по счёту бота: -3 000" in text)
+        price = c.QWEN_PRICES.get(QWEN)
+        if price:
+            expect("письмо «кончилась»: нет цен из прайса",
+                   f"${price['cache_miss']:g} за миллион входа" in text
+                   and f"${price['output']:g} за миллион ответа" in text)
+        expect("письмо «кончилась»: модель не активная, а написано «активная»",
+               "активная модель" not in text)
+        expect("письмо «кончилась»: в списке других моделей не все Qwen",
+               all(f"• {m} — " in text for m in others))
+        expect("письмо «кончилась»: модель попала в список «других»",
+               f"• {QWEN} — " not in text)
+
+        got = spend(-3000, 8000)
+        expect(f"квота уже в минусе: ушло писем {len(got)}, а ждали ни одного", not got)
+
+        got = spend(WARN + 1000, 5000)
+        expect(f"остаток опустился ниже порога: писем {len(got)}, а ждали одно", len(got) == 1)
+        text = got[0] if got else ""
+        expect("письмо «на исходе»: нет заголовка", "на исходе" in text)
+        left = WARN - 4000
+        expect(f"письмо «на исходе»: нет остатка {num(left)}", f"Осталось {num(left)}" in text)
+        n = left // 5000
+        expect(f"письмо «на исходе»: нет «примерно на {n} ответов»",
+               f"примерно на {n} " in text)
+
+        got = spend(WARN - 4000, 5000)
+        expect(f"ниже порога, но выше нуля: писем {len(got)}, а ждали ни одного", not got)
+
+        # Границы: ровно дошли до черты — перешли; уже стояли на черте — нет.
+        got = spend(WARN + 1, 1)
+        expect(f"остаток ровно дошёл до порога: писем {len(got)}, а ждали одно", len(got) == 1)
+        got = spend(WARN, 1)
+        expect(f"остаток уже стоял на пороге: писем {len(got)}, а ждали ни одного", not got)
+        got = spend(100, 100)
+        expect(f"остаток ровно дошёл до нуля: писем {len(got)}, а ждали одно «кончилась»",
+               len(got) == 1 and "Кончилась" in got[0])
+        got = spend(WARN + 10, WARN + 20)
+        expect(f"проскочили порог и ноль разом: писем {len(got)}, а ждали одно «кончилась»",
+               len(got) == 1 and "Кончилась" in got[0])
+        got = spend(None, 8000)
+        expect(f"квота не задана: писем {len(got)}, а ждали ни одного", not got)
+
+        # Оборванный ответ ведёт через ту же дверь: оценка тоже будит письмо.
+        hist.set_setting(key, "10")
+        letters.clear()
+        g._charge_broken_stream(QWEN, [{"role": "user", "content": SENT}], [THINK], [ANSWER])
+        expect(f"оборванный ответ увёл квоту в минус: писем {len(letters)}, а ждали одно",
+               len(letters) == 1)
+
+        # Обычный ответ — через НАСТОЯЩУЮ очередь _gemini_chat_request:
+        # проверяй мы одну _spend_qwen_quota, никто не заметил бы, что главный
+        # путь списывает мимо неё и молчит.
+        hist.set_setting("active_model", QWEN)
+        hist.set_setting(key, "5000")
+        letters.clear()
+        g._qwen_chat_request = lambda *a, **kw: {
+            "choices": [{"message": {"content": "ответ"}}],
+            "usage": {"prompt_tokens": 7000, "completion_tokens": 1000, "total_tokens": 8000}}
+        data, used = g._gemini_chat_request([{"role": "user", "content": "вопрос"}])
+        expect(f"обычный ответ: ответила {used}, а ждали {QWEN}", data is not None and used == QWEN)
+        now_left = hist.get_setting(key, "")
+        expect(f"обычный ответ: остаток {now_left}, а ждали -3000", str(now_left) == "-3000")
+        expect(f"обычный ответ увёл квоту в минус: писем {len(letters)}, а ждали одно",
+               len(letters) == 1)
+        expect("письмо об активной модели: нет строки «Это активная модель»",
+               bool(letters) and "Это активная модель" in letters[0])
+    finally:
+        g._notify_admins, g._qwen_chat_request = saved_notify, saved_request
+        if saved_active:
+            hist.set_setting("active_model", saved_active)
+        else:
+            hist.delete_setting("active_model")
+        hist.delete_setting(key)
+
     return problems, (f"{done} проверок: оценка на обрыве, отчёт не списывается дважды, "
-                      f"чужие провайдеры не задеты, разбор срока и показ на экране")
+                      f"чужие провайдеры не задеты, разбор срока и показ на экране, "
+                      f"письма «на исходе» и «кончилась» — по одному на переход через черту")
 
 
 # ───────────────────────────────────────────────
@@ -6014,7 +6135,7 @@ def check_stopwatch():
 
 CHECKS = (
     ("деньги — расчёт стоимости запросов", check_money),
-    ("квота Qwen — оборванный ответ и срок", check_qwen_quota),
+    ("квота Qwen — оборванный ответ, срок и письма", check_qwen_quota),
     ("деньги — сам прайс не менялся", check_price_list),
     ("пометка мута — разбор ответа модели", check_mute_tag),
     ("мут от бота подписан человеком, а не номером", check_ai_mute_name),
