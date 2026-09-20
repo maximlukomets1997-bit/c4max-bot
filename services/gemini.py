@@ -2033,20 +2033,65 @@ def _rag_block(query_text: str, *, remember_query: bool = True) -> str:
 
 
 # ───────────────────────────────────────────────
-#  Голосовые сообщения (native generateContent)
+#  Файл человека — модели: голосовое и видео (native generateContent).
+#  Путь ОДИН на оба типа с 21.09.2026 (до того — две копии одного кода);
+#  различия типов живут только в параметрах _ask_native_media.
 # ───────────────────────────────────────────────
 
-def ask_gemini_audio(chat_id: int, user_id: int, audio_base64: str) -> str:
+def _native_media_chain(active_model: str, order: list, accepts) -> list:
     """
-    Отправляет голосовое сообщение пользователя в Gemini API (native generateContent).
-    Стратегия устойчивости: ОДНА попытка на каждую модель очереди
-    AUDIO_FALLBACK_CHAIN, пока весь перебор укладывается в общий потолок
-    _DIRECT_AUDIO_BUDGET_SEC.
-    Технические ошибки наружу не отдаются — при полном провале возвращается мягкое сообщение.
+    Очередь моделей для файла: активная первой, если она этот тип принимает,
+    дальше остальные по порядку `order`. Активная модель НЕ меняется — подмена
+    временная, на один запрос.
 
-    С 16.08.2026 подмешивает базу знаний: голосовое сначала расшифровывается
-    лёгкой моделью, и по расшифровке ищутся статьи. Сама расшифровка модели НЕ
-    показывается — она слушает файл своими ушами (см. блок помощников выше).
+    ⚠️ `accepts` проверяет КАЖДОЕ звено, а не только активную: модель, попавшую
+    в цепочку по ошибке конфига (или потерявшую поддержку типа), в запрос не
+    пустим. У видео это поле "video" в AVAILABLE_MODELS, у голосового отдельного
+    поля нет вовсе — там признаком служит само членство в AUDIO_FALLBACK_CHAIN.
+    """
+    chain = [active_model] if accepts(active_model) else []
+    for model_name in order:
+        if model_name not in chain and accepts(model_name):
+            chain.append(model_name)
+    return chain
+
+
+def _ask_native_media(chat_id: int, user_id: int, *, kind: str, notify_kind: str,
+                      user_parts: list, search_text_fn, context_note: str,
+                      order: list, accepts, base_timeout: int, budget: int,
+                      dead_title: str) -> str:
+    """
+    ОБЩИЙ ПУТЬ ФАЙЛА К ЗРЯЧЕЙ/СЛЫШАЩЕЙ МОДЕЛИ: голосовое и видео (21.09.2026).
+
+    ⚠️ ЗАЧЕМ ОБЪЕДИНЕНО. До этого дня `ask_gemini_audio` и `ask_gemini_video`
+    были двумя копиями одного кода: 92 строки совпадали дословно. Рассинхрона
+    в них не нашлось, но правка в одной копии с забытой второй — самая дешёвая
+    поломка этого места, и ловить её приходилось сторожем
+    (`selftest.py::check_media_twins`). Теперь чинить нечего: путь один.
+
+    Различия обеих копий вынесены в параметры и только в них:
+      kind           — слово в логах и в пометке секундомера («аудио» / «видео»);
+      notify_kind    — как тип называется В ПИСЬМЕ ВЛАДЕЛЬЦУ. ⚠️ Отдельный
+                       параметр не для красоты: у голосового письмо говорит
+                       «голосовое», а лог и секундомер — «аудио», и так было
+                       до объединения. Свести их в одно слово значит незаметно
+                       переписать текст письма, которое читает человек;
+      user_parts     — части последнего сообщения: сам файл, у видео перед ним
+                       подпись, если она есть;
+      search_text_fn — чем искать по базе знаний; зовётся ТОЛЬКО при RAG_ENABLED,
+                       потому что сам по себе это запрос к лёгкой модели;
+      context_note   — что останется в памяти бота вместо файла;
+      order/accepts  — очередь подстраховки и проверка «модель принимает этот тип»;
+      base_timeout   — потолок одной попытки;
+      budget         — общий потолок всего перебора;
+      dead_title     — заголовок письма владельцу, когда легла вся очередь.
+
+    ⚠️ ТЕКСТЫ ЛОГА ЗДЕСЬ ЕДИНЫ ДЛЯ ОБОИХ ТИПОВ и собираются с `kind`. У аудио
+    до объединения четыре строки звучали иначе (см. `history.md` за 21.09.2026):
+    зашивать их обратно по типу — значит вернуть то самое дублирование, ради
+    снятия которого всё и делалось.
+
+    Технические ошибки наружу не отдаются: при полном провале — SOFT_FAIL_MESSAGE.
     """
     history = hist.get_history(user_id)
 
@@ -2058,11 +2103,12 @@ def ask_gemini_audio(chat_id: int, user_id: int, audio_base64: str) -> str:
     else:
         current_system_prompt, _, _ = hist.get_active_system_prompt()
 
-    # База знаний по расшифровке. Как и в ask_gemini, работает независимо от
-    # админского тумблера «PROMPT ВЫКЛ»: статьи — это факты, а не характер.
+    # База знаний. Как и в ask_gemini, работает независимо от админского тумблера
+    # «PROMPT ВЫКЛ»: статьи — это факты, а не характер. Файл сначала разбирает
+    # лёгкая модель, и по её разбору ищутся статьи; сам разбор человеку НЕ
+    # показывается (см. блок помощников выше).
     if RAG_ENABLED:
-        block = _rag_block(_media_search_text(audio_base64=audio_base64),
-                           remember_query=False)
+        block = _rag_block(search_text_fn(), remember_query=False)
         if block:
             current_system_prompt = (
                 f"{current_system_prompt}\n\n{block}" if current_system_prompt else block
@@ -2083,32 +2129,21 @@ def ask_gemini_audio(chat_id: int, user_id: int, audio_base64: str) -> str:
     while native_history and native_history[0]["role"] != "user":
         native_history.pop(0)
 
-    # 2026-07-24 (решение Максима): зашитая фраза «Ответь на это голосовое
-    # сообщение пользователя.» УДАЛЕНА — модели уходит только сам файл, а как
-    # на него отвечать, ей объясняет характер бота (systemInstruction ниже).
-    # Не возвращать без его просьбы.
-    native_history.append({
-        "role": "user",
-        "parts": [
-            {"inlineData": {"mimeType": "audio/ogg", "data": audio_base64}}
-        ]
-    })
+    native_history.append({"role": "user", "parts": user_parts})
 
-    payload = {
-        "contents": native_history,
-    }
+    payload = {"contents": native_history}
     # Персонаж/системный промпт для native API передаётся через systemInstruction
     if current_system_prompt:
         payload["systemInstruction"] = {"parts": [{"text": current_system_prompt}]}
 
     headers = {"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY}
 
-    audio_failures = []    # [(модель, причина)] — для уведомления владельцу
+    failures = []          # [(модель, причина)] — для уведомления владельцу
     # Секундомер ОДНОЙ попытки и счёт отказов — как в текстовом пути (см. _took).
     attempt_started = 0.0
     refusals = 0
 
-    def _try_audio(model_name: str, attempts: int = 1, timeout: int = GEMINI_TIMEOUT):
+    def _try(model_name: str, attempts: int = 1, timeout: int = base_timeout):
         nonlocal attempt_started, refusals
         last_error = None
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
@@ -2127,62 +2162,56 @@ def ask_gemini_audio(chat_id: int, user_id: int, audio_base64: str) -> str:
             except Exception as e:
                 refusals += 1
                 logger.warning(
-                    "⚠️ Модель %s не ответила (попытка %s из %s, %s): %s%s",
-                    model_name, attempt + 1, attempts, _err_code(e), _err_short(e), _err_body(e),
+                    "⚠️ Модель %s не ответила на %s (попытка %s из %s, %s): %s%s",
+                    model_name, kind, attempt + 1, attempts,
+                    _err_code(e), _err_short(e), _err_body(e),
                 )
                 last_error = e
                 if attempt < attempts - 1:
                     time.sleep((attempt + 1) * 2)
-        audio_failures.append((model_name, _err_code(last_error) if last_error else "нет ответа"))
+        failures.append((model_name, _err_code(last_error) if last_error else "нет ответа"))
         return None
 
-    # Цепочка аудио-моделей: активная первой (если она поддерживает аудио),
-    # затем остальные совместимые. При сбое сразу пробуем СЛЕДУЮЩУЮ модель
-    # (повтор той же модели на ошибке 500 почти бесполезен). Активная модель
-    # при этом НЕ меняется. Gemma в цепочку не входит — она аудио не принимает.
     active_model = hist.get_setting("active_model", GEMINI_MODEL)
-    chain = [active_model] if active_model in AUDIO_FALLBACK_CHAIN else []
-    for m in AUDIO_FALLBACK_CHAIN:
-        if m not in chain:
-            chain.append(m)
-    # идём по ВСЕМ аудио-совместимым моделям (Gemma в список не входит — аудио не принимает)
+    chain = _native_media_chain(active_model, order, accepts)
 
-    if active_model not in AUDIO_FALLBACK_CHAIN:
-        logger.info("%s Модель %s не поддерживает аудио — иду по цепочке аудио-моделей",
-                    _icon_of(active_model), active_model)
+    if not accepts(active_model):
+        logger.info("%s Модель %s не принимает %s — иду по цепочке моделей для %s",
+                    _icon_of(active_model), active_model, kind, kind)
 
     _first = chain[0] if chain else "—"
-    logger.info("%s Запрос к модели %s (аудио)", _icon_of(_first), _first)
+    logger.info("%s Запрос к модели %s (%s)", _icon_of(_first), _first, kind)
 
     data = None
     used_model = active_model
     took = ""
     start = time.perf_counter()
-    # Общий потолок перебора (28.08.2026): без него потолки моделей
-    # складывались и человек ждал до 4 минут — см. _DIRECT_AUDIO_BUDGET_SEC.
+    # Общий потолок перебора (28.08.2026): без него потолки моделей складывались
+    # и человек ждал минутами — см. _DIRECT_AUDIO_BUDGET_SEC/_DIRECT_VIDEO_BUDGET_SEC.
     chain_started = time.monotonic()
     for i, model_name in enumerate(chain):
-        attempt_timeout = _chain_attempt_timeout(chain_started, GEMINI_TIMEOUT,
-                                                 _DIRECT_AUDIO_BUDGET_SEC)
+        attempt_timeout = _chain_attempt_timeout(chain_started, base_timeout, budget)
         if attempt_timeout is None:
-            logger.warning("⚠️ Перебор аудио-моделей прекращён: занял общий потолок %d с, "
-                           "оставшиеся модели не пробуем", _DIRECT_AUDIO_BUDGET_SEC)
+            logger.warning("⚠️ Перебор моделей (%s) прекращён: занял общий потолок %d с, "
+                           "оставшиеся модели не пробуем", kind, budget)
             break
-        data = _try_audio(model_name, attempts=1, timeout=attempt_timeout)
+        data = _try(model_name, attempts=1, timeout=attempt_timeout)
         if data is not None:
             used_model = model_name
             now = time.perf_counter()
-            took = _took(now - attempt_started, (now - start) if refusals else 0.0, "аудио")
+            took = _took(now - attempt_started, (now - start) if refusals else 0.0, kind)
             break
         if i < len(chain) - 1:
-            logger.warning("⚠️ Переключаюсь на запасную модель %s (активная %s не меняется)", chain[i + 1], active_model)
+            logger.warning("⚠️ Переключаюсь на запасную модель %s (активная %s не меняется)",
+                           chain[i + 1], active_model)
             time.sleep(1.5)
 
     if data is None:
-        logger.error("⚠️ Не удалось получить аудио-ответ — недоступны все модели цепочки (пользователь %s)", user_id)
+        logger.error("⚠️ Не удалось разобрать %s — недоступны все модели цепочки "
+                     "(пользователь %s)", kind, user_id)
         # Полный провал цепочки — сообщаем владельцу (2026-08-18, просьба
         # Максима). Человек при этом получает заглушку, а не тишину.
-        _notify_chain_dead("Голосовое (ответ человеку)", audio_failures, _DEAD_STUB)
+        _notify_chain_dead(dead_title, failures, _DEAD_STUB)
         return SOFT_FAIL_MESSAGE
 
     # Учёт вызова — под своим try: ответ уже получен и оплачен (см. текстовый путь).
@@ -2191,15 +2220,16 @@ def ask_gemini_audio(chat_id: int, user_id: int, audio_base64: str) -> str:
     except Exception as e:
         logger.warning("⚠️ Не удалось учесть вызов модели в статистике: %s", e)
     # Кто-то из цепочки отказал, но ответ получен — сообщаем владельцу
-    # (2026-08-18: всегда). Проверки «активная принимает аудио» больше нет:
-    # поводом стал сам факт отказа, а обход модели, которая аудио не понимает,
+    # (2026-08-18: всегда). Проверки «активная принимает этот тип» больше нет:
+    # поводом стал сам факт отказа, а обход модели, которая тип не понимает,
     # отказом не является и в копилку не попадает.
-    _notify_models_failed("голосовое", audio_failures, used_model=used_model,
+    _notify_models_failed(notify_kind, failures, used_model=used_model,
                           active_model=active_model)
+
     try:
         raw_answer = _native_answer_with_thoughts(data)
     except (KeyError, IndexError):
-        logger.error("⚠️ Неожиданный формат аудио-ответа Gemini API: %s", str(data)[:300])
+        logger.error("⚠️ Неожиданный формат ответа Gemini API (%s): %s", kind, str(data)[:300])
         return SOFT_FAIL_MESSAGE
 
     answer = compress_newlines(raw_answer)
@@ -2214,201 +2244,91 @@ def ask_gemini_audio(chat_id: int, user_id: int, audio_base64: str) -> str:
     # В историю — без блока мыслей: он нужен только на экране, а в контексте
     # диалога занимал бы место (тот же порядок, что в ask_gemini).
     db_answer = re.sub(r'<thought>.*?</thought>', '', answer, flags=re.DOTALL | re.IGNORECASE).strip()
-    hist.add_messages(chat_id, user_id, "[Голосовое сообщение]", db_answer, prompt_tokens, used_model, total_tokens)
+    hist.add_messages(chat_id, user_id, context_note, db_answer,
+                      prompt_tokens, used_model, total_tokens)
     return answer
 
 
-# ───────────────────────────────────────────────
-#  Видео (native generateContent)
-# ───────────────────────────────────────────────
+def ask_gemini_audio(chat_id: int, user_id: int, audio_base64: str) -> str:
+    """
+    Голосовое сообщение человека — модели. Весь путь общий с видео
+    (`_ask_native_media`), здесь только то, чем голосовое от видео отличается.
+
+    Стратегия устойчивости: ОДНА попытка на каждую модель очереди
+    AUDIO_FALLBACK_CHAIN, пока весь перебор укладывается в общий потолок
+    _DIRECT_AUDIO_BUDGET_SEC.
+
+    ⚠️ ОТДЕЛЬНОГО ПОЛЯ «принимает аудио» у моделей НЕТ (в отличие от "video"):
+    признаком служит само членство в AUDIO_FALLBACK_CHAIN. Gemma в очередь не
+    входит — она аудио не принимает.
+
+    С 16.08.2026 подмешивает базу знаний: голосовое сначала расшифровывается
+    лёгкой моделью, и по расшифровке ищутся статьи. Сама расшифровка модели НЕ
+    показывается — она слушает файл своими ушами (см. блок помощников выше).
+
+    ⚠️ 2026-07-24 (решение Максима): зашитая фраза «Ответь на это голосовое
+    сообщение пользователя.» УДАЛЕНА — модели уходит только сам файл, а как на
+    него отвечать, ей объясняет характер бота. Не возвращать без его просьбы.
+    """
+    return _ask_native_media(
+        chat_id, user_id,
+        kind="аудио",
+        notify_kind="голосовое",
+        user_parts=[{"inlineData": {"mimeType": "audio/ogg", "data": audio_base64}}],
+        search_text_fn=lambda: _media_search_text(audio_base64=audio_base64),
+        context_note="[Голосовое сообщение]",
+        order=AUDIO_FALLBACK_CHAIN,
+        accepts=lambda model_name: model_name in AUDIO_FALLBACK_CHAIN,
+        base_timeout=GEMINI_TIMEOUT,
+        budget=_DIRECT_AUDIO_BUDGET_SEC,
+        dead_title="Голосовое (ответ человеку)",
+    )
+
 
 def ask_gemini_video(chat_id: int, user_id: int, video_base64: str,
                      user_text: str = "", mime_type: str = "video/mp4") -> str:
     """
-    Отправляет ВИДЕО пользователя в Gemini API (native generateContent) — устроено
-    как ask_gemini_audio, отличия по существу три:
-      • своя цепочка моделей VIDEO_FALLBACK_CHAIN (видео принимают только Gemini,
+    ВИДЕО человека — модели. Весь путь общий с голосовым
+    (`_ask_native_media`), здесь только отличия видео, и их по существу три:
+      • своя очередь VIDEO_FALLBACK_CHAIN (видео принимают только Gemini,
         поле "video" в AVAILABLE_MODELS; у Qwen и DeepSeek его нет);
-      • свой таймаут VIDEO_TIMEOUT — разбор ролика дольше расшифровки речи;
+      • свой потолок VIDEO_TIMEOUT — разбор ролика дольше расшифровки речи;
       • у видео БЫВАЕТ подпись (caption), у голосового её не бывает, — поэтому
-        текст пользователя передаётся отдельным параметром и идёт в тот же запрос.
+        текст пользователя идёт в тот же запрос отдельной частью, а в память
+        бота попадает вместе с пометкой «[Видео]»: иначе в истории осталось бы
+        голое «[Видео]» без вопроса, к которому был ответ.
     Размер здесь НЕ проверяется: файл не пройдёт дальше 20 МБ ещё в обработчике
     (Telegram столько и не отдаст, см. VIDEO_MAX_BYTES).
-    Технические ошибки наружу не отдаются — при полном провале SOFT_FAIL_MESSAGE.
 
     С 16.08.2026 подмешивает базу знаний: ролик сначала описывает лёгкая
-    модель, и по подписи вместе с описанием ищутся статьи. Описание самой
-    модели НЕ показывается — ролик она смотрит сама (см. блок помощников выше).
+    модель, и по подписи вместе с описанием ищутся статьи. Разбор идёт по
+    ОДНОМУ живому звену цепочки (chain_limit=1 внутри _media_search_text): у
+    видео потолок 90 секунд на модель, и полный перебор заставил бы человека
+    ждать минуты. Описание модели НЕ показывается — ролик она смотрит сама.
+
+    ⚠️ Модели уходит подпись пользователя, если она есть, и БОЛЬШЕ НИЧЕГО:
+    зашитая заготовка на случай «видео без подписи» удалена 2026-07-24 по
+    решению Максима — бот не должен подсказывать модели формулировки от себя.
+    Не возвращать заготовку без его просьбы.
     """
-    history = hist.get_history(user_id)
-
-    is_admin = (user_id in ADMIN_IDS)
-    bypass_prompt = is_admin and (hist.get_setting(f"admin_no_prompt_{user_id}", "0") == "1")
-
-    if bypass_prompt:
-        current_system_prompt = ""
-    else:
-        current_system_prompt, _, _ = hist.get_active_system_prompt()
-
-    # База знаний по подписи + описанию ролика. Разбор идёт по ОДНОМУ живому
-    # звену цепочки (chain_limit=1 внутри _media_search_text): у видео таймаут
-    # 90 секунд на модель, и полный перебор заставил бы человека ждать минуты.
-    if RAG_ENABLED:
-        block = _rag_block(
-            _media_search_text(user_text, video_base64=video_base64, video_mime=mime_type),
-            remember_query=False)
-        if block:
-            current_system_prompt = (
-                f"{current_system_prompt}\n\n{block}" if current_system_prompt else block
-            )
-
-    native_history = []
-    for msg in history:
-        content = (msg.get("content") or "").strip()
-        if not content:
-            continue  # пустые сообщения native API не принимает
-        role = "user" if msg["role"] == "user" else "model"
-        native_history.append({
-            "role": role,
-            "parts": [{"text": content}]
-        })
-
-    # native generateContent требует, чтобы беседа начиналась с роли user
-    while native_history and native_history[0]["role"] != "user":
-        native_history.pop(0)
-
-    # Модели уходит подпись пользователя, если она есть, и БОЛЬШЕ НИЧЕГО:
-    # зашитая заготовка на случай «видео без подписи» удалена 2026-07-24 по
-    # решению Максима — бот не должен подсказывать модели формулировки от себя.
-    # Без подписи текстовой части в запросе просто нет, остаётся сам файл;
-    # что с ним делать, модели объясняет характер бота (systemInstruction ниже).
-    # Не возвращать заготовку без просьбы Максима.
     caption = (user_text or "").strip()
-    video_parts = []
-    if caption:
-        video_parts.append({"text": caption})
-    video_parts.append({"inlineData": {"mimeType": mime_type, "data": video_base64}})
-    native_history.append({"role": "user", "parts": video_parts})
+    parts = [{"text": caption}] if caption else []
+    parts.append({"inlineData": {"mimeType": mime_type, "data": video_base64}})
 
-    payload = {"contents": native_history}
-    if current_system_prompt:
-        payload["systemInstruction"] = {"parts": [{"text": current_system_prompt}]}
-
-    headers = {"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY}
-
-    video_failures = []    # [(модель, причина)] — для уведомления владельцу
-    # Секундомер ОДНОЙ попытки и счёт отказов — как в текстовом пути (см. _took).
-    attempt_started = 0.0
-    refusals = 0
-
-    def _try_video(model_name: str, attempts: int = 1, timeout: int = VIDEO_TIMEOUT):
-        nonlocal attempt_started, refusals
-        last_error = None
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
-        # Конфиг размышлений — свой на каждое звено цепочки (см. _try_audio).
-        req = dict(payload)
-        thinking = _native_thinking_config(model_name)
-        if thinking:
-            req["generationConfig"] = thinking
-        for attempt in range(attempts):
-            attempt_started = time.perf_counter()
-            try:
-                response = _http().post(url, json=req, headers=headers, timeout=timeout)
-                response.raise_for_status()
-                return response.json()
-            except Exception as e:
-                refusals += 1
-                logger.warning(
-                    "⚠️ Модель %s не ответила на видео (попытка %s из %s, %s): %s%s",
-                    model_name, attempt + 1, attempts, _err_code(e), _err_short(e), _err_body(e),
-                )
-                last_error = e
-                if attempt < attempts - 1:
-                    time.sleep((attempt + 1) * 2)
-        video_failures.append((model_name, _err_code(last_error) if last_error else "нет ответа"))
-        return None
-
-    # Цепочка: активная первой (если она видео принимает), затем остальные.
-    # Активная модель при этом НЕ меняется — подмена временная, на один запрос.
-    # Порядок задаёт VIDEO_FALLBACK_CHAIN, но каждое звено ещё и проверяется
-    # полем "video" — защита от кривого конфига: модель, попавшую в цепочку
-    # по ошибке (или потерявшую поддержку видео), в запрос не пустим.
-    active_model = hist.get_setting("active_model", GEMINI_MODEL)
-    chain = [active_model] if _supports_video(active_model) else []
-    for m in VIDEO_FALLBACK_CHAIN:
-        if m not in chain and _supports_video(m):
-            chain.append(m)
-
-    if not _supports_video(active_model):
-        logger.info("%s Модель %s не принимает видео — иду по цепочке видео-моделей",
-                    _icon_of(active_model), active_model)
-
-    _first = chain[0] if chain else "—"
-    logger.info("%s Запрос к модели %s (видео)", _icon_of(_first), _first)
-
-    data = None
-    used_model = active_model
-    took = ""
-    start = time.perf_counter()
-    # Общий потолок перебора (28.08.2026): без него потолки моделей
-    # складывались и человек ждал до 12 минут — см. _DIRECT_VIDEO_BUDGET_SEC.
-    chain_started = time.monotonic()
-    for i, model_name in enumerate(chain):
-        attempt_timeout = _chain_attempt_timeout(chain_started, VIDEO_TIMEOUT,
-                                                 _DIRECT_VIDEO_BUDGET_SEC)
-        if attempt_timeout is None:
-            logger.warning("⚠️ Перебор видео-моделей прекращён: занял общий потолок %d с, "
-                           "оставшиеся модели не пробуем", _DIRECT_VIDEO_BUDGET_SEC)
-            break
-        data = _try_video(model_name, attempts=1, timeout=attempt_timeout)
-        if data is not None:
-            used_model = model_name
-            now = time.perf_counter()
-            took = _took(now - attempt_started, (now - start) if refusals else 0.0, "видео")
-            break
-        if i < len(chain) - 1:
-            logger.warning("⚠️ Переключаюсь на запасную модель %s (активная %s не меняется)",
-                           chain[i + 1], active_model)
-            time.sleep(1.5)
-
-    if data is None:
-        logger.error("⚠️ Не удалось разобрать видео — недоступны все модели цепочки (пользователь %s)", user_id)
-        _notify_chain_dead("Видео (ответ человеку)", video_failures, _DEAD_STUB)
-        return SOFT_FAIL_MESSAGE
-
-    # Учёт вызова — под своим try: ответ уже получен и оплачен (см. текстовый путь).
-    try:
-        hist.register_api_call(used_model)
-    except Exception as e:
-        logger.warning("⚠️ Не удалось учесть вызов модели в статистике: %s", e)
-    # Кто-то из цепочки отказал, но ответ получен (2026-08-18: сообщаем всегда,
-    # см. аудио выше — там же про снятые проверки).
-    _notify_models_failed("видео", video_failures, used_model=used_model,
-                          active_model=active_model)
-
-    try:
-        raw_answer = _native_answer_with_thoughts(data)
-    except (KeyError, IndexError):
-        logger.error("⚠️ Неожиданный формат видео-ответа Gemini API: %s", str(data)[:300])
-        return SOFT_FAIL_MESSAGE
-
-    answer = compress_newlines(raw_answer)
-    usage = data.get("usageMetadata", {})
-    prompt_tokens = usage.get("promptTokenCount", 0)
-    total_tokens = usage.get("totalTokenCount", 0)
-    thought_tokens = usage.get("thoughtsTokenCount", 0)
-    logger.info("%s Ответ от %s за %s | контекст=%s | размышления=%s | всего=%s",
-                _icon_of(used_model), used_model, took, prompt_tokens, thought_tokens, total_tokens)
-
-    # В контекст диалога пишем пометку с подписью пользователя, если она была, —
-    # иначе в истории останется голое «[Видео]» без вопроса, к которому был ответ.
-    # Блок мыслей в историю не идёт — он только для экрана (как в ask_gemini).
-    context_note = f"[Видео] {caption}".strip() if caption else "[Видео]"
-    db_answer = re.sub(r'<thought>.*?</thought>', '', answer, flags=re.DOTALL | re.IGNORECASE).strip()
-    hist.add_messages(chat_id, user_id, context_note, db_answer, prompt_tokens, used_model, total_tokens)
-    return answer
-
-
+    return _ask_native_media(
+        chat_id, user_id,
+        kind="видео",
+        notify_kind="видео",
+        user_parts=parts,
+        search_text_fn=lambda: _media_search_text(user_text, video_base64=video_base64,
+                                                  video_mime=mime_type),
+        context_note=f"[Видео] {caption}".strip() if caption else "[Видео]",
+        order=VIDEO_FALLBACK_CHAIN,
+        accepts=_supports_video,
+        base_timeout=VIDEO_TIMEOUT,
+        budget=_DIRECT_VIDEO_BUDGET_SEC,
+        dead_title="Видео (ответ человеку)",
+    )
 
 
 # ───────────────────────────────────────────────
