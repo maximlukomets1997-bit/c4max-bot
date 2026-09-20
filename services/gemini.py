@@ -2182,9 +2182,16 @@ def _ask_native_media(chat_id: int, user_id: int, *, kind: str, notify_kind: str
     _first = chain[0] if chain else "—"
     logger.info("%s Запрос к модели %s (%s)", _icon_of(_first), _first, kind)
 
+    # Дословный лог прямого обращения (2026-09-21) — тот же файл человека, что
+    # у текста и фото: память у всех четырёх путей общая (services/dialog_log).
+    from services import dialog_log
+    _dialog_note(dialog_log.note_ask, user_id, chat_id,
+                 "voice" if kind == "аудио" else "video", context_note)
+
     data = None
     used_model = active_model
     took = ""
+    own = total = 0.0
     start = time.perf_counter()
     # Общий потолок перебора (28.08.2026): без него потолки моделей складывались
     # и человек ждал минутами — см. _DIRECT_AUDIO_BUDGET_SEC/_DIRECT_VIDEO_BUDGET_SEC.
@@ -2199,12 +2206,19 @@ def _ask_native_media(chat_id: int, user_id: int, *, kind: str, notify_kind: str
         if data is not None:
             used_model = model_name
             now = time.perf_counter()
-            took = _took(now - attempt_started, (now - start) if refusals else 0.0, kind)
+            own = now - attempt_started
+            total = (now - start) if refusals else 0.0
+            took = _took(own, total, kind)
             break
         if i < len(chain) - 1:
             logger.warning("⚠️ Переключаюсь на запасную модель %s (активная %s не меняется)",
                            chain[i + 1], active_model)
             time.sleep(1.5)
+
+    # Что ушло модели — в запись человека. Пишем ПОСЛЕ перебора: имя
+    # ответившей модели известно только теперь (как в текстовом пути).
+    _dialog_note(dialog_log.note_request, user_id, used_model or "—",
+                 _dialog_native_prompt_text(current_system_prompt, native_history))
 
     if data is None:
         logger.error("⚠️ Не удалось разобрать %s — недоступны все модели цепочки "
@@ -2212,6 +2226,8 @@ def _ask_native_media(chat_id: int, user_id: int, *, kind: str, notify_kind: str
         # Полный провал цепочки — сообщаем владельцу (2026-08-18, просьба
         # Максима). Человек при этом получает заглушку, а не тишину.
         _notify_chain_dead(dead_title, failures, _DEAD_STUB)
+        _dialog_note(dialog_log.note_outcome, user_id,
+                     f"ни одна модель цепочки не разобрала {kind} — человек получил заглушку")
         return SOFT_FAIL_MESSAGE
 
     # Учёт вызова — под своим try: ответ уже получен и оплачен (см. текстовый путь).
@@ -2230,7 +2246,11 @@ def _ask_native_media(chat_id: int, user_id: int, *, kind: str, notify_kind: str
         raw_answer = _native_answer_with_thoughts(data)
     except (KeyError, IndexError):
         logger.error("⚠️ Неожиданный формат ответа Gemini API (%s): %s", kind, str(data)[:300])
+        _dialog_note(dialog_log.note_answer, user_id, used_model or "—", own,
+                     "(неожиданный формат ответа)", total)
         return SOFT_FAIL_MESSAGE
+
+    _dialog_note(dialog_log.note_answer, user_id, used_model or "—", own, raw_answer, total)
 
     answer = compress_newlines(raw_answer)
     usage = data.get("usageMetadata", {})
@@ -2329,6 +2349,81 @@ def ask_gemini_video(chat_id: int, user_id: int, video_base64: str,
         budget=_DIRECT_VIDEO_BUDGET_SEC,
         dead_title="Видео (ответ человеку)",
     )
+
+
+# ───────────────────────────────────────────────
+#  Дословный лог прямых обращений (logs/dialog)
+# ───────────────────────────────────────────────
+
+def _dialog_note(fn, *args) -> None:
+    """
+    Зовёт запись в services/dialog_log так, чтобы она не могла помешать ответу.
+
+    Сам модуль записи тихий, но собрать ему аргументы можно и неудачно
+    (название группы, разбор ответа). Лог не имеет права стоить человеку
+    ответа — поэтому вся ветка глушится здесь, разом для всех вызовов.
+    """
+    try:
+        fn(*args)
+    except Exception as e:
+        logger.debug("👤 Не удалось записать лог обращения: %s", e)
+
+
+def _dialog_prompt_text(messages: list) -> str:
+    """
+    Превращает готовый запрос к модели в читаемый текст для записи обращения.
+
+    ⚠️ КАРТИНКА В ЗАПИСЬ НЕ ПОПАДАЕТ. Фото уходит модели как base64 — это
+    сотни килобайт нечитаемых знаков на КАЖДОЕ обращение; в записи от него
+    остаётся пометка. Текст подписи при этом сохраняется целиком.
+
+    Роли подписаны по-русски: запись читает Максим, а не программа.
+    """
+    role_ru = {"system": "[СИСТЕМНАЯ ЧАСТЬ: характер, база знаний, справки]",
+               "user": "человек", "assistant": "бот"}
+    parts = []
+    for msg in messages:
+        content = msg.get("content")
+        if isinstance(content, list):
+            # Сообщение с картинкой: список кусков (текст + image_url).
+            pieces = []
+            for chunk in content:
+                if chunk.get("type") == "text" and (chunk.get("text") or "").strip():
+                    pieces.append(chunk["text"].strip())
+                elif chunk.get("type") == "image_url":
+                    pieces.append("[фотография — сам файл в запись не пишется]")
+            content = "\n".join(pieces)
+        content = (content or "").strip()
+        if not content:
+            continue
+        parts.append(f"{role_ru.get(msg.get('role'), msg.get('role'))}:\n{content}")
+    return "\n\n".join(parts)
+
+
+def _dialog_native_prompt_text(system_prompt: str, contents: list) -> str:
+    """
+    То же самое для голосового и видео: у них свой формат запроса (native
+    generateContent — systemInstruction + contents), и общая сборка выше его
+    не понимает. ⚠️ САМ ФАЙЛ В ЗАПИСЬ НЕ ПОПАДАЕТ — от него остаётся пометка
+    с типом: голосовое и ролик в base64 весят мегабайты.
+    """
+    role_ru = {"user": "человек", "model": "бот"}
+    parts = []
+    if (system_prompt or "").strip():
+        parts.append("[СИСТЕМНАЯ ЧАСТЬ: характер, база знаний, справки]:\n"
+                     + system_prompt.strip())
+    for item in contents:
+        pieces = []
+        for chunk in item.get("parts", []):
+            if (chunk.get("text") or "").strip():
+                pieces.append(chunk["text"].strip())
+            elif "inlineData" in chunk:
+                mime = chunk["inlineData"].get("mimeType", "файл")
+                pieces.append(f"[{mime} — сам файл в запись не пишется]")
+        if pieces:
+            parts.append(f"{role_ru.get(item.get('role'), item.get('role'))}:\n"
+                         + "\n".join(pieces))
+    return "\n\n".join(parts)
 
 
 # ───────────────────────────────────────────────
@@ -2435,24 +2530,47 @@ def ask_gemini(chat_id: int, user_id: int, user_text: str, image_base64: str = N
             + [{"role": "user", "content": user_message_content}]
         )
 
+    # Дословный лог прямого обращения (2026-09-21) — logs/dialog, файл на
+    # человека, см. services/dialog_log.py. В ОБЩИЙ лог это не пишется: там
+    # был бы весь контекст на каждое сообщение (та же причина, что у chat_log).
+    from services import dialog_log
+    _dialog_note(dialog_log.note_ask, user_id, chat_id,
+                 "photo" if image_base64 else "text", user_text)
+
     # ── Отправляем (2 попытки + авто-фолбэк на FALLBACK_MODEL) ──
     # has_image включает vision-reroute: фото у «слепой» модели (DeepSeek/Qwen)
     # сразу анализирует цепочка Gemini, без провальной попытки и ложной тревоги.
+    # ⚠️ ВРЕМЯ ОТДАЁТ САМА ЦЕПОЧКА (timing), секундомер вокруг вызова ставить
+    # нельзя — выйдет время всей очереди под именем последней модели (_took).
+    timing = {"own": 0.0, "total": 0.0}
     data, used_model = _gemini_chat_request(
         messages,
         kind="фото на анализ" if image_base64 else "текст",
         has_image=bool(image_base64),
+        timing=timing,
     )
+
+    # Пишем ПОСЛЕ запроса: имя ответившей модели известно только теперь —
+    # цепочка подстраховки могла увести запрос на запасную.
+    _dialog_note(dialog_log.note_request, user_id, used_model or "—",
+                 _dialog_prompt_text(messages))
 
     if data is None:
         logger.error("⚠️ Не удалось получить ответ — недоступны все модели цепочки (пользователь %s)", user_id)
+        _dialog_note(dialog_log.note_outcome, user_id,
+                     "ни одна модель цепочки не ответила — человек получил заглушку")
         return SOFT_FAIL_MESSAGE
 
     try:
         raw_answer = data["choices"][0]["message"]["content"].strip()
     except (KeyError, IndexError):
         logger.error("⚠️ Неожиданный формат ответа Gemini API: %s", str(data)[:300])
+        _dialog_note(dialog_log.note_answer, user_id, used_model or "—",
+                     timing["own"], "(неожиданный формат ответа)", timing["total"])
         return SOFT_FAIL_MESSAGE
+
+    _dialog_note(dialog_log.note_answer, user_id, used_model or "—",
+                 timing["own"], raw_answer, timing["total"])
 
     answer = compress_newlines(raw_answer)
 
