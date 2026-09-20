@@ -6358,6 +6358,156 @@ def check_media_twins():
                       f"человеку, активная модель на месте; расхождение типов названо отдельно")
 
 
+def check_dialog_log():
+    """
+    Дословная запись прямых обращений (services/dialog_log, 21.09.2026):
+    что в неё обязано попасть и чего в ней быть не должно.
+
+    ⚠️ ГЛАВНОЕ ЗДЕСЬ — ТО, ЧЕГО В ЗАПИСИ БЫТЬ НЕ ДОЛЖНО. Фото уходит модели
+    как base64: попади он в запись целиком — каждое обращение с картинкой
+    весило бы сотни килобайт нечитаемых знаков, и файл человека упирался бы
+    в свой потолок за десяток снимков. Ни одна другая проверка проекта этого
+    не увидит: бот при этом работает как ни в чём не бывало.
+
+    Второе — ЗАПИСЬ ВЕДЁТСЯ ПО ЧЕЛОВЕКУ, А НЕ ПО ЧАТУ. Ради этого всё и
+    делалось: память бота (database/chat.py::get_history) устроена так же,
+    и обращение из группы обязано лечь в тот же файл, что личка. Разложи
+    запись по чатам — и в ней будет не то, что реально ушло модели.
+
+    Третье — ПОТОЛОК ФАЙЛА. Без него запись растёт, пока не перестанет
+    уходить в Telegram, а кнопка «💾 Скачать» молча перестаёт работать.
+
+    Сеть подставная — ждать на выкатке нельзя. Папка записей уводится во
+    временную своя, а не общая: проверка не должна зависеть от того, что
+    осталось от соседних.
+    """
+    import shutil as _shutil
+    import tempfile as _tempfile
+    import config as cfg
+    from database import history as hist
+    from services import dialog_log as dl
+    from services import gemini as g
+
+    problems = []
+    done = 0
+
+    USER = -777035            # свой id: чужую переписку во временной базе не трогаем
+    GROUP = -100777035        # «другая группа» того же человека
+    THOUGHT = "сначала прикину, о чём просят"
+    ANSWER = "вот ответ человеку"
+    PHOTO = "iVBORw0KGgoNOTAPHOTO" * 200      # «картинка»: длинный base64
+    MODEL = cfg.FALLBACK_MODEL
+
+    class _Answered:
+        @staticmethod
+        def raise_for_status(): pass
+
+        @staticmethod
+        def json():
+            return {"choices": [{"message": {
+                        "content": f"<thought>{THOUGHT}</thought>{ANSWER}"}}],
+                    "usage": {"prompt_tokens": 10, "total_tokens": 15}}
+
+    class _Session:
+        @staticmethod
+        def post(*a, **kw):
+            return _Answered
+
+    class Silent:
+        def _skip(self, *a, **kw): pass
+        debug = info = warning = error = exception = _skip
+
+    saved = {name: getattr(g, name) for name in ("_http", "logger", "RAG_ENABLED")}
+    saved_dir = dl.DIR
+    saved_max = dl.MAX_BYTES
+    saved_keep = dl._KEEP_BYTES
+    saved_active = hist.get_setting("active_model", "")
+    tmp = _tempfile.mkdtemp(prefix="c4max-selftest-dialog-")
+    try:
+        g._http = lambda: _Session()
+        g.logger = Silent()
+        g.RAG_ENABLED = False          # поиск по базе сам зовёт модели — здесь лишний шум
+        dl.DIR = tmp
+        hist.set_setting("active_model", MODEL)
+
+        # Личка с картинкой, затем обращение того же человека из группы.
+        g.ask_gemini(USER, USER, "что на фото?", image_base64=PHOTO)
+        g.ask_gemini(GROUP, USER, "а теперь из группы")
+
+        path = dl.path_for(USER)
+        text = ""
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                text = f.read()
+
+        steps = (
+            ("запись человека завелась",
+             "файла записи нет вовсе — обращение никуда не записалось",
+             bool(text)),
+
+            ("в записи есть и запрос, и ответ",
+             "в записи нет блоков «УХОДИТ МОДЕЛИ» и «ВЕРНУЛА МОДЕЛЬ» — "
+             "читать в ней нечего",
+             "УХОДИТ МОДЕЛИ" in text and "ВЕРНУЛА МОДЕЛЬ" in text),
+
+            ("картинка в запись не попала",
+             "в записи лежит base64 фотографии — сотни килобайт на каждый снимок",
+             PHOTO[:64] not in text),
+
+            ("ответ модели записан",
+             "ответа модели в записи нет",
+             ANSWER in text),
+
+            ("мысли модели срезаны",
+             "в запись попал блок <thought> — он бывает длиннее самой реплики",
+             THOUGHT not in text),
+
+            ("имя модели — та, что ответила",
+             f"в записи нет имени ответившей модели {MODEL} — "
+             f"похоже на зашитую строку",
+             MODEL in text),
+
+            # ⚠️ Ради этого шага всё и делалось: контекст у бота общий на
+            # человека, и запись обязана быть такой же.
+            ("личка и группа — в одном файле",
+             "обращение из группы не легло в файл человека — "
+             "запись разошлась с памятью бота",
+             "а теперь из группы" in text and "личка" in text and "группа" in text),
+        )
+        for title, complaint, ok in steps:
+            done += 1
+            if not ok:
+                problems.append(f"{title}: {complaint}")
+
+        # ── Потолок файла: переросшая запись подрезается ──
+        dl.MAX_BYTES = 40_000
+        dl._KEEP_BYTES = 20_000
+        for _ in range(12):
+            g.ask_gemini(USER, USER, "ещё вопрос " + "х" * 2000)
+        size = os.path.getsize(path) if os.path.exists(path) else 0
+        done += 1
+        if size > dl.MAX_BYTES:
+            problems.append(
+                f"потолок записи не работает: файл вырос до {size} байт "
+                f"при потолке {dl.MAX_BYTES} — однажды он перестанет уходить в Telegram")
+        done += 1
+        with open(path, "r", encoding="utf-8") as f:
+            tail = f.read()
+        if "ещё вопрос" not in tail:
+            problems.append("после подрезки в записи не осталось свежих обращений — "
+                            "срезано лишнее")
+    finally:
+        for name, value in saved.items():
+            setattr(g, name, value)
+        dl.DIR, dl.MAX_BYTES, dl._KEEP_BYTES = saved_dir, saved_max, saved_keep
+        hist.set_setting("active_model", saved_active)
+        _shutil.rmtree(tmp, ignore_errors=True)
+
+    return problems, (f"{done} проверок: запрос и ответ на месте, base64 фото и мысли "
+                      f"в запись не попали, личка и группа в одном файле, потолок режет "
+                      f"старое")
+
+
 CHECKS = (
     ("деньги — расчёт стоимости запросов", check_money),
     ("квота Qwen — оборванный ответ, срок и письма", check_qwen_quota),
@@ -6399,6 +6549,8 @@ CHECKS = (
     ("фото уходит зрячей модели, а не в пустоту", check_photo_route),
     ("секундомер — время ответившей модели, а не всей очереди", check_stopwatch),
     ("голосовое и видео доходят до конца пути", check_media_twins),
+    ("запись обращений: что в ней есть и чего в ней быть не должно",
+     check_dialog_log),
 )
 
 
@@ -6416,6 +6568,14 @@ def main() -> int:
     import config
     config.DB_PATH = os.path.join(tmp_dir, "selftest.db")
     from database import history as hist
+
+    # ⚠️ ТУДА ЖЕ УВОДИМ ЗАПИСИ ОБРАЩЕНИЙ (21.09.2026). Проверки потолков и
+    # секундомера зовут настоящие ask_gemini_*, а те пишут дословную запись в
+    # logs/dialog — без этой строки прогон проверок насорил бы в БОЕВЫХ логах
+    # выдуманными людьми («id 1»), и они появились бы в списке у владельца.
+    from services import dialog_log
+    dialog_log.DIR = os.path.join(tmp_dir, "dialog")
+
     # Схему создаём сразу: проверки потолков зовут настоящие ask_gemini_*,
     # а те по дороге читают историю переписки и настройки. Без таблиц они
     # падают на «no such table», и проверка краснеет не по делу.

@@ -465,6 +465,7 @@ def check_panels():
     смотрящего, а нам нужен самый полный вариант — в нём больше всего кнопок.
     """
     from services import roles, user_settings
+    from handlers.admin.common import _build_dialog_list
     from handlers.admin.panel_balance import _build_balance_panel, _build_cost_panel
     from handlers.admin.panel_main import (_build_api_keyboard,
                                            _build_model_panel_text_and_keyboard,
@@ -510,6 +511,10 @@ def check_panels():
         "модерация": lambda: _build_mod_panel_text_and_keyboard(owner),
         "список пользователей": lambda: _build_users_panel(owner, 999),
         "журнал персонала": _build_staff_log_panel,
+        # ⬇️ Список записей обращений (21.09.2026): кнопок столько, сколько
+        # людей писало боту. На чистой машине записей нет — панель тогда
+        # короче, но собраться обязана и пустой.
+        "записи обращений": lambda: _build_dialog_list(owner),
         # ⬇️ Обновления: список читается из журнала git. В CI клон бывает
         # обрезанным (одна запись) — панель тогда просто короче, но собраться
         # обязана и на пустой истории.

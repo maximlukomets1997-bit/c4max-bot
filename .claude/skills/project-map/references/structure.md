@@ -14,10 +14,11 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 наружу. Имена с подчёркиванием тоже иногда зовут снаружи — проверяй
 скриптом `impact.py`, а не этим списком.
 
-Всего файлов с кодом: **81** (было 67 на 30.08.2026): двенадцать файлов,
+Всего файлов с кодом: **82** (было 67 на 30.08.2026): двенадцать файлов,
 на которые 02.09 разрезали `database/history.py`, плюс `jobs/balance.py`
-(сверка остатка с платформой, 14.09.2026) и `services/group_guard.py`
-(заслон чужих групп, 15.09.2026). Отдельных тестовых
+(сверка остатка с платформой, 14.09.2026), `services/group_guard.py`
+(заслон чужих групп, 15.09.2026) и `services/dialog_log.py` (дословный лог
+прямых обращений, 21.09.2026). Отдельных тестовых
 файлов (`test_*.py`, `pytest`) по-прежнему **0** — но с 28.08.2026 есть
 `selftest.py`:
 проверки поведения в том же стиле, что `preflight.py`, без сторонних
@@ -35,7 +36,7 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 | `utils_format.py` | 313 | 9 | `strip_thoughts`, `thoughts_enabled`, `build_text_and_entities`, `send_formatted`, `convert_md`, `fits_caption`, `reply_md` |
 | `logging_setup.py` | 255 | 3 | `archive_old_logs`, `setup_logging` |
 | `preflight.py` | 719 | 0 | `check_imports`, `check_models`, `check_providers`, `check_tables`, `check_ranks`, `check_callbacks`, `check_panels`, `check_handlers`, `check_web`, `main` |
-| `selftest.py` | 5963 | 0 | проверки ПОВЕДЕНИЯ (28.08.2026), **39 групп** — перечислять их здесь перестали 08.09.2026: список рос вчетверо быстрее, чем его переписывали, и врал уже на четырнадцать имён. Живой список отдаёт сам файл — кортеж `CHECKS` в его конце, где рядом с каждой проверкой стоит её человеческое название; что каждая ловит, а что нет — `references/checks.md`. Отвечает на «правильно ли считает», тогда как `preflight.py` — на «запустится ли». Зовётся из `deploy.sh` и CI, красный откатывает выкатку |
+| `selftest.py` | 5963 | 0 | проверки ПОВЕДЕНИЯ (28.08.2026), **41 группа** — перечислять их здесь перестали 08.09.2026: список рос вчетверо быстрее, чем его переписывали, и врал уже на четырнадцать имён. Живой список отдаёт сам файл — кортеж `CHECKS` в его конце, где рядом с каждой проверкой стоит её человеческое название; что каждая ловит, а что нет — `references/checks.md`. Отвечает на «правильно ли считает», тогда как `preflight.py` — на «запустится ли». Зовётся из `deploy.sh` и CI, красный откатывает выкатку |
 | `reset_db.py` | 81 | 0 | `main` |
 | `watchdog_local.py` | 297 | 0 | `main` |
 
@@ -137,6 +138,7 @@ database.history import add_messages` работает как работал; т
 | `services/backup.py` | 272 | 7 | `backup_dir`, `human_size`, `make_backup`, `list_backups`, `make_kb_backup`, `kb_caption`, `due_today`, `note_done` |
 | `services/deploy.py` | 164 | 3 | `note_activity`, `quiet_for`, `can_update`, `update`, `describe` |
 | `services/user_settings.py` | 148 | 12 | `load`, `refresh`, `get`, `set_field`, `clear`, `thresholds_for`, `is_immune`, `links_allowed`, `ai_ignored`, `image_limit_for`, `honorary_rank` |
+| `services/dialog_log.py` | 314 | 4 | 👤 дословный лог ПРЯМЫХ обращений к боту (21.09.2026): `path_for`, `note_ask`, `note_request`, `note_answer`, `note_outcome`, `stats`, `list_records`, `total_size`, `count_records`, `clear`, `clear_all`. Файл НА ЧЕЛОВЕКА в `logs/dialog` — как память бота, которая тоже общая на человека (`database/chat.py::get_history`), а не на чат. Архива нет: от роста держит потолок `MAX_BYTES` (2 МБ), переросшая запись режется сверху. Пишут его `ask_gemini` и `_ask_native_media`, читают экраны «👤 Разговор с ботом» |
 | `services/chat_log.py` | 284 | 7 | `archive_path`, `current_path`, `started_label`, `note_check`, `note_media`, `note_request`, `note_answer`, `note_outcome`, `close_session`, `stats` (дословный лог проактивного режима в `logs/chat`) |
 | `services/http.py` | 58 | 5 | `session` |
 | `services/__init__.py` | 2 | 0 | — |

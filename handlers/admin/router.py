@@ -7,7 +7,8 @@ import html
 import logging
 import os
 
-from telegram import Update, InlineKeyboardMarkup, LinkPreviewOptions
+from telegram import (Update, InlineKeyboardButton, InlineKeyboardMarkup,
+                      LinkPreviewOptions)
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 from config import (AVAILABLE_MODELS, AVAILABLE_IMAGE_MODELS, GEMINI_MODEL,
@@ -19,11 +20,12 @@ from utils import schedule_delete
 
 logger = logging.getLogger(__name__)
 from .common import (_LOG_FILE_TTL, _TG_FILE_MAX, _adm_back_row, _audit,
-                     _build_chat_log_header,
-                     _build_log_text, _build_logs_menu_text, _chat_log_files_row,
-                     _count_archive_sessions, _log_files_row, _logs_back_row,
-                     _logs_menu_rows, _read_archive_log, _read_current_log,
-                     _read_file_bytes)
+                     _build_chat_log_header, _build_dialog_card_header,
+                     _build_dialog_list, _build_log_text, _build_logs_menu_text,
+                     _chat_log_files_row, _count_archive_sessions,
+                     _dialog_card_rows, _dialog_person_label, _log_files_row,
+                     _logs_back_row, _logs_menu_rows, _read_archive_log,
+                     _read_current_log, _read_file_bytes)
 from .panel_balance import _handle_balance_callback
 from .panel_digest import _handle_digest_callback
 from .panel_main import (_build_api_keyboard, build_adm_keyboard,
@@ -184,12 +186,13 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 schedule_delete(context.bot, chat_id, warn.message_id, 15)
         return
 
-    # ── Кнопка «📜 Логи бота»: развилка из двух веток ─────────────────────
+    # ── Кнопка «📜 Логи бота»: развилка из трёх веток ─────────────────────
     # ⚠️ РАНЬШЕ ЭТА КНОПКА СРАЗУ ПРИСЫЛАЛА ТЕКСТ ЛОГА (до 2026-08-16). Логов
     # стало два вида — работа бота и дословный разговор в группе, — и один
     # экран их не вмещает: у разговора свои цифры, свои файлы и свой счёт
     # записей. Прежний экран целиком переехал в ветку «adm_logs_bot» ниже.
-    # Сюда же возвращает кнопка «⬅️ К логам» с обоих экранов.
+    # Третья ветка — прямые обращения к боту (21.09.2026), она ведёт к списку
+    # людей. Сюда же возвращает кнопка «⬅️ К логам» со всех экранов.
     if data == "adm_logs":
         # Переход из панели отменяет ожидание файлов и режим проверки поиска
         context.user_data.pop("kb_add_mode", None)
@@ -311,6 +314,149 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         )
         if sent_msg:
             schedule_delete(context.bot, chat_id, sent_msg.message_id, _LOG_FILE_TTL)
+        return
+
+    # ── «👤 Разговор с ботом»: список людей с записями ───────────────────
+    # Экран показывается всегда, даже когда записей нет: иначе кнопка с
+    # развилки выглядела бы сломанной.
+    if data == "adm_logs_dlg":
+        await query.answer()
+        logger.info("🔧 Админ %s открыл список записей обращений", user_id)
+        text, markup = _build_dialog_list(user_id)
+        sent_msg = await context.bot.send_message(
+            chat_id=chat_id, text=text, parse_mode=ParseMode.HTML,
+            reply_markup=markup,
+        )
+        if sent_msg:
+            await register_and_clean_bot_message(context.bot, chat_id, sent_msg.message_id)
+        return
+
+    # ── «👤 <человек>»: его запись, последние строки ──────────────────────
+    if data.startswith("dlg:card:"):
+        from services import dialog_log
+        target_id = int(data.split(":")[2])
+        stats = dialog_log.stats(target_id)
+        _, raw = _read_file_bytes(stats["path"]) if stats["exists"] else (None, b"")
+        if not raw:
+            # Запись могли стереть, пока экран висел на глазах.
+            await query.answer("👤 Записи у этого человека больше нет.", show_alert=True)
+            return
+        await query.answer()
+        logger.info("🔧 Админ %s открыл запись обращений человека %s", user_id, target_id)
+        sent_msg = await context.bot.send_message(
+            chat_id=chat_id,
+            text=_build_log_text(stats["name"], raw,
+                                 header=_build_dialog_card_header(stats)),
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(_dialog_card_rows(target_id)),
+        )
+        if sent_msg:
+            await register_and_clean_bot_message(context.bot, chat_id, sent_msg.message_id)
+        return
+
+    # ── «💾 Скачать запись»: файл одного человека ─────────────────────────
+    # Отправка — как у логов бота: мимо гигиены панелей, без клавиатуры и с
+    # минутным самоудалением. Экран записи остаётся на месте.
+    if data.startswith("dlg:file:"):
+        from services import dialog_log
+        target_id = int(data.split(":")[2])
+        stats = dialog_log.stats(target_id)
+        _, raw = _read_file_bytes(stats["path"]) if stats["exists"] else (None, b"")
+        if not raw:
+            await query.answer("👤 Записи у этого человека больше нет.", show_alert=True)
+            return
+        # Потолок Telegram записи не грозит — её держит потолок самого модуля
+        # (dialog_log.MAX_BYTES, 2 МБ), — но проверка стоит той же строкой,
+        # что у разговора в группе: потолок модуля однажды могут поднять.
+        if len(raw) > _TG_FILE_MAX:
+            await query.answer(
+                f"⚠️ Файл слишком велик для Telegram ({len(raw) // (1024 * 1024)} МБ). "
+                f"Нажми «🧹 Очистить» — запись начнётся заново.", show_alert=True)
+            return
+        await query.answer()
+        logger.info("🔧 Админ %s скачал запись обращений человека %s", user_id, target_id)
+        sent_msg = await context.bot.send_document(
+            chat_id=chat_id, document=raw, filename=stats["name"],
+            caption=(f"👤 <b>Запись обращений: "
+                     f"{html.escape(_dialog_person_label(target_id))}</b>\n"
+                     f"<code>{html.escape(stats['name'])}</code> · "
+                     f"{max(1, round(len(raw) / 1024))} КБ · "
+                     f"обращений: {stats['asks']}\n"
+                     f"<i>Сообщение исчезнет через минуту — успейте открыть "
+                     f"или сохранить.</i>"),
+            parse_mode=ParseMode.HTML,
+        )
+        if sent_msg:
+            schedule_delete(context.bot, chat_id, sent_msg.message_id, _LOG_FILE_TTL)
+        return
+
+    # ── «🧹 Очистить»: запись одного человека, с подтверждением ───────────
+    # Подтверждение меняет ТОЛЬКО клавиатуру записи: текст с последними
+    # строками остаётся на глазах — по нему и решают, стирать ли.
+    if data.startswith("dlg:clr:"):
+        target_id = int(data.split(":")[2])
+        await query.answer()
+        try:
+            await query.edit_message_reply_markup(InlineKeyboardMarkup([[
+                InlineKeyboardButton("❗️ Да, стереть запись",
+                                     callback_data=f"dlg:clrgo:{target_id}"),
+                InlineKeyboardButton("Отмена", callback_data=f"dlg:card:{target_id}"),
+            ]]))
+        except Exception as e:
+            logger.warning("⚠️ Не удалось показать подтверждение очистки записи: %s", e)
+        return
+
+    if data.startswith("dlg:clrgo:"):
+        from services import dialog_log
+        target_id = int(data.split(":")[2])
+        wiped = dialog_log.clear(target_id)
+        logger.info("🔧 Админ %s стёр запись обращений человека %s%s",
+                    user_id, target_id, "" if wiped else " (её уже не было)")
+        _audit(user_id, "dialog_clear", target_id, "стёрта запись обращений")
+        await query.answer("🧹 Готово: запись стёрта." if wiped
+                           else "Записи уже не было.", show_alert=True)
+        # Возвращаем список: карточки стёртого человека больше нет, и
+        # оставлять её кнопки на экране значит показывать мёртвые кнопки.
+        text, markup = _build_dialog_list(user_id)
+        try:
+            await query.edit_message_text(text, parse_mode=ParseMode.HTML,
+                                          reply_markup=markup)
+        except Exception as e:
+            logger.debug("👤 Не удалось вернуть список записей: %s", e)
+        return
+
+    # ── «🧹 Очистить всё»: записи всех людей, с подтверждением ────────────
+    if data in ("dlg:wipe", "dlg:wipe_no"):
+        await query.answer()
+        if data == "dlg:wipe":
+            rows = [[
+                InlineKeyboardButton("❗️ Да, стереть ВСЕ записи",
+                                     callback_data="dlg:wipe_yes"),
+                InlineKeyboardButton("Отмена", callback_data="dlg:wipe_no"),
+            ]]
+        else:
+            # Отмена возвращает обычные кнопки списка. Клавиатура при этом
+            # заведомо ДРУГАЯ (подтверждение → список), поэтому ошибки
+            # «Message is not modified» здесь быть не может.
+            rows = _build_dialog_list(user_id)[1].inline_keyboard
+        try:
+            await query.edit_message_reply_markup(InlineKeyboardMarkup(rows))
+        except Exception as e:
+            logger.warning("⚠️ Не удалось показать подтверждение очистки записей: %s", e)
+        return
+
+    if data == "dlg:wipe_yes":
+        from services import dialog_log
+        removed = dialog_log.clear_all()
+        logger.info("🔧 Админ %s стёр ВСЕ записи обращений (файлов: %d)", user_id, removed)
+        _audit(user_id, "dialog_clear", 0, f"стёрты все записи обращений: {removed}")
+        await query.answer(f"🧹 Готово: стёрто записей — {removed}.", show_alert=True)
+        text, markup = _build_dialog_list(user_id)
+        try:
+            await query.edit_message_text(text, parse_mode=ParseMode.HTML,
+                                          reply_markup=markup)
+        except Exception as e:
+            logger.debug("👤 Не удалось обновить список записей: %s", e)
         return
 
     # ── Кнопка «💾 Текущий лог»: полный файл лога документом ──────────────
