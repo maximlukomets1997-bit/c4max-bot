@@ -6133,6 +6133,208 @@ def check_stopwatch():
                       f"разговоров; письмо владельцу в перебор не входит")
 
 
+# ───────────────────────────────────────────────
+#  40. ГОЛОСОВОЕ И ВИДЕО ДЕЛАЮТ ОДНО И ТО ЖЕ
+# ─────────────────────────────────────────────
+
+def check_media_twins():
+    """
+    Голосовое и видео обязаны вести себя одинаково после подстраховки.
+
+    ⚠️ РАДИ ЧЕГО ПРОВЕРКА СУЩЕСТВУЕТ. `ask_gemini_audio` и `ask_gemini_video` —
+    две копии одного кода: 92 строки из них совпадают дословно (70% меньшей).
+    Правка, сделанная в одной копии и забытая во второй, — самая вероятная
+    поломка этого места, и живьём её не видно: обе копии включаются только на
+    отказе модели, а результат отличается не текстом ответа, а тем, списались
+    ли деньги и ушло ли письмо владельцу.
+
+    ⚠️ СПИСОК ШАГОВ ЗДЕСЬ ОДИН НА ОБЕ КОПИИ и прогоняется одним циклом. Поэтому
+    «одинаковость» получается сама собой: потеряла копия шаг — проверка назовёт
+    и шаг, и копию. Расхождение важнее самого шага, поэтому о нём говорится
+    отдельной строкой: это и есть забытая правка.
+
+    ⚠️ ТЕКСТЫ ЛОГА И ПОРЯДОК СТРОК ЗДЕСЬ НЕ СВЕРЯЮТСЯ, и это не забывчивость.
+    Сличение самого текста двух функций краснеет от любой безобидной правки и
+    быстро становится проверкой, которую перестают читать. Сверяется то, что
+    имеет последствия: деньги, письмо, память бота, мысли, активная модель.
+    Секундомер и потолки живут в своих группах (check_stopwatch,
+    check_wait_budgets) — здесь они не дублируются.
+
+    Сценарий один и тот же на обе копии: ПЕРВАЯ модель очереди отказывает,
+    отвечает запасная. Сеть и часы подставные — ждать на выкатке нельзя.
+    """
+    import requests
+    import config as cfg
+    from database import history as hist
+    from services import gemini as g
+
+    problems = []
+    done = 0
+
+    USER = -777033            # свой id: чужую переписку во временной базе не трогаем
+    THOUGHT = "сначала прикину, о чём просят"
+    ANSWER = "вот ответ человеку"
+
+    class Clock:
+        def __init__(self): self.t = 1000.0
+        def monotonic(self): return self.t
+        def perf_counter(self): return self.t
+        def sleep(self, s): self.t += s
+        def time(self): return 1700000000.0
+
+    clock = Clock()
+
+    class Silent:
+        """Вместо логгера: строки этой проверке не нужны, шум в выводе — нужен ещё меньше."""
+        def _skip(self, *a, **kw): pass
+        debug = info = warning = error = exception = _skip
+
+    asked = []          # модели, к которым обратились, по порядку
+    charged = []        # [модель] — учёт вызова в статистике
+    remembered = []     # [(подпись, текст ответа, модель)] — запись в память бота
+    told = []           # [(что, список отказавших)] — письмо владельцу об отказе
+    dead = []           # письмо «вся очередь легла» — в этом сценарии его быть не должно
+
+    class _Refused:
+        @staticmethod
+        def raise_for_status():
+            raise requests.exceptions.HTTPError("503 Server Error: подставной отказ")
+
+        @staticmethod
+        def json():
+            return {}
+
+    class _Answered:
+        @staticmethod
+        def raise_for_status():
+            pass
+
+        @staticmethod
+        def json():
+            # Родной формат Gemini: мысли — ОТДЕЛЬНЫЕ части с флагом "thought".
+            # Иначе проверять «мысли не попали в память» было бы не на чем.
+            return {
+                "candidates": [{"content": {"parts": [
+                    {"text": THOUGHT, "thought": True},
+                    {"text": ANSWER},
+                ]}}],
+                "usageMetadata": {"promptTokenCount": 10, "thoughtsTokenCount": 3,
+                                  "totalTokenCount": 15},
+            }
+
+    class _Session:
+        @staticmethod
+        def post(url, json=None, headers=None, timeout=None, **kw):
+            found = re.search(r"/models/([^:/]+):", url)
+            asked.append(found.group(1) if found else "?")
+            clock.t += 1.0
+            return _Refused if len(asked) == 1 else _Answered
+
+    # Что обязана сделать КАЖДАЯ из двух копий. Первым — название шага, вторым —
+    # как о нём жаловаться человеку, третьим — сам вопрос.
+    def all_steps(answer, active):
+        want = asked[-1] if asked else None        # ответившая — последняя, к кому обратились
+        first = asked[0] if asked else None        # отказавшая — первая
+        failed = (told[0][1] if told else None) or []
+        return (
+            ("расход списан на ответившую",
+             (f"расход записан на {charged} — а ответила {want}"
+              if charged else "расход не списан вовсе"),
+             len(charged) == 1 and charged[0] == want),
+
+            ("владельцу сказано об отказавшей",
+             ("письма об отказе не было" if not told
+              else f"в письме владельцу нет отказавшей {first}: {failed}"),
+             len(told) == 1 and any(m == first for m, _ in failed) and not dead),
+
+            ("разговор записан в память бота",
+             ("в память бота не записано ничего" if not remembered
+              else f"в памяти записей {len(remembered)}, модель {remembered[0][2]} — "
+                   f"а ответила {want}"),
+             len(remembered) == 1 and remembered[0][2] == want),
+
+            ("мыслей модели в памяти нет",
+             "в память бота попали мысли модели — они уедут в следующий запрос",
+             bool(remembered) and THOUGHT not in (remembered[0][1] or "")),
+
+            ("мысли ушли человеку",
+             "человек не увидел мыслей модели — свёрнутой цитате взяться не из чего",
+             THOUGHT in (answer or "")),
+
+            ("человек получил ответ",
+             "человеку ушла заглушка вместо ответа запасной модели",
+             ANSWER in (answer or "")),
+
+            ("активная модель не подменилась",
+             (f"после подстраховки активной стала {hist.get_setting('active_model', '')}, "
+              f"а была {active}"),
+             hist.get_setting("active_model", "") == active),
+        )
+
+    saved = {name: getattr(g, name) for name in (
+        "time", "logger", "_http", "_notify_models_failed", "_notify_chain_dead",
+        "RAG_ENABLED")}
+    saved_hist = {name: getattr(hist, name) for name in ("register_api_call", "add_messages")}
+    saved_active = hist.get_setting("active_model", "")
+    try:
+        g.time = clock
+        g.logger = Silent()
+        g._http = lambda: _Session()
+        g._notify_models_failed = lambda kind, failures, **kw: told.append((kind, failures))
+        g._notify_chain_dead = lambda *a, **kw: dead.append(a)
+        # Поиск по базе знаний сам зовёт модели — здесь он сбил бы счёт обращений.
+        g.RAG_ENABLED = False
+        hist.register_api_call = charged.append
+        hist.add_messages = (lambda chat_id, user_id, user_text, answer,
+                             prompt_tokens=0, model_name=None, total_tokens=0:
+                             remembered.append((user_text, answer, model_name)))
+
+        result = {}
+        for label, ask, chain in (
+                ("голосовое", lambda: g.ask_gemini_audio(USER, USER, "QQ"),
+                 [m for m in cfg.AUDIO_FALLBACK_CHAIN if m in cfg.AVAILABLE_MODELS]),
+                ("видео", lambda: g.ask_gemini_video(USER, USER, "QQ"),
+                 [m for m in cfg.VIDEO_FALLBACK_CHAIN
+                  if cfg.AVAILABLE_MODELS.get(m, {}).get("video")])):
+            done += 1
+            if len(chain) < 2:
+                problems.append(f"{label}: в очереди меньше двух моделей — подстраховку "
+                                f"проверить нечем, сценарий этой группы не отработал")
+                continue
+            for box in (asked, charged, remembered, told, dead):
+                box.clear()
+            g._quota_blocked.clear()
+            hist.set_setting("active_model", chain[0])
+            answer = ask()
+            result[label] = all_steps(answer, chain[0])
+
+        # ── Жалобы. Расхождение копий важнее самого шага: это и есть забытая правка ──
+        if len(result) == 2:
+            (one_label, one), (two_label, two) = result.items()
+            for (name, why_one, ok_one), (_, why_two, ok_two) in zip(one, two):
+                done += 1
+                if ok_one and ok_two:
+                    continue
+                if ok_one != ok_two:
+                    good, bad, why = ((one_label, two_label, why_two) if ok_one
+                                      else (two_label, one_label, why_one))
+                    problems.append(f"«{name}»: это делает {good}, а {bad} — нет: {why}. "
+                                    f"Похоже на правку, сделанную в одной копии из двух")
+                else:
+                    problems.append(f"«{name}»: этого не делает ни {one_label}, "
+                                    f"ни {two_label} — {why_one}")
+    finally:
+        for name, value in saved.items():
+            setattr(g, name, value)
+        for name, value in saved_hist.items():
+            setattr(hist, name, value)
+        hist.set_setting("active_model", saved_active)
+
+    return problems, (f"{done} проверок: на обеих копиях — расход на ответившую, письмо "
+                      f"владельцу, память бота без мыслей, мысли человеку, активная "
+                      f"модель на месте; расхождение копий названо отдельно")
+
+
 CHECKS = (
     ("деньги — расчёт стоимости запросов", check_money),
     ("квота Qwen — оборванный ответ, срок и письма", check_qwen_quota),
@@ -6173,6 +6375,7 @@ CHECKS = (
     ("уведомления о базе знаний живут по сроку", check_rag_notice),
     ("фото уходит зрячей модели, а не в пустоту", check_photo_route),
     ("секундомер — время ответившей модели, а не всей очереди", check_stopwatch),
+    ("голосовое и видео делают одно и то же", check_media_twins),
 )
 
 

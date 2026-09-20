@@ -2039,7 +2039,9 @@ def _rag_block(query_text: str, *, remember_query: bool = True) -> str:
 def ask_gemini_audio(chat_id: int, user_id: int, audio_base64: str) -> str:
     """
     Отправляет голосовое сообщение пользователя в Gemini API (native generateContent).
-    Стратегия устойчивости: 2 попытки на активной модели, затем фолбэк на FALLBACK_MODEL.
+    Стратегия устойчивости: ОДНА попытка на каждую модель очереди
+    AUDIO_FALLBACK_CHAIN, пока весь перебор укладывается в общий потолок
+    _DIRECT_AUDIO_BUDGET_SEC.
     Технические ошибки наружу не отдаются — при полном провале возвращается мягкое сообщение.
 
     С 16.08.2026 подмешивает базу знаний: голосовое сначала расшифровывается
@@ -2106,7 +2108,7 @@ def ask_gemini_audio(chat_id: int, user_id: int, audio_base64: str) -> str:
     attempt_started = 0.0
     refusals = 0
 
-    def _try_audio(model_name: str, attempts: int = 2, timeout: int = GEMINI_TIMEOUT):
+    def _try_audio(model_name: str, attempts: int = 1, timeout: int = GEMINI_TIMEOUT):
         nonlocal attempt_started, refusals
         last_error = None
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
