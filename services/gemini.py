@@ -798,8 +798,16 @@ def _describe_image(image_base64: str, chain_limit: int = 0,
                 "stream": False,
                 "extra_body": _media_thinking_openai(model_name),
             }
-            logger.info("🤖 Запрос к модели %s (описание фото%s)",
-                        model_name, f", картинок {len(content)}" if len(content) > 1 else "")
+            # ⚠️ ЗНАЧОК 🔎 И СЛОВО «СЛУЖЕБНЫЙ» — 21.09.2026, по жалобе Максима
+            # на нечитаемый лог. Этот поход к модели НЕ ответ человеку: он
+            # пересказывает вложение словами, чтобы было чем искать статьи в
+            # базе знаний (или чтобы записать разбор в стенограмму — какой
+            # именно, говорит purpose). Раньше строка начиналась с 🤖 и слов
+            # «Запрос к модели», как настоящий ответ, и в логе эти два шага
+            # шли подряд и читались как подмена модели.
+            logger.info("🔎 Служебный запрос к модели %s — пересказ фото %s%s",
+                        model_name, purpose,
+                        f", картинок {len(content)}" if len(content) > 1 else "")
             start = time.perf_counter()
             response = _http().post(
                 GEMINI_API_URL,
@@ -814,10 +822,10 @@ def _describe_image(image_base64: str, chain_limit: int = 0,
             if not text:
                 # Пустой ответ — тоже отказ: идём к следующей модели, иначе в
                 # стенограмму уйдут пустые скобки вместо разбора.
-                logger.warning("🤖 %s вернула пустое описание фото — пробую следующую", model_name)
+                logger.warning("🔎 %s вернула пустой пересказ фото — пробую следующую", model_name)
                 failures.append((model_name, "пустой ответ"))
                 continue
-            logger.info("🤖 Ответ от %s за %.1f с (описание фото)", model_name, elapsed)
+            logger.info("🔎 Служебный ответ от %s за %.1f с (пересказ фото)", model_name, elapsed)
             return text
         except Exception as e:
             # ⚠️ warning, а не debug (2026-08-10): молчаливый сбой разбора
@@ -832,12 +840,12 @@ def _describe_image(image_base64: str, chain_limit: int = 0,
                 # на такой случай, в этой ветке его просто забыли позвать.
                 # Это НЕ «полный текст ответа моделей», который Максим просил
                 # убрать из логов 11.08: тут не ответ, а причина отказа.
-                logger.warning("🤖 %s не описала фото: %s %s", model_name, e, _err_body(e))
+                logger.warning("🔎 %s пересказ фото не сделала: %s %s", model_name, e, _err_body(e))
     # ⚠️ Число пробовавшихся моделей в строке ОБЯЗАТЕЛЬНО: на пути поиска по
     # базе их МЕНЬШЕ, чем звеньев очереди (у фото три, `_SEARCH_PHOTO_CHAIN_LIMIT`),
     # и «не описала НИ ОДНА» читалось как «отказали все четыре» —
     # см. _notify_chain_dead.
-    logger.error("⚠️ 🤖 Фото не описала ни одна модель (пробовали моделей: %d)", len(failures))
+    logger.error("⚠️ 🔎 Пересказ фото не сделала ни одна модель (пробовали моделей: %d)", len(failures))
     _notify_chain_dead(f"Фото (разбор {purpose})", failures,
                        _DEAD_NO_KB if purpose == _PURPOSE_SEARCH else _DEAD_SILENT)
     return ""
@@ -1786,7 +1794,20 @@ def _gemini_chat_request(messages: list, kind: str = "текст", has_image: bo
             if cand != active_model and cand in AVAILABLE_MODELS and cand not in chain:
                 chain.append(cand)
 
-    logger.info("%s Запрос к модели %s", _icon_of(chain[0]), chain[0])
+    # ⚠️ «— ОТВЕТ ЧЕЛОВЕКУ» приписано 21.09.2026 по жалобе Максима: он не смог
+    # прочитать собственный лог. Перед этой строкой идут СЛУЖЕБНЫЕ походы к
+    # моделям (пересказ фото для поиска по базе), и раньше они были написаны
+    # тем же «Запрос к модели …» — отличить, где ответ человеку, а где подготовка,
+    # можно было только по скобкам в конце строки. Теперь служебные помечены 🔎
+    # и словом «служебный», а эта строка говорит о себе прямо.
+    # У судьи проактивного режима (chain_override) приписки нет намеренно: он
+    # человеку не отвечает, он решает, вмешиваться ли боту в разговор.
+    if chain_override:
+        logger.info("%s Запрос к модели %s", _icon_of(chain[0]), chain[0])
+    else:
+        logger.info("%s Запрос к модели %s — ОТВЕТ ЧЕЛОВЕКУ%s",
+                    _icon_of(chain[0]), chain[0],
+                    " (фото ушло ей)" if has_image else "")
 
     start = time.perf_counter()
     for i, model_name in enumerate(chain):
