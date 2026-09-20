@@ -463,6 +463,110 @@ def _build_chat_log_header(stats: dict) -> str:
     )
 
 
+# ─────────────────────────────────────────────
+#  Экран «👤 Разговор с ботом»: список людей и запись одного человека
+#  (2026-09-21, просьба Максима; роутер: adm_logs_dlg / dlg:*)
+# ─────────────────────────────────────────────
+
+# Сколько человек показывать кнопками. Потолок нужен не ради лимита Telegram
+# (там ~100 кнопок), а ради читаемости: список открывают, чтобы найти нужного,
+# а не листать всех. Кто не влез — назван числом в тексте.
+_DIALOG_LIST_LIMIT = 30
+
+
+def _dialog_person_label(user_id: int) -> str:
+    """
+    Имя человека для кнопки и шапки: имя → @ник → «id 123».
+
+    ⚠️ Имя берётся из ЛИЧНОГО ДЕЛА тем же способом, что в списке
+    «👥 Пользователи» (panel_users._display_name) — второй сборки имён в
+    проекте быть не должно, иначе один и тот же человек подпишется в двух
+    панелях по-разному. Кого в деле нет (писал только в личку) — останется
+    под своим id, и это честно: другого имени у бота про него нет.
+    """
+    try:
+        from database.history import get_dossier
+        from handlers.admin.panel_users import _display_name
+        d = get_dossier(user_id)
+        if d and (d.get("first_name") or d.get("username")):
+            return _display_name(d)
+    except Exception as e:
+        logger.debug("👤 Не удалось узнать имя человека %s: %s", user_id, e)
+    return f"id {user_id}"
+
+
+def _build_dialog_list(viewer_id: int = 0):
+    """Текст и клавиатура списка людей, у которых есть запись обращений."""
+    from services import dialog_log
+    from services.backup import human_size
+    from services import roles
+
+    records = dialog_log.list_records()
+    hidden = max(0, len(records) - _DIALOG_LIST_LIMIT)
+    shown = records[:_DIALOG_LIST_LIMIT]
+    total = sum(r["size"] for r in records)
+
+    text = (
+        "👤 <b>РАЗГОВОР С БОТОМ</b>\n"
+        "───────────────────────────\n"
+        "<i>Дословно: что ушло модели и что она ответила. Личка и обращения "
+        "в группе вместе — память у них общая.</i>\n"
+    )
+    if shown:
+        text += f"\nЗаписи: <b>{len(records)}</b> чел. · {human_size(total)}\n"
+        if hidden:
+            text += f"<i>Показаны {_DIALOG_LIST_LIMIT} самых свежих, скрыто ещё {hidden}.</i>\n"
+        text += "\n<i>Нажми на человека, чтобы открыть его запись.</i>"
+    else:
+        text += ("\nЗаписей пока нет: боту никто не писал напрямую с тех пор, "
+                 "как записи завели (или их стёрли).")
+
+    buttons = []
+    for r in shown:
+        uid = r["user_id"]
+        role = roles.role_of(uid)
+        mark = "👑 " if role == "owner" else ("🛡 " if role == "moderator" else "")
+        buttons.append(InlineKeyboardButton(
+            f"{mark}{_dialog_person_label(uid)[:16]} · {r['asks']}",
+            callback_data=f"dlg:card:{uid}"))
+
+    keyboard = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    if shown:
+        keyboard.append([InlineKeyboardButton("🧹 Очистить всё",
+                                              callback_data="dlg:wipe")])
+    keyboard.append(_logs_back_row())
+    return text, InlineKeyboardMarkup(keyboard)
+
+
+def _build_dialog_card_header(stats: dict) -> str:
+    """Шапка записи одного человека — она же уходит в _build_log_text."""
+    from services.backup import human_size
+
+    uid = stats["user_id"]
+    # Время последней записи — тем же форматом, что в журналах модерации:
+    # сегодняшнее часами, старое с датой.
+    last = _fmt_mod_time(stats["last"]) if stats["last"] else "—"
+    return (
+        f"👤 <b>{html.escape(_dialog_person_label(uid).upper())}</b> "
+        f"<code>id {uid}</code>\n"
+        f"<code>{html.escape(stats['name'])}</code> · {human_size(stats['size'])}\n"
+        f"🕐 первое: {stats['first'] or '—'} · последнее: {last} · "
+        f"🔍 обращений: {stats['asks']}\n\n"
+        "Последние строки:\n"
+    )
+
+
+def _dialog_card_rows(user_id: int):
+    """Кнопки под записью человека: скачать, стереть, назад к списку."""
+    return [
+        [
+            InlineKeyboardButton("💾 Скачать запись", callback_data=f"dlg:file:{user_id}"),
+            InlineKeyboardButton("🧹 Очистить", callback_data=f"dlg:clr:{user_id}"),
+        ],
+        [InlineKeyboardButton("⬅️ К списку", callback_data="adm_logs_dlg")],
+    ]
+
+
 def _build_log_text(fname: str, raw: bytes, header: str = "") -> str:
     """Текст сообщения с логами: имя, размер и максимум последних строк в <pre>.
 
