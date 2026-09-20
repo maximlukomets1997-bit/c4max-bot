@@ -1948,6 +1948,32 @@ def _media_search_text(caption: str = "", *, image_base64: str = "",
                        audio_base64: str = "", video_base64: str = "",
                        video_mime: str = "video/mp4") -> str:
     """
+    Только текст для поиска по базе знаний — прежнее имя и прежний ответ.
+    Разбор файла делает _media_understood, здесь берётся первый из двух его
+    ответов (фото в ask_gemini и проверки зовут именно это имя).
+    """
+    return _media_understood(caption, image_base64=image_base64,
+                             audio_base64=audio_base64, video_base64=video_base64,
+                             video_mime=video_mime)[0]
+
+
+def _media_understood(caption: str = "", *, image_base64: str = "",
+                      audio_base64: str = "", video_base64: str = "",
+                      video_mime: str = "video/mp4") -> tuple:
+    """
+    ОДИН поход к модели — ДВА ответа: (текст для поиска по базе, ПОЛНЫЙ разбор).
+
+    ⚠️ ЗАЧЕМ ДВА (21.09.2026). Поиску по базе хватает первых двух фраз
+    (_MEDIA_SEARCH_SENTENCES), и до этого дня всё остальное выбрасывалось.
+    Теперь полный разбор нужен вторым потребителем — подсказкой отвечающей
+    модели на голосовое (_ask_native_media): там обрезка до двух фраз срезала
+    бы ровно то, ради чего подсказка и нужна. Звать разбор ДВАЖДЫ нельзя —
+    это второй поход к модели и вторая плата за то же самое.
+
+    Второй ответ пуст, когда разбора не было вовсе: база знаний погашена,
+    вложение без файла или модели не ответили. Пустой разбор — не беда:
+    поиск пропускается, подсказка не добавляется, поведение прежнее.
+
     Текст, которым ищем статьи базы знаний, когда пришло вложение:
     подпись пользователя ПЛЮС первые фразы разбора файла.
 
@@ -1970,10 +1996,10 @@ def _media_search_text(caption: str = "", *, image_base64: str = "",
     try:
         import services.rag as rag_module
         if not rag_module.is_active():
-            return caption
+            return caption, ""
     except Exception as e:
         logger.error("⚠️ Не удалось проверить состояние базы знаний: %s", e)
-        return caption
+        return caption, ""
 
     # ⚠️ purpose — ТОЛЬКО для текста уведомления владельцу при полном провале
     # (28.08.2026). До этого оно всегда говорило «для стенограммы», хотя ЗДЕСЬ
@@ -1990,20 +2016,20 @@ def _media_search_text(caption: str = "", *, image_base64: str = "",
         kind, described = "видео", _describe_video(video_base64, video_mime, chain_limit=1,
                                                    purpose=_PURPOSE_SEARCH)
     else:
-        return caption
+        return caption, ""
 
     if not described:
-        return caption
+        return caption, ""
 
     head = _first_sentences(described)
     if not head:
-        return caption
+        return caption, described
     # ⚠️ ТЕКСТА РАЗБОРА В ЛОГЕ НЕТ — общее правило Максима (11.08.2026) про
     # полные тексты ответов моделей. Остаётся факт и длина: по ним видно, что
     # шаг сработал, и во что обошёлся.
-    logger.info("%s Вложение разобрано для поиска по базе (%s, %d символов)",
-                RAG_ICON, kind, len(head))
-    return f"{caption} {head}".strip() if caption else head
+    logger.info("%s Вложение разобрано для поиска по базе (%s, %d символов, "
+                "разбор целиком %d)", RAG_ICON, kind, len(head), len(described))
+    return (f"{caption} {head}".strip() if caption else head), described
 
 
 def _rag_block(query_text: str, *, remember_query: bool = True) -> str:
@@ -2056,10 +2082,40 @@ def _native_media_chain(active_model: str, order: list, accepts) -> list:
     return chain
 
 
+def _media_hint(kind: str, described: str) -> str:
+    """
+    Подсказка отвечающей модели: что во вложении услышала/увидела вспомогательная
+    (21.09.2026).
+
+    ⚠️ ЗАЧЕМ. 20.09.2026 бот дважды ответил на голосовое мимо: модель не нашла
+    в трёхсекундной записи речи и вместо «не разобрал» уверенно пошутила про
+    таймкод «00:00», достроив ответ из прошлой темы разговора. При этом
+    ВСПОМОГАТЕЛЬНАЯ модель тот же файл расслышала — ей уходит только он, без
+    истории и промпта, и тонуть звуку не в чем. Разбор уже делался и молча
+    выбрасывался; теперь он едет рядом с файлом.
+
+    ⚠️ ФАЙЛ ПО-ПРЕЖНЕМУ УХОДИТ ЦЕЛИКОМ, и текст об этом говорит прямо: слушать
+    своими ушами, подсказка — на случай, если не вышло. Решение Максима от
+    2026-07-24 («модели уходит только сам файл, подсказок от бота нет») этим
+    не отменяется: бот по-прежнему не сочиняет за человека, он лишь передаёт
+    то, что услышала другая модель, и честно это называет.
+
+    ⚠️ ЦЕНА ОШИБКИ. Расшифровка может быть неверной, и тогда модель пойдёт за
+    ней вместо своих ушей. Отсюда порядок слов: сначала «слушай сам», потом
+    «если не разобрал».
+    """
+    described = " ".join((described or "").split())
+    if not described:
+        return ""
+    return (f"[Вспомогательная модель разобрала это вложение ({kind}) так: "
+            f"«{described}». Слушай/смотри файл сам — этот текст нужен только "
+            f"на случай, если разобрать не удалось, и в ответе его не упоминай.]")
+
+
 def _ask_native_media(chat_id: int, user_id: int, *, kind: str, notify_kind: str,
-                      user_parts: list, search_text_fn, context_note: str,
+                      user_parts: list, understand_fn, context_note: str,
                       order: list, accepts, base_timeout: int, budget: int,
-                      dead_title: str) -> str:
+                      dead_title: str, hint: bool = False) -> str:
     """
     ОБЩИЙ ПУТЬ ФАЙЛА К ЗРЯЧЕЙ/СЛЫШАЩЕЙ МОДЕЛИ: голосовое и видео (21.09.2026).
 
@@ -2078,8 +2134,16 @@ def _ask_native_media(chat_id: int, user_id: int, *, kind: str, notify_kind: str
                        переписать текст письма, которое читает человек;
       user_parts     — части последнего сообщения: сам файл, у видео перед ним
                        подпись, если она есть;
-      search_text_fn — чем искать по базе знаний; зовётся ТОЛЬКО при RAG_ENABLED,
-                       потому что сам по себе это запрос к лёгкой модели;
+      understand_fn  — разбор вложения вспомогательной моделью; отдаёт пару
+                       «текст для поиска по базе, разбор целиком». Зовётся
+                       ТОЛЬКО при RAG_ENABLED, потому что сам по себе это
+                       запрос к лёгкой модели;
+      hint           — класть ли разбор рядом с файлом подсказкой (см.
+                       _media_hint). ⚠️ У видео ВЫКЛЮЧЕНО и это намеренно:
+                       промахи были у голосового, видео разбирается верно, а
+                       правка «на всякий случай» в проекте без тестов стоит
+                       дороже, чем приносит. ⚠️ Без базы знаний подсказки не
+                       будет вовсе: разбор делает она;
       context_note   — что останется в памяти бота вместо файла;
       order/accepts  — очередь подстраховки и проверка «модель принимает этот тип»;
       base_timeout   — потолок одной попытки;
@@ -2107,12 +2171,19 @@ def _ask_native_media(chat_id: int, user_id: int, *, kind: str, notify_kind: str
     # «PROMPT ВЫКЛ»: статьи — это факты, а не характер. Файл сначала разбирает
     # лёгкая модель, и по её разбору ищутся статьи; сам разбор человеку НЕ
     # показывается (см. блок помощников выше).
+    hint_text = ""
     if RAG_ENABLED:
-        block = _rag_block(search_text_fn(), remember_query=False)
+        search_text, described = understand_fn()
+        block = _rag_block(search_text, remember_query=False)
         if block:
             current_system_prompt = (
                 f"{current_system_prompt}\n\n{block}" if current_system_prompt else block
             )
+        if hint:
+            hint_text = _media_hint(kind, described)
+            if hint_text:
+                logger.info("%s Подсказка о вложении добавлена к запросу (%s, %d символов)",
+                            RAG_ICON, kind, len(hint_text))
 
     native_history = []
     for msg in history:
@@ -2129,7 +2200,11 @@ def _ask_native_media(chat_id: int, user_id: int, *, kind: str, notify_kind: str
     while native_history and native_history[0]["role"] != "user":
         native_history.pop(0)
 
-    native_history.append({"role": "user", "parts": user_parts})
+    # Подсказка идёт ПЕРЕД файлом и отдельной частью: так видно, что это текст
+    # от бота, а не слова человека, и сам файл остаётся нетронутым.
+    native_history.append({"role": "user",
+                           "parts": ([{"text": hint_text}] + user_parts) if hint_text
+                                    else user_parts})
 
     payload = {"contents": native_history}
     # Персонаж/системный промпт для native API передаётся через systemInstruction
@@ -2295,7 +2370,8 @@ def ask_gemini_audio(chat_id: int, user_id: int, audio_base64: str) -> str:
         kind="аудио",
         notify_kind="голосовое",
         user_parts=[{"inlineData": {"mimeType": "audio/ogg", "data": audio_base64}}],
-        search_text_fn=lambda: _media_search_text(audio_base64=audio_base64),
+        understand_fn=lambda: _media_understood(audio_base64=audio_base64),
+        hint=True,
         context_note="[Голосовое сообщение]",
         order=AUDIO_FALLBACK_CHAIN,
         accepts=lambda model_name: model_name in AUDIO_FALLBACK_CHAIN,
@@ -2340,8 +2416,8 @@ def ask_gemini_video(chat_id: int, user_id: int, video_base64: str,
         kind="видео",
         notify_kind="видео",
         user_parts=parts,
-        search_text_fn=lambda: _media_search_text(user_text, video_base64=video_base64,
-                                                  video_mime=mime_type),
+        understand_fn=lambda: _media_understood(user_text, video_base64=video_base64,
+                                                video_mime=mime_type),
         context_note=f"[Видео] {caption}".strip() if caption else "[Видео]",
         order=VIDEO_FALLBACK_CHAIN,
         accepts=_supports_video,

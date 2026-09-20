@@ -6346,6 +6346,62 @@ def check_media_twins():
                 else:
                     problems.append(f"«{name}»: этого не делает ни {one_label}, "
                                     f"ни {two_label} — {why_one}")
+
+        # ── Подсказка о вложении доезжает до модели (21.09.2026) ──────────
+        #
+        # ⚠️ ВЫШЕ ЭТОГО НЕ ВИДНО И НЕ МОЖЕТ БЫТЬ ВИДНО: там база знаний
+        # выключена (RAG_ENABLED = False), а разбор вложения делает именно она.
+        # Без этого блока правка 21.09.2026 не проверялась бы ничем.
+        #
+        # ⚠️ Ради чего: 20.09.2026 бот дважды ответил на голосовое мимо —
+        # модель не нашла речи в трёхсекундной записи и достроила ответ из
+        # прошлой темы. Разбор вспомогательной модели к тому моменту УЖЕ был
+        # сделан и выброшен. Теперь он едет рядом с файлом, и проверка следит
+        # за тремя вещами: подсказка дошла, файл при этом на месте, а у видео
+        # подсказки нет (там она намеренно выключена).
+        HEARD = "расскажи про комплексы активной защиты"
+        seen = {}
+
+        class _Catch:
+            @staticmethod
+            def post(url, json=None, headers=None, timeout=None, **kw):
+                seen.setdefault("payload", json)
+                clock.t += 1.0
+                return _Answered
+
+        g._http = lambda: _Catch()
+        g.RAG_ENABLED = True
+        saved_understood, saved_rag = g._media_understood, g._rag_block
+        try:
+            g._media_understood = lambda *a, **kw: ("поисковый текст", HEARD)
+            g._rag_block = lambda *a, **kw: ""     # в базу не ходим: проверяем не её
+            for label, ask, want_hint in (
+                    ("голосовое", lambda: g.ask_gemini_audio(USER, USER, "QQ"), True),
+                    ("видео", lambda: g.ask_gemini_video(USER, USER, "QQ"), False)):
+                seen.clear()
+                hist.set_setting("active_model", cfg.FALLBACK_MODEL)
+                ask()
+                parts = ((seen.get("payload") or {}).get("contents") or [{}])[-1].get("parts", [])
+                texts = " ".join(p.get("text", "") for p in parts if isinstance(p, dict))
+                files = [p for p in parts if isinstance(p, dict) and p.get("inlineData")]
+
+                done += 1
+                if want_hint and HEARD not in texts:
+                    problems.append(
+                        f"{label}: разбор вспомогательной модели НЕ доехал до отвечающей — "
+                        f"он снова делается и выбрасывается, как до 21.09.2026")
+                if not want_hint and HEARD in texts:
+                    problems.append(
+                        f"{label}: подсказка добавлена, хотя у видео она намеренно "
+                        f"выключена (hint=False) — правка задела не тот тип")
+
+                done += 1
+                if not files:
+                    problems.append(
+                        f"{label}: в запросе НЕТ самого файла — подсказка вытеснила его, "
+                        f"и модель теперь читает пересказ вместо оригинала")
+        finally:
+            g._media_understood, g._rag_block = saved_understood, saved_rag
     finally:
         for name, value in saved.items():
             setattr(g, name, value)
@@ -6355,7 +6411,8 @@ def check_media_twins():
 
     return problems, (f"{done} проверок: на обоих типах — расход на ответившую, письмо "
                       f"владельцу, память бота без мыслей и со своей подписью, мысли "
-                      f"человеку, активная модель на месте; расхождение типов названо отдельно")
+                      f"человеку, активная модель на месте; расхождение типов названо "
+                      f"отдельно; разбор вложения доезжает до модели, а файл остаётся")
 
 
 def check_dialog_log():
