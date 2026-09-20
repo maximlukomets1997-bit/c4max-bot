@@ -54,12 +54,16 @@ from .panel_rag import _end_kb_test
 # провайдером (V4 Pro — с 14.09, запросы к нему уводятся на V4.1 Flash по её
 # же цене), на их место пришла одна V4.1 Flash. Та же длинная кнопка во всю
 # ширину, что у 3.8 Flash и qwen3.8-max, и по той же причине.
+# 2026-09-21: добавлена qwen3.8-flash — В ПАРУ к qwen3.8-max (выбор Максима из
+# двух показанных раскладок; вторая ставила новинку отдельной длинной строкой,
+# как делали с Gemini 3.8 Flash). Одиночный ряд Qwen снова стал парным, число
+# рядов не изменилось.
 _MODEL_BUTTON_ROWS = [
     ["gemini-3.5-flash-lite", "gemini-3.6-flash"],
     ["gemini-3.5-flash", "gemini-3.7-flash"],
     ["gemini-3.8-flash"],
     ["qwen3.7-plus", "qwen3.7-max"],
-    ["qwen3.8-max"],
+    ["qwen3.8-max", "qwen3.8-flash"],
     ["deepseek-flash"],
     ["mimo-v2.5", "mimo-v2.5-pro"],
 ]
