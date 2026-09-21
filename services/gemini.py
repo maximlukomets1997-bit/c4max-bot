@@ -776,8 +776,20 @@ def _describe_image(image_base64: str, chain_limit: int = 0,
     ответила. Провал разбора не ломает ни того, ни другого вызывающего:
     у проактивного триггером останется подпись, у поиска — тоже.
     """
-    content = [{"type": "image_url",
-                "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}}]
+    # ⚠️ ЗАДАНИЕ РАЗБОРЩИКУ (21.09.2026, решение Максима). До этого дня модели
+    # уходил ГОЛЫЙ файл без единого слова, и она сама решала, что с ним делать:
+    # один снимок описывала по-русски, другой — английским списком. Текст
+    # правится из Телеграма (/photo_prompt_set), заводской — config.
+    # ⚠️ Правило «к медиа бот от себя ничего не добавляет» (24.07) этим и
+    # отменено — осознанно и только для СЛУЖЕБНОГО разбора: ответ человеку
+    # по-прежнему собирается без выдумок бота.
+    images = 1 + len(extra_images or [])
+    content = []
+    task = hist.get_media_prompt_photo()
+    if task:
+        content.append({"type": "text", "text": task})
+    content.append({"type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}})
     for _extra in (extra_images or []):
         content.append({"type": "image_url",
                         "image_url": {"url": f"data:image/jpeg;base64,{_extra}"}})
@@ -786,7 +798,7 @@ def _describe_image(image_base64: str, chain_limit: int = 0,
     chain_started = time.monotonic()
     for model_name in _media_chain(chain_limit):
         attempt_timeout = _chain_attempt_timeout(chain_started,
-                                                 _describe_timeout(len(content)))
+                                                 _describe_timeout(images))
         if attempt_timeout is None:
             logger.info("🤖 Разбор фото прекращён: перебор занял общий потолок "
                         "%d с, оставшихся моделей не пробуем", _MEDIA_CHAIN_BUDGET_SEC)
@@ -807,7 +819,7 @@ def _describe_image(image_base64: str, chain_limit: int = 0,
             # шли подряд и читались как подмена модели.
             logger.info("🔎 Служебный запрос к модели %s — пересказ фото %s%s",
                         model_name, purpose,
-                        f", картинок {len(content)}" if len(content) > 1 else "")
+                        f", картинок {images}" if images > 1 else "")
             start = time.perf_counter()
             response = _http().post(
                 GEMINI_API_URL,
@@ -871,7 +883,13 @@ def _transcribe_audio(audio_base64: str, chain_limit: int = 0,
     модель цепочки. Провал ничего не ломает: проактивный просто не отреагирует
     на голосовое, а поиск по базе будет пропущен.
     """
-    parts = [{"inlineData": {"mimeType": "audio/ogg", "data": audio_base64}}]
+    # Задание разборщику — см. такой же блок у фото (_describe_image).
+    # Текст правится из Телеграма (/voice_prompt_set), заводской — в config.
+    parts = []
+    task = hist.get_media_prompt_voice()
+    if task:
+        parts.append({"text": task})
+    parts.append({"inlineData": {"mimeType": "audio/ogg", "data": audio_base64}})
 
     failures = []          # [(модель, причина)] — для уведомления владельцу
     chain_started = time.monotonic()
@@ -951,7 +969,13 @@ def _describe_video(video_base64: str, mime_type: str = "video/mp4",
     ask_gemini_video зовёт разбор с chain_limit=1, одна живая модель. Резать
     сам таймаут по-прежнему нельзя: 90 секунд ролику нужны честно.
     """
-    parts = [{"inlineData": {"mimeType": mime_type, "data": video_base64}}]
+    # Задание разборщику — см. такой же блок у фото (_describe_image).
+    # Текст правится из Телеграма (/video_prompt_set), заводской — в config.
+    parts = []
+    task = hist.get_media_prompt_video()
+    if task:
+        parts.append({"text": task})
+    parts.append({"inlineData": {"mimeType": mime_type, "data": video_base64}})
 
     failures = []          # [(модель, причина)] — для уведомления владельцу
     chain_started = time.monotonic()
@@ -1938,31 +1962,31 @@ def _gemini_chat_request(messages: list, kind: str = "текст", has_image: bo
 #  Теперь вложение сначала разбирается лёгкой моделью (те же помощники, что у
 #  режима «Сам в разговор»), и найденные слова уходят В ПОИСКОВЫЙ ЗАПРОС.
 #
-#  ⚠️ РАЗБОР МОДЕЛИ НЕ ПОКАЗЫВАЕТСЯ — ни человеку, ни основной модели. Она
-#  смотрит на сам файл своими глазами; подсунуть ей чужой пересказ вместо
-#  файла означало бы ухудшить разбор ради поиска. В промпт уходят только
-#  НАЙДЕННЫЕ СТАТЬИ, ровно как при текстовом вопросе.
+#  ⚠️ РАЗБОР МОДЕЛИ НЕ ПОКАЗЫВАЕТСЯ — ни человеку, ни основной модели, пока
+#  основная сама понимает этот тип файла: она смотрит и слушает его своими
+#  глазами и ушами, и подсунуть ей чужой пересказ значило бы ухудшить ответ.
+#  В промпт уходят только НАЙДЕННЫЕ СТАТЬИ, ровно как при текстовом вопросе.
+#  (Исключение появится на шаге 2 работы 21.09.2026: когда активная модель
+#  тип НЕ принимает, разбор становится сообщением человека — иначе она не
+#  узнает о файле ничего.)
 # ───────────────────────────────────────────────
 
-# Сколько первых фраз разбора уходит в поиск (решение Максима 16.08.2026).
-# Модель почти всегда начинает с главного — «На изображении Leopard 2A7…», —
-# а дальше идут ангар, тени и погода. Для поиска это шум: чем длиннее запрос,
-# тем меньше весит бонус за буквальное совпадение слов (в services/rag.py он
-# делится на число значимых слов), и прозвище «умка» в простыне текста тонет.
-_MEDIA_SEARCH_SENTENCES = 2
-# Страховка на случай разбора без единой точки: обрезаем по длине.
-_MEDIA_SEARCH_LIMIT = 400
-
-_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?…])\s+")
-
-
-def _first_sentences(text: str, count: int = _MEDIA_SEARCH_SENTENCES) -> str:
-    """Первые `count` фраз текста, но не длиннее _MEDIA_SEARCH_LIMIT символов."""
-    text = " ".join((text or "").split())          # переводы строк — в пробелы
-    if not text:
-        return ""
-    head = " ".join(_SENTENCE_SPLIT_RE.split(text)[:count]).strip()
-    return head[:_MEDIA_SEARCH_LIMIT]
+# ⚠️ ОБРЕЗКИ РАЗБОРА ДО ДВУХ ФРАЗ БОЛЬШЕ НЕТ (21.09.2026, решение Максима):
+# в поиск уходит ВЕСЬ текст разбора. Обрезка стояла здесь с 16.08.2026 по
+# такому доводу: модель начинает с главного («На изображении Leopard 2A7…»),
+# а дальше идут ангар, тени и погода, и чем длиннее запрос, тем меньше весит
+# бонус за буквальное совпадение слов (в services/rag.py он делится на число
+# значимых слов) — прозвище «умка» в простыне текста тонет.
+#
+# Что изменилось и почему довод перестал перевешивать: с этого дня у
+# разборщика есть ЗАДАНИЕ (config.MEDIA_PROMPT_*) — он описывает по делу и
+# без погоды, а у длинного голосового вся суть как раз в середине, и первые
+# две фразы её отрезали. Довод не исчез: если поиск начнёт мазать по длинным
+# роликам, лечить это надо заданием разборщику («покороче»), а не молчаливым
+# возвратом обрезки — иначе снова потеряется середина.
+#
+# ⚠️ ТЕКСТ РАЗБОРА В ПОИСК ИДЁТ ЦЕЛИКОМ, НО В ОДНУ СТРОКУ: переводы строк
+# схлопываются (модель любит отвечать списком).
 
 
 def _media_search_text(caption: str = "", *, image_base64: str = "",
@@ -2042,7 +2066,7 @@ def _media_understood(caption: str = "", *, image_base64: str = "",
     if not described:
         return caption, ""
 
-    head = _first_sentences(described)
+    head = " ".join((described or "").split())
     if not head:
         return caption, described
     # ⚠️ ТЕКСТА РАЗБОРА В ЛОГЕ НЕТ — общее правило Максима (11.08.2026) про

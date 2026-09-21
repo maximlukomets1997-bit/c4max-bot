@@ -689,7 +689,10 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 "news_prompt_reset_confirm", "news_prompt_reset_cancel",
                 "rag_prompt_reset_confirm", "rag_prompt_reset_cancel",
                 "author_prompt_reset_confirm", "author_prompt_reset_cancel",
-                "proactive_prompt_reset_confirm", "proactive_prompt_reset_cancel"):
+                "proactive_prompt_reset_confirm", "proactive_prompt_reset_cancel",
+                "voice_prompt_reset_confirm", "voice_prompt_reset_cancel",
+                "photo_prompt_reset_confirm", "photo_prompt_reset_cancel",
+                "video_prompt_reset_confirm", "video_prompt_reset_cancel"):
         await handle_prompt_reset(query, user_id, data)
         return
 

@@ -28,6 +28,9 @@ from .panel_prompts import (
     cmd_news_prompt_set, cmd_news_prompt_reset, cmd_rag_prompt_set, cmd_rag_prompt_reset,
     cmd_proactive_prompt_set, cmd_proactive_prompt_reset,
     cmd_author_prompt_set, cmd_author_prompt_reset, send_prompt_files,
+    cmd_voice_prompt_set, cmd_voice_prompt_reset,
+    cmd_photo_prompt_set, cmd_photo_prompt_reset,
+    cmd_video_prompt_set, cmd_video_prompt_reset,
 )
 from .panel_main import (send_adm_panel, cmd_adm, send_stats_panel, cmd_stats, send_api_panel,
                          send_daily_report_panel, send_weekly_report_panel)

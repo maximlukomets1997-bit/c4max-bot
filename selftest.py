@@ -6565,6 +6565,136 @@ def check_dialog_log():
                       f"старое")
 
 
+def check_media_task():
+    """
+    Задание разборщику вложений доезжает до запроса, а его разбор — до поиска
+    по базе целиком (21.09.2026).
+
+    ⚠️ ЗАЧЕМ. До этого дня вспомогательной модели уходил ГОЛЫЙ файл: она сама
+    решала, расшифровать ей голосовое или пересказать своими словами, и по
+    её тексту искались статьи базы. Теперь у неё есть задание
+    (config.MEDIA_PROMPT_*, правится из Телеграма). Пропади подстановка молча
+    — бот работать не перестанет, а разбор снова поплывёт, и заметить это
+    можно будет только глазами в записи обращений.
+
+    Сверяется ЧЕТЫРЕ вещи, и каждая ловит свою поломку:
+      • задание вообще уходит модели — и уходит ПЕРВОЙ частью, до файла;
+      • берётся СВОЙ текст из настроек, когда он задан (иначе кнопка в панели
+        промптов будет менять то, что никуда не идёт);
+      • у каждого типа СВОЁ задание — перепутанные местами голосовое и видео
+        не поймает больше ничто;
+      • в поиск по базе уходит ВЕСЬ разбор, а не первые две фразы, как было
+        до 21.09.2026.
+
+    ⚠️ Разбор зовётся только при живой базе знаний (rag.is_active) — здесь она
+    подменена на «живую»: иначе проверка молча мерила бы пустоту.
+    """
+    import config as cfg
+    from database import history as hist
+    import services.gemini as g
+    import services.rag as rag_module
+
+    problems = []
+    done = 0
+
+    # Разбор возвращает ТРИ фразы: по ним видно, режет ли поиск хвост.
+    TAIL = "Третья фраза про умку и её броню."
+    ANSWER = f"Первая фраза. Вторая фраза. {TAIL}"
+
+    sent = []
+
+    class _Answered:
+        @staticmethod
+        def raise_for_status(): pass
+
+        @staticmethod
+        def json():
+            return {"choices": [{"message": {"content": ANSWER}}],
+                    "candidates": [{"content": {"parts": [{"text": ANSWER}]}}]}
+
+    class _Session:
+        @staticmethod
+        def post(url, json=None, headers=None, timeout=None, **kw):
+            sent.append(json)
+            return _Answered
+
+    class Silent:
+        def _skip(self, *a, **kw): pass
+        debug = info = warning = error = exception = _skip
+
+    def first_text(payload):
+        """Первая текстовая часть запроса — там обязано лежать задание."""
+        if "messages" in payload:                     # фото идёт OpenAI-путём
+            parts = payload["messages"][0]["content"]
+            for part in parts:
+                if part.get("type") == "text":
+                    return (part.get("text") or "").strip()
+            return ""
+        parts = payload.get("contents", [{}])[0].get("parts", [])
+        return (parts[0].get("text") or "").strip() if parts and "text" in parts[0] else ""
+
+    saved = {name: getattr(g, name) for name in ("_http", "logger")}
+    saved_active = rag_module.is_active
+    saved_own = {key: hist.get_setting(key, "")
+                 for key in ("media_prompt_voice", "media_prompt_photo", "media_prompt_video")}
+    try:
+        g._http = lambda: _Session()
+        g.logger = Silent()
+        rag_module.is_active = lambda: True
+        for key in saved_own:
+            hist.set_setting(key, "")
+
+        # ── 1. Заводское задание каждого типа уходит первой частью ──
+        calls = (
+            ("голосовое", cfg.MEDIA_PROMPT_VOICE, lambda: g._transcribe_audio("BBBB")),
+            ("фото", cfg.MEDIA_PROMPT_PHOTO, lambda: g._describe_image("AAAA")),
+            ("видео", cfg.MEDIA_PROMPT_VIDEO, lambda: g._describe_video("CCCC", "video/mp4")),
+        )
+        for kind, factory, run in calls:
+            sent.clear()
+            run()
+            done += 1
+            if not sent:
+                problems.append(f"{kind}: запроса к разборщику не было вовсе")
+                continue
+            got = first_text(sent[0])
+            if got != factory.strip():
+                problems.append(
+                    f"{kind}: разборщику ушло не его задание — "
+                    f"{got[:60]!r} вместо {factory.strip()[:60]!r} "
+                    f"(перепутанный тип или потерянная подстановка)")
+
+        # ── 2. Свой текст из настроек перебивает заводской ──
+        sent.clear()
+        hist.set_setting("media_prompt_voice", "СВОЁ ЗАДАНИЕ ИЗ ПАНЕЛИ")
+        g._transcribe_audio("BBBB")
+        done += 1
+        if not sent or first_text(sent[0]) != "СВОЁ ЗАДАНИЕ ИЗ ПАНЕЛИ":
+            problems.append("задание из настроек не уходит модели — кнопка в панели "
+                            "промптов меняла бы текст, который никуда не идёт")
+
+        # ── 3. В поиск по базе уходит ВЕСЬ разбор ──
+        sent.clear()
+        search_text, described = g._media_understood(audio_base64="BBBB")
+        done += 1
+        if TAIL not in search_text:
+            problems.append("в поиск по базе ушёл обрезанный разбор — хвост потерян "
+                            "(до 21.09.2026 брались первые две фразы)")
+        done += 1
+        if described.strip() != ANSWER:
+            problems.append("полный разбор вернулся изменённым — им пользуется "
+                            "и поиск, и (когда активная модель файл не понимает) сам ответ")
+    finally:
+        for name, value in saved.items():
+            setattr(g, name, value)
+        rag_module.is_active = saved_active
+        for key, value in saved_own.items():
+            hist.set_setting(key, value)
+
+    return problems, (f"{done} проверок: три заводских задания на месте и не перепутаны, "
+                      f"своё из настроек перебивает заводское, в поиск уходит весь разбор")
+
+
 CHECKS = (
     ("деньги — расчёт стоимости запросов", check_money),
     ("квота Qwen — оборванный ответ, срок и письма", check_qwen_quota),
@@ -6608,6 +6738,7 @@ CHECKS = (
     ("голосовое и видео доходят до конца пути", check_media_twins),
     ("запись обращений: что в ней есть и чего в ней быть не должно",
      check_dialog_log),
+    ("задание разборщику вложений доезжает до модели", check_media_task),
 )
 
 

@@ -188,3 +188,35 @@ def get_author_brief_instruction() -> str:
     """
     from config import AUTHOR_BRIEF_INSTRUCTION
     return get_setting("author_brief_instruction", "").strip() or AUTHOR_BRIEF_INSTRUCTION
+
+# ─────────────────────────────────────────────
+#  Задание разборщику вложений (21.09.2026)
+#
+#  ⚠️ ЕДИНСТВЕННЫЕ ПРОМПТЫ С ЖИВЫМ ЗАВОДСКИМ ТЕКСТОМ. У пяти промптов
+#  «личности» фолбэк на config пустой и означает «работать без этого куска»;
+#  здесь пустота вернула бы разбор без задания — ровно то, ради чего промпты
+#  и заводили (модель сама решала, расшифровывать или пересказывать).
+#  Поэтому «сброс» такого промпта возвращает ЗАВОДСКОЙ текст, а не пустоту,
+#  и тексты кнопок обязаны говорить именно так.
+#
+#  Три отдельных ключа, а не один на всех (решение Максима 21.09.2026):
+#  голосовое просят расшифровать дословно, а фото и видео — описать, и это
+#  задания разной природы.
+# ─────────────────────────────────────────────
+
+def get_media_prompt_voice() -> str:
+    """Задание разборщику ГОЛОСОВОГО. Ключ settings 'media_prompt_voice'."""
+    from config import MEDIA_PROMPT_VOICE
+    return get_setting("media_prompt_voice", "").strip() or MEDIA_PROMPT_VOICE
+
+
+def get_media_prompt_photo() -> str:
+    """Задание разборщику ФОТО. Ключ settings 'media_prompt_photo'."""
+    from config import MEDIA_PROMPT_PHOTO
+    return get_setting("media_prompt_photo", "").strip() or MEDIA_PROMPT_PHOTO
+
+
+def get_media_prompt_video() -> str:
+    """Задание разборщику ВИДЕО. Ключ settings 'media_prompt_video'."""
+    from config import MEDIA_PROMPT_VIDEO
+    return get_setting("media_prompt_video", "").strip() or MEDIA_PROMPT_VIDEO

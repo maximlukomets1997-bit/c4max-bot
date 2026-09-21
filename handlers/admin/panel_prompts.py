@@ -14,7 +14,12 @@ from telegram.constants import ParseMode
 from config import PROACTIVE_ENABLED_DEFAULT, PROACTIVE_MIN_MSGS, PROACTIVE_CONTEXT_MSGS
 from config import PROACTIVE_HANDS_DEFAULT, PROACTIVE_MUTE_MAX_SEC
 from config import PROACTIVE_OFF_ANNOUNCE, PROACTIVE_OFF_MSGS_KEY
-from database.history import set_setting, get_setting, append_prompt_addition, get_active_system_prompt, get_news_system_prompt, get_rag_instruction, get_proactive_instruction, get_author_brief_instruction, get_known_chats
+from database.history import (set_setting, get_setting, append_prompt_addition,
+                              get_active_system_prompt, get_news_system_prompt,
+                              get_rag_instruction, get_proactive_instruction,
+                              get_author_brief_instruction, get_known_chats,
+                              get_media_prompt_voice, get_media_prompt_photo,
+                              get_media_prompt_video)
 from utils import register_and_clean_bot_message, delete_user_message_safe
 from utils import schedule_delete
 
@@ -642,6 +647,29 @@ def _build_prompt_panel_text_and_keyboard(user_id, bot_username=None):
     )
     full_text += proactive_section
 
+    # ── Задание разборщику вложений (21.09.2026) ─────────────────────────
+    # Три промпта, по одному на тип: голосовое просят расшифровать дословно,
+    # фото и видео — описать. Показаны БЕЗ превью, одними длинами: у панели
+    # уже пять блоков с цитатами, и три полных текста подряд съели бы добрую
+    # тысячу знаков из лимита Telegram в 4096. Сами тексты — кнопкой
+    # «📄 Показать полные PROMPTы», как у остальных.
+    # ⚠️ У ЭТИХ ТРЁХ ЕСТЬ ЗАВОДСКОЙ ТЕКСТ (единственные такие в панели):
+    # длина никогда не бывает нулевой, а «сброс» возвращает заводское задание,
+    # а не пустоту. Писать про них «останется без задания» нельзя — неправда.
+    media_voice = get_media_prompt_voice()
+    media_photo = get_media_prompt_photo()
+    media_video = get_media_prompt_video()
+    full_text += (
+        "\n───────────────────────────\n"
+        "🔎 <b>РАЗБОР ВЛОЖЕНИЙ</b> <i>— задание вспомогательной модели</i>\n"
+        f"🎧 Голосовое — {_num(len(media_voice))} <i>симв.</i> · /voice_prompt_set · /voice_prompt_reset\n"
+        f"🖼 Фото — {_num(len(media_photo))} <i>симв.</i> · /photo_prompt_set · /photo_prompt_reset\n"
+        f"🎬 Видео — {_num(len(media_video))} <i>симв.</i> · /video_prompt_set · /video_prompt_reset\n"
+        "<i>По этому разбору ищутся статьи базы знаний; в режиме «Сам в "
+        "разговор» он же попадает в стенограмму вместо пометки [фото].</i>\n"
+        "<i>Сброс возвращает ЗАВОДСКОЕ задание, а не пустоту.</i>"
+    )
+
     # ── Сводка: из чего складывается проактивный запрос ───────────────────
     # Отвечает на вопрос «что вообще уходит модели» одним взглядом (просьба
     # Максима 2026-07-26). Порядок строк = ПОРЯДОК СБОРКИ в
@@ -782,6 +810,17 @@ def _collect_prompt_files():
         ("PROACTIVE_PROMPT.txt", "🗣 PROMPT УЧАСТИЯ В РАЗГОВОРЕ (включает блок рук)",
          "своя" if get_setting("proactive_instruction", "").strip() else "не задана",
          "/proactive_prompt_set", proactive_instruction),
+        # ⚠️ У ТРОИЦЫ РАЗБОРЩИКА пометка «заводская», а не «не задана»: пустыми
+        # они не бывают — не задал свой текст, работает заводской из config.
+        ("MEDIA_VOICE_PROMPT.txt", "🎧 РАЗБОР ГОЛОСОВОГО (задание вспомогательной модели)",
+         "своя" if get_setting("media_prompt_voice", "").strip() else "заводская",
+         "/voice_prompt_set", get_media_prompt_voice()),
+        ("MEDIA_PHOTO_PROMPT.txt", "🖼 РАЗБОР ФОТО (задание вспомогательной модели)",
+         "своя" if get_setting("media_prompt_photo", "").strip() else "заводская",
+         "/photo_prompt_set", get_media_prompt_photo()),
+        ("MEDIA_VIDEO_PROMPT.txt", "🎬 РАЗБОР ВИДЕО (задание вспомогательной модели)",
+         "своя" if get_setting("media_prompt_video", "").strip() else "заводская",
+         "/video_prompt_set", get_media_prompt_video()),
     ]
     return [it for it in items if it[4] and it[4].strip()]
 
@@ -1095,9 +1134,114 @@ _PROMPTS = {
                   "Задать новые: /proactive_prompt_set",
         "cancel": "🔄 <b>Удаление инструкции участия отменено.</b>\n\nТвоя инструкция осталась без изменений.",
     },
+    # ── ТРИ ЗАДАНИЯ РАЗБОРЩИКУ ВЛОЖЕНИЙ (21.09.2026, решение Максима) ──
+    # ⚠️ ОНИ ЖИВУТ ПО ДРУГОМУ ПРАВИЛУ, ЧЕМ ПЯТЬ ПРОМПТОВ ВЫШЕ: у тех
+    # заводского текста нет и «сброс» = стереть насовсем; у этих заводской
+    # текст есть (config.MEDIA_PROMPT_*), и «сброс» ВОЗВРАЩАЕТ его. Тексты
+    # ниже обязаны говорить именно так — «удалим, останется без задания»
+    # тут неправда, разбор без задания мы как раз и лечим.
+    # ⚠️ Такой промпт в проекте уже был: пятый, «разбор медиа», 05.08–11.08.2026.
+    # Сняли его потому, что он ВСЕГДА БЫЛ ПУСТ (на сервере длина ноль) — и
+    # толку не давал. Здесь этого не повторится: пустым он не бывает.
+    "voice_prompt": {
+        "set_key": "media_prompt_voice",
+        "file_what": "задания разбора голосового",
+        "set_log":  "изменил задания разбора голосового",
+        "set_done": "✅ <b>Разбор голосового: задание обновлено!</b>",
+        "set_note": "\n\nℹ️ По этому разбору ищутся статьи базы знаний.",
+        "set_usage": "🎧 <b>Разбор голосового: задание вспомогательной модели</b>\n\n"
+                     "Этот текст уходит вспомогательной модели ВМЕСТЕ с голосовым: по её расшифровке бот ищет статьи базы знаний.\n\n"
+                     "<b>Способ 1:</b> Напиши текст после команды:\n"
+                     "<code>/voice_prompt_set ...</code>\n\n"
+                     "<b>Способ 2:</b> Отправь <code>.txt</code> файл с текстом, "
+                     "затем ответь (Reply) на него командой <code>/voice_prompt_set</code>\n\n"
+                     "↩️ Вернуть заводское задание — /voice_prompt_reset",
+        # ⚠️ Читаем СВОЙ текст (get_setting), а не читалку с фолбэком: иначе
+        # «стирать нечего» не наступит никогда — заводское там всегда есть.
+        "reset_reader": lambda: [(None, get_setting("media_prompt_voice", "").strip())],
+        "reset_btn": "✅ Да, вернуть заводское",
+        "reset_empty": "ℹ️ <b>Своего задания нет.</b>\n\n"
+                       "Разбор голосового и так разбирается по заводскому заданию.",
+        "reset_body": "↩️ <b>Возврат заводского задания</b>\n\n"
+                      "Твой текст ({length} символов) будет удалён, и вернётся "
+                      "заводское задание из настроек бота.\n"
+                      "Заводское просит расшифровать речь дословно, слово в слово.\n\n"
+                      "⚠️ <b>Подтвердить?</b>",
+        "keys":   ("media_prompt_voice",),
+        "what":   "задания разбора голосового",
+        "log":    "вернул заводское задания разбора голосового",
+        "popup":  "↩️ Заводское задание возвращено!",
+        "done":   "↩️ <b>Заводское задание возвращено.</b>\n\n"
+                  "Разбор голосового снова разбирается так, как задумано в настройках бота.",
+        "cancel": "🔄 <b>Возврат отменён.</b>\n\nТвоё задание осталось без изменений.",
+    },
+    "photo_prompt": {
+        "set_key": "media_prompt_photo",
+        "file_what": "задания разбора фото",
+        "set_log":  "изменил задания разбора фото",
+        "set_done": "✅ <b>Разбор фото: задание обновлено!</b>",
+        "set_note": "\n\nℹ️ По этому разбору ищутся статьи базы знаний.",
+        "set_usage": "🖼 <b>Разбор фото: задание вспомогательной модели</b>\n\n"
+                     "Этот текст уходит вспомогательной модели ВМЕСТЕ с картинкой: по её описанию бот ищет статьи базы знаний, а в режиме «Сам в разговор» описание попадает в стенограмму вместо пометки [фото].\n\n"
+                     "<b>Способ 1:</b> Напиши текст после команды:\n"
+                     "<code>/photo_prompt_set ...</code>\n\n"
+                     "<b>Способ 2:</b> Отправь <code>.txt</code> файл с текстом, "
+                     "затем ответь (Reply) на него командой <code>/photo_prompt_set</code>\n\n"
+                     "↩️ Вернуть заводское задание — /photo_prompt_reset",
+        # ⚠️ Читаем СВОЙ текст (get_setting), а не читалку с фолбэком: иначе
+        # «стирать нечего» не наступит никогда — заводское там всегда есть.
+        "reset_reader": lambda: [(None, get_setting("media_prompt_photo", "").strip())],
+        "reset_btn": "✅ Да, вернуть заводское",
+        "reset_empty": "ℹ️ <b>Своего задания нет.</b>\n\n"
+                       "Разбор фото и так разбирается по заводскому заданию.",
+        "reset_body": "↩️ <b>Возврат заводского задания</b>\n\n"
+                      "Твой текст ({length} символов) будет удалён, и вернётся "
+                      "заводское задание из настроек бота.\n"
+                      "Заводское просит описать, что видно, и привести надписи дословно.\n\n"
+                      "⚠️ <b>Подтвердить?</b>",
+        "keys":   ("media_prompt_photo",),
+        "what":   "задания разбора фото",
+        "log":    "вернул заводское задания разбора фото",
+        "popup":  "↩️ Заводское задание возвращено!",
+        "done":   "↩️ <b>Заводское задание возвращено.</b>\n\n"
+                  "Разбор фото снова разбирается так, как задумано в настройках бота.",
+        "cancel": "🔄 <b>Возврат отменён.</b>\n\nТвоё задание осталось без изменений.",
+    },
+    "video_prompt": {
+        "set_key": "media_prompt_video",
+        "file_what": "задания разбора видео",
+        "set_log":  "изменил задания разбора видео",
+        "set_done": "✅ <b>Разбор видео: задание обновлено!</b>",
+        "set_note": "\n\nℹ️ По этому разбору ищутся статьи базы знаний.",
+        "set_usage": "🎬 <b>Разбор видео: задание вспомогательной модели</b>\n\n"
+                     "Этот текст уходит вспомогательной модели ВМЕСТЕ с роликом: по её описанию бот ищет статьи базы знаний, а в режиме «Сам в разговор» описание попадает в стенограмму вместо пометки [видео].\n\n"
+                     "<b>Способ 1:</b> Напиши текст после команды:\n"
+                     "<code>/video_prompt_set ...</code>\n\n"
+                     "<b>Способ 2:</b> Отправь <code>.txt</code> файл с текстом, "
+                     "затем ответь (Reply) на него командой <code>/video_prompt_set</code>\n\n"
+                     "↩️ Вернуть заводское задание — /video_prompt_reset",
+        # ⚠️ Читаем СВОЙ текст (get_setting), а не читалку с фолбэком: иначе
+        # «стирать нечего» не наступит никогда — заводское там всегда есть.
+        "reset_reader": lambda: [(None, get_setting("media_prompt_video", "").strip())],
+        "reset_btn": "✅ Да, вернуть заводское",
+        "reset_empty": "ℹ️ <b>Своего задания нет.</b>\n\n"
+                       "Разбор видео и так разбирается по заводскому заданию.",
+        "reset_body": "↩️ <b>Возврат заводского задания</b>\n\n"
+                      "Твой текст ({length} символов) будет удалён, и вернётся "
+                      "заводское задание из настроек бота.\n"
+                      "Заводское просит описать происходящее и привести речь дословно.\n\n"
+                      "⚠️ <b>Подтвердить?</b>",
+        "keys":   ("media_prompt_video",),
+        "what":   "задания разбора видео",
+        "log":    "вернул заводское задания разбора видео",
+        "popup":  "↩️ Заводское задание возвращено!",
+        "done":   "↩️ <b>Заводское задание возвращено.</b>\n\n"
+                  "Разбор видео снова разбирается так, как задумано в настройках бота.",
+        "cancel": "🔄 <b>Возврат отменён.</b>\n\nТвоё задание осталось без изменений.",
+    },
 }
 
-# Все десять callback'ов таблицы одной строкой — для проверок и подсказки
+# Все callback'ы таблицы одной строкой — для проверок и подсказки
 # читателю. В САМ РОУТЕР их подставлять нельзя (см. предупреждение выше).
 _PROMPT_RESET_CALLBACKS = tuple(
     f"{name}_reset_{action}"
@@ -1323,3 +1467,37 @@ async def cmd_author_prompt_set(update: Update, context: ContextTypes.DEFAULT_TY
 async def cmd_author_prompt_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Удаляет своё вступление справки (заводского нет — останутся голые данные, с подтверждением)."""
     await _prompt_reset_command(update, context, "author_prompt")
+
+# ── Разбор вложений: три задания вспомогательной модели (21.09.2026) ──
+# ⚠️ У ЭТИХ ШЕСТИ КОМАНД СБРОС ВОЗВРАЩАЕТ ЗАВОДСКОЕ ЗАДАНИЕ, а не стирает
+# насовсем, — в отличие от пяти промптов выше. Заводские тексты живут в
+# config.MEDIA_PROMPT_VOICE / _PHOTO / _VIDEO.
+async def cmd_voice_prompt_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Задаёт задание вспомогательной модели, которая расшифровывает голосовые."""
+    await _prompt_set_command(update, context, "voice_prompt")
+
+
+async def cmd_voice_prompt_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Возвращает заводское задание разбора голосового (с подтверждением)."""
+    await _prompt_reset_command(update, context, "voice_prompt")
+
+
+async def cmd_photo_prompt_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Задаёт задание вспомогательной модели, которая описывает фото."""
+    await _prompt_set_command(update, context, "photo_prompt")
+
+
+async def cmd_photo_prompt_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Возвращает заводское задание разбора фото (с подтверждением)."""
+    await _prompt_reset_command(update, context, "photo_prompt")
+
+
+async def cmd_video_prompt_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Задаёт задание вспомогательной модели, которая описывает видео."""
+    await _prompt_set_command(update, context, "video_prompt")
+
+
+async def cmd_video_prompt_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Возвращает заводское задание разбора видео (с подтверждением)."""
+    await _prompt_reset_command(update, context, "video_prompt")
+
