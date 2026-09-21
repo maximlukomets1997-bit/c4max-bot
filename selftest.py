@@ -6940,6 +6940,124 @@ def check_proactive_media_route():
                       f"цепочка начинается с активной")
 
 
+def check_media_memory():
+    """
+    Разбор вложения остаётся в ПАМЯТИ бота, а не выбрасывается (21.09.2026).
+
+    ⚠️ ЗАЧЕМ. Зрячая активная модель смотрит фото сама, и до этого дня в
+    памяти оставалась заглушка «[Фотография]»: бот отвечал по картинке, а
+    через три реплики на вопрос «а пушка у него какая?» честно спрашивал «о
+    чём речь?». То же было у голосового и видео, когда активная модель их
+    понимает. Разбор при этом УЖЕ делался — ради поиска по базе знаний — и
+    молча терялся.
+
+    ⚠️ ЭТОГО НЕ ВИДЯТ ОСТАЛЬНЫЕ ПРОВЕРКИ: `check_media_twins` гоняет оба типа
+    с ПОГАШЕННОЙ базой (RAG_ENABLED = False), а без неё разбора нет вовсе и
+    в памяти законно остаётся заглушка. Здесь база включена — проверяется
+    ровно тот случай, ради которого правка делалась.
+
+    Сверяется по всем трём типам: в память ушёл разбор, а не заглушка. И
+    отдельно — что при погашенной базе заглушка ВОЗВРАЩАЕТСЯ: разбора нет,
+    выдумывать его неоткуда, и врать в памяти бот не должен.
+    """
+    import config as cfg
+    from database import history as hist
+    from services import gemini as g
+
+    problems = []
+    done = 0
+
+    SEEN = "на фото Leopard 2A7 в ангаре"
+    remembered = []
+
+    class _Answered:
+        @staticmethod
+        def raise_for_status(): pass
+
+        @staticmethod
+        def json():
+            return {"choices": [{"message": {"content": "ответ бота"}}],
+                    "usage": {"prompt_tokens": 1, "total_tokens": 2},
+                    "candidates": [{"content": {"parts": [{"text": "ответ бота"}]}}]}
+
+    class _Session:
+        @staticmethod
+        def post(*a, **kw):
+            return _Answered
+
+    class Silent:
+        def _skip(self, *a, **kw): pass
+        debug = info = warning = error = exception = _skip
+
+    saved = {name: getattr(g, name) for name in
+             ("_http", "logger", "_media_understood", "_rag_block", "RAG_ENABLED",
+              "_notify_models_failed", "_notify_chain_dead")}
+    saved_add = hist.add_messages
+    saved_register = hist.register_api_call
+    saved_active = hist.get_setting("active_model", "")
+    try:
+        g._http = lambda: _Session()
+        g.logger = Silent()
+        g._media_understood = lambda *a, **kw: ("поисковый текст", SEEN)
+        g._rag_block = lambda *a, **kw: ""
+        g._notify_models_failed = lambda *a, **kw: None
+        g._notify_chain_dead = lambda *a, **kw: None
+        g.RAG_ENABLED = True
+        hist.add_messages = lambda chat_id, user_id, text, answer, *a, **kw: \
+            remembered.append(text)
+        hist.register_api_call = lambda *a, **kw: None
+
+        seeing = next((m for m, info in cfg.AVAILABLE_MODELS.items()
+                       if info.get("vision")), "")
+        hearing = next((m for m in cfg.AUDIO_FALLBACK_CHAIN
+                        if m in cfg.AVAILABLE_MODELS), "")
+        watching = next((m for m in cfg.VIDEO_FALLBACK_CHAIN
+                         if cfg.AVAILABLE_MODELS.get(m, {}).get("video")), "")
+
+        cases = (
+            ("фото", seeing, lambda: g.ask_gemini(1, 1, "что это?", image_base64="QQ")),
+            ("голосовое", hearing, lambda: g.ask_gemini_audio(1, 1, "QQ")),
+            ("видео", watching, lambda: g.ask_gemini_video(1, 1, "QQ")),
+        )
+        for label, model, ask in cases:
+            if not model:
+                continue          # такого типа не принимает ни одна модель
+            remembered.clear()
+            hist.set_setting("active_model", model)
+            ask()
+            done += 1
+            if not remembered:
+                problems.append(f"{label}: в память бота не записано ничего")
+                continue
+            if SEEN not in remembered[-1]:
+                problems.append(
+                    f"{label} при активной {model}: в памяти осталось "
+                    f"{remembered[-1][:40]!r} вместо разбора — через три реплики "
+                    f"бот не вспомнит, что было во вложении")
+
+        # ── База погашена: разбора нет, и заглушка законна ──
+        g.RAG_ENABLED = False
+        if seeing:
+            remembered.clear()
+            hist.set_setting("active_model", seeing)
+            g.ask_gemini(1, 1, "", image_base64="QQ")
+            done += 1
+            if remembered and SEEN in remembered[-1]:
+                problems.append(
+                    "фото при ПОГАШЕННОЙ базе знаний: в памяти оказался разбор, "
+                    "хотя делать его было некому — похоже, разбор заказывается "
+                    "отдельно и стоит лишних денег")
+    finally:
+        for name, value in saved.items():
+            setattr(g, name, value)
+        hist.add_messages = saved_add
+        hist.register_api_call = saved_register
+        hist.set_setting("active_model", saved_active)
+
+    return problems, (f"{done} проверок: разбор фото, голосового и видео остаётся "
+                      f"в памяти бота; при погашенной базе — прежняя заглушка")
+
+
 CHECKS = (
     ("деньги — расчёт стоимости запросов", check_money),
     ("квота Qwen — оборванный ответ, срок и письма", check_qwen_quota),
@@ -6985,6 +7103,7 @@ CHECKS = (
      check_dialog_log),
     ("задание разборщику вложений доезжает до модели", check_media_task),
     ("«Сам в разговор»: кому файл, а кому стенограмма", check_proactive_media_route),
+    ("разбор вложения остаётся в памяти бота", check_media_memory),
 )
 
 

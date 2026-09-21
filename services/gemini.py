@@ -2153,6 +2153,7 @@ def _native_media_chain(active_model: str, order: list, accepts) -> list:
 
 def _ask_native_media(chat_id: int, user_id: int, *, kind: str, notify_kind: str,
                       user_parts: list, understand_fn, context_note: str,
+                      caption: str = "",
                       order: list, accepts, base_timeout: int, budget: int,
                       dead_title: str) -> str:
     """
@@ -2177,7 +2178,12 @@ def _ask_native_media(chat_id: int, user_id: int, *, kind: str, notify_kind: str
                        «текст для поиска по базе, разбор целиком». Зовётся
                        ТОЛЬКО при RAG_ENABLED, потому что сам по себе это
                        запрос к лёгкой модели;
-      context_note   — что останется в памяти бота вместо файла;
+      context_note   — что останется в памяти бота, ЕСЛИ РАЗБОРА НЕТ. Есть
+                       разбор (а он делается ради поиска по базе знаний) —
+                       в память ляжет он, см. ниже;
+      caption        — подпись человека к файлу: у видео бывает, у голосового
+                       нет. Нужна отдельно от context_note, чтобы поставить её
+                       перед разбором, как в стенограмме групп;
       order/accepts  — очередь подстраховки и проверка «модель принимает этот тип»;
       base_timeout   — потолок одной попытки;
       budget         — общий потолок всего перебора;
@@ -2204,6 +2210,16 @@ def _ask_native_media(chat_id: int, user_id: int, *, kind: str, notify_kind: str
     # «PROMPT ВЫКЛ»: статьи — это факты, а не характер. Файл сначала разбирает
     # лёгкая модель, и по её разбору ищутся статьи; сам разбор человеку НЕ
     # показывается (см. блок помощников выше).
+    # ⚠️ РАЗБОР ЗДЕСЬ НУЖЕН ДВУМ ПОТРЕБИТЕЛЯМ (21.09.2026). Первый — поиск по
+    # базе знаний, ради него он и делается. Второй — ПАМЯТЬ БОТА: до этого дня
+    # туда ложилась заглушка «[Голосовое сообщение]», и через три реплики бот
+    # не знал, о чём шла речь. Лишнего запроса это не стоит: разбор уже
+    # сделан и был выброшен.
+    # ⚠️ База погашена — разбора нет вовсе, и в памяти останется заглушка.
+    # Заказывать разбор специально ради памяти не стали (решение Максима
+    # 21.09.2026): база у него включена всегда, а лишний поход к модели на
+    # каждое вложение стоил бы денег ради редкого случая.
+    described = ""
     if RAG_ENABLED:
         search_text, described = understand_fn()
         block = _rag_block(search_text, remember_query=False)
@@ -2211,6 +2227,11 @@ def _ask_native_media(chat_id: int, user_id: int, *, kind: str, notify_kind: str
             current_system_prompt = (
                 f"{current_system_prompt}\n\n{block}" if current_system_prompt else block
             )
+
+    # Разбор — в память бота вместо заглушки (см. предупреждение выше).
+    if described:
+        context_note = _as_human_message(
+            "голосовое" if kind == "аудио" else "видео", described, caption)
 
     native_history = []
     for msg in history:
@@ -2421,7 +2442,8 @@ def ask_gemini_audio(chat_id: int, user_id: int, audio_base64: str) -> str:
         notify_kind="голосовое",
         user_parts=[{"inlineData": {"mimeType": "audio/ogg", "data": audio_base64}}],
         understand_fn=lambda: _media_understood(audio_base64=audio_base64),
-        context_note="[Голосовое сообщение]",
+        context_note="[Голосовое сообщение]",     # если разбора не будет
+
         order=AUDIO_FALLBACK_CHAIN,
         accepts=lambda model_name: model_name in AUDIO_FALLBACK_CHAIN,
         base_timeout=GEMINI_TIMEOUT,
@@ -2485,6 +2507,7 @@ def ask_gemini_video(chat_id: int, user_id: int, video_base64: str,
         understand_fn=lambda: _media_understood(user_text, video_base64=video_base64,
                                                 video_mime=mime_type),
         context_note=f"[Видео] {caption}".strip() if caption else "[Видео]",
+        caption=caption,
         order=VIDEO_FALLBACK_CHAIN,
         accepts=_supports_video,
         base_timeout=VIDEO_TIMEOUT,
@@ -2673,6 +2696,7 @@ def ask_gemini(chat_id: int, user_id: int, user_text: str, image_base64: str = N
             logger.info("🔎 Фото разобрано для ответа (%d символов): активная модель "
                         "картинок не понимает", len(described))
     # ── Формируем системный промпт (+ RAG при необходимости) ──
+    media_described = ""        # разбор картинки: в поиск по базе и в память
     history = hist.get_history(user_id)
 
     is_admin = (user_id in ADMIN_IDS)
@@ -2694,8 +2718,15 @@ def ask_gemini(chat_id: int, user_id: int, user_text: str, image_base64: str = N
         # уходит — модель смотрит на файл сама (см. блок помощников выше).
         # Запрос с разбором в кэш не кладём: он уникален почти всегда и только
         # вытеснял бы оттуда настоящие вопросы людей.
-        search_text = (_media_search_text(user_text, image_base64=image_base64)
-                       if image_base64 else user_text)
+        # ⚠️ БЕРЁМ ОБА ОТВЕТА РАЗБОРА (21.09.2026): первый — текст для поиска,
+        # второй — полный разбор, он же ляжет в ПАМЯТЬ бота вместо заглушки
+        # «[Фотография]». Раньше здесь звался `_media_search_text`, который
+        # отдаёт только первый и молча теряет второй.
+        if image_base64:
+            search_text, media_described = _media_understood(
+                user_text, image_base64=image_base64)
+        else:
+            search_text = user_text
         # «Шапка»-инструкция настраивается из Телеграма (панель /prompt,
         # /rag_prompt_set); по умолчанию — заводской RAG_INSTRUCTION.
         # Сами статьи всегда подставляются под ней — сборка в _rag_block.
@@ -2808,9 +2839,19 @@ def ask_gemini(chat_id: int, user_id: int, user_text: str, image_base64: str = N
     total_tokens = usage.get("total_tokens", 0)
 
     # ── Сохраняем в БД только после успешного ответа ──
-    db_text = user_text if user_text else "[Фотография]"
-    if image_base64 and user_text:
-        db_text = f"[Фотография] {user_text}"
+    # ⚠️ В ПАМЯТЬ ИДЁТ РАЗБОР КАРТИНКИ, если он есть (21.09.2026). Зрячая
+    # активная модель смотрит фото сама, и до этого дня в памяти оставалась
+    # заглушка «[Фотография]»: через три реплики бот уже не знал, что на ней
+    # было, и на вопрос «а пушка у него какая?» отвечал «о чём речь?».
+    # Разбор к этому моменту уже сделан ради поиска по базе — лишнего запроса
+    # не стоит. Формат общий с голосовым и видео (_as_human_message):
+    # подпись человека впереди, описание в квадратных скобках.
+    if image_base64 and media_described:
+        db_text = _as_human_message("фото", media_described, user_text)
+    else:
+        db_text = user_text if user_text else "[Фотография]"
+        if image_base64 and user_text:
+            db_text = f"[Фотография] {user_text}"
 
     # Очищаем ответ от блока мыслей <thought> перед сохранением (экономия контекста)
     db_answer = re.sub(r'<thought>.*?</thought>', '', answer, flags=re.DOTALL | re.IGNORECASE).strip()
