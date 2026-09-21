@@ -201,11 +201,13 @@ def _notify_chain_dead(what: str, failures: list,
     проактивный, а зовут функцию три разных пути:
 
     1. «не справилась НИ ОДНА модель» — а на пути поиска по базе в личке
-       попыток меньше, чем звеньев очереди, чтобы человек не ждал: у фото их
-       три (`_SEARCH_PHOTO_CHAIN_LIMIT`, с 07.09.2026), у голосового и видео
-       по одной. Читалось как «отказали все четыре», хотя отказала
-       единственная. Теперь формулировка зависит от того, сколько моделей
-       реально пробовалось.
+       попыток тогда было меньше, чем звеньев очереди, чтобы человек не ждал:
+       у фото три, у голосового и видео по одной. Читалось как «отказали все
+       четыре», хотя отказала единственная. Формулировка с тех пор зависит от
+       того, сколько моделей реально пробовалось, — и это осталось полезным,
+       хотя 21.09.2026 укорачивание цепочки убрали совсем: перебор теперь
+       может оборваться по общему потолку времени, и число снова не равно
+       длине очереди.
     2. «Бот промолчал» — а бот на то видео ОТВЕТИЛ, за двадцать секунд.
        Провалился только разбор ради поиска по базе: ответ ушёл, просто без
        статей. Теперь последствие приходит параметром от того, кто зовёт, —
@@ -405,10 +407,12 @@ def _supports_minimal_thinking(model_name: str) -> bool:
 #  выходит само: на первой попытке потрачено ноль). Иначе она уходила бы в
 #  запрос с заведомо недостаточным временем — хуже, чем не пробовать вовсе.
 #
-#  ⚠️ На ЛИЧКЕ потолок значит РАЗНОЕ, смотря что прислали. У фото с 07.09.2026
-#  перебор идёт по трём моделям (`_SEARCH_PHOTO_CHAIN_LIMIT`), и потолок его
-#  ограничивает по-настоящему. У голосового и видео попытка по-прежнему одна,
-#  и ограничивать там нечего.
+#  ⚠️ С 21.09.2026 ЭТОТ ПОТОЛОК — ЕДИНСТВЕННЫЙ ОГРАНИЧИТЕЛЬ РАЗБОРА В ЛИЧКЕ.
+#  До того цепочку там ещё и укорачивали по числу моделей (три у фото, одна у
+#  голосового и видео), чтобы человек не ждал. Решение Максима: подстраховку
+#  вернуть полностью — отказ первой модели оставлял ответ без статей базы, а
+#  теперь оставил бы и без разбора, который стал сообщением человека. Ожидание
+#  держит время, а не число попыток.
 _MEDIA_CHAIN_BUDGET_SEC = 120
 
 #  Начинать новую попытку, когда осталось меньше этого, бессмысленно: разбор
@@ -439,10 +443,11 @@ _MEDIA_MIN_ATTEMPT_SEC = 15
 #  ждёт до 90 секунд вместо 30. Когда Google отвечает «занят» (503), перебор
 #  укладывается в секунды — и на живом логу такой отказ втрое чаще молчания.
 #
-#  Ставить 0 (полный перебор) нельзя: четвёртая модель добавляет ожиданию ещё
-#  полминуты, а против аварии почти ничего не даёт — за ней уже некому
-#  подстраховывать.
-_SEARCH_PHOTO_CHAIN_LIMIT = 3
+#  ⚠️ КОНСТАНТЫ БОЛЬШЕ НЕТ (21.09.2026): разбор в личке идёт по ВСЕЙ цепочке,
+#  как в проактивном режиме, и ограничен только общим потолком времени
+#  (_MEDIA_CHAIN_BUDGET_SEC). Довод «четвёртая модель добавляет полминуты
+#  ожидания» проиграл другому: с этого дня разбор стал сообщением человека
+#  там, где активная модель файл не понимает, — без него бот не ответит вовсе.
 
 #  Потолок ОДНОЙ попытки расшифровать голосовое. Поднят с 30 до 60 секунд
 #  28.08.2026 (выбор Максима из трёх вариантов) — после живого теста, где
@@ -477,10 +482,9 @@ _AUDIO_DESCRIBE_TIMEOUT = 60
 #  честно дольше (60 и 180 секунд против 30–90). Потолок в 120 секунд оставил
 #  бы видео вообще без подстраховки: первая же попытка съедала бы его целиком.
 #
-#  ⚠️ НЕ ПУТАТЬ с оговоркой «на личке попытка одна» выше: она про РАЗБОР медиа
-#  ради поиска по базе, и там она осталась верной только для голосового и
-#  видео — у фото с 07.09.2026 попыток три (`_SEARCH_PHOTO_CHAIN_LIMIT`).
-#  Здесь путь другой — цепочка полная.
+#  ⚠️ У РАЗБОРА МЕДИА ПОТОЛОК СВОЙ И ДРУГОЙ (_MEDIA_CHAIN_BUDGET_SEC): эти
+#  два числа про разные вещи — здесь ответ человеку целиком, там служебный
+#  пересказ вложения. Цепочки с 21.09.2026 полные в обоих случаях.
 _DIRECT_AUDIO_BUDGET_SEC = 150
 _DIRECT_VIDEO_BUDGET_SEC = 240
 
@@ -491,6 +495,10 @@ _DIRECT_VIDEO_BUDGET_SEC = 240
 #  такое письмо на живом тесте 28.08 и справедливо не понял, при чём тут она.
 _PURPOSE_TRANSCRIPT = "для стенограммы"
 _PURPOSE_SEARCH = "для поиска по базе"
+# Третье назначение (21.09.2026): активная модель этот тип файла не понимает,
+# и разбор становится САМИМ СООБЩЕНИЕМ человека. Провал тут дороже прочих —
+# без разбора отвечать не по чему, человек получит заглушку.
+_PURPOSE_ANSWER = "для ответа человеку"
 
 
 def _chain_attempt_timeout(chain_started: float, base: int,
@@ -853,13 +861,14 @@ def _describe_image(image_base64: str, chain_limit: int = 0,
                 # Это НЕ «полный текст ответа моделей», который Максим просил
                 # убрать из логов 11.08: тут не ответ, а причина отказа.
                 logger.warning("🔎 %s пересказ фото не сделала: %s %s", model_name, e, _err_body(e))
-    # ⚠️ Число пробовавшихся моделей в строке ОБЯЗАТЕЛЬНО: на пути поиска по
-    # базе их МЕНЬШЕ, чем звеньев очереди (у фото три, `_SEARCH_PHOTO_CHAIN_LIMIT`),
-    # и «не описала НИ ОДНА» читалось как «отказали все четыре» —
-    # см. _notify_chain_dead.
+    # ⚠️ Число пробовавшихся моделей в строке ОБЯЗАТЕЛЬНО: оно не равно длине
+    # очереди. Раньше цепочку укорачивали по числу моделей, теперь её может
+    # оборвать общий потолок времени — а «не описала НИ ОДНА» и в том, и в
+    # другом случае читается как «отказали все четыре». См. _notify_chain_dead.
     logger.error("⚠️ 🔎 Пересказ фото не сделала ни одна модель (пробовали моделей: %d)", len(failures))
     _notify_chain_dead(f"Фото (разбор {purpose})", failures,
-                       _DEAD_NO_KB if purpose == _PURPOSE_SEARCH else _DEAD_SILENT)
+                       _DEAD_STUB if purpose == _PURPOSE_ANSWER else
+                       (_DEAD_NO_KB if purpose == _PURPOSE_SEARCH else _DEAD_SILENT))
     return ""
 
 
@@ -908,7 +917,11 @@ def _transcribe_audio(audio_base64: str, chain_limit: int = 0,
                 "contents": [{"role": "user", "parts": parts}],
                 "generationConfig": _media_thinking_native(_media_level_for(model_name)),
             }
-            logger.info("🤖 Запрос к модели %s (расшифровка аудио)", model_name)
+            # 🔎 и слово «служебный» — как у фото (21.09.2026): этот поход к
+            # модели НЕ ответ человеку, а пересказ вложения словами. У фото
+            # строку поправили в тот день, у голосового и видео забыли — и в
+            # логе два шага подряд читались как подмена модели.
+            logger.info("🔎 Служебный запрос к модели %s — расшифровка голосового", model_name)
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
             start = time.perf_counter()
             response = _http().post(
@@ -922,10 +935,11 @@ def _transcribe_audio(audio_base64: str, chain_limit: int = 0,
             elapsed = time.perf_counter() - start
             text = _native_text_only(data)
             if not text:
-                logger.warning("🤖 %s вернула пустую расшифровку — пробую следующую", model_name)
+                logger.warning("🔎 %s вернула пустую расшифровку — пробую следующую", model_name)
                 failures.append((model_name, "пустой ответ"))
                 continue
-            logger.info("🤖 Ответ от %s за %.1f с (расшифровка аудио)", model_name, elapsed)
+            logger.info("🔎 Служебный ответ от %s за %.1f с (расшифровка голосового)",
+                        model_name, elapsed)
             return text
         except Exception as e:
             failures.append((model_name, _err_code(e)))
@@ -936,7 +950,8 @@ def _transcribe_audio(audio_base64: str, chain_limit: int = 0,
     logger.error("⚠️ 🤖 Голосовое не расшифровала ни одна модель (пробовали моделей: %d)",
                  len(failures))
     _notify_chain_dead(f"Голосовое (расшифровка {purpose})", failures,
-                       _DEAD_NO_KB if purpose == _PURPOSE_SEARCH else _DEAD_SILENT)
+                       _DEAD_STUB if purpose == _PURPOSE_ANSWER else
+                       (_DEAD_NO_KB if purpose == _PURPOSE_SEARCH else _DEAD_SILENT))
     return ""
 
 
@@ -990,7 +1005,8 @@ def _describe_video(video_base64: str, mime_type: str = "video/mp4",
                 "contents": [{"role": "user", "parts": parts}],
                 "generationConfig": _media_thinking_native(_VIDEO_THINKING_LEVEL),
             }
-            logger.info("🤖 Запрос к модели %s (описание видео)", model_name)
+            # 🔎 и «служебный» — см. такой же блок у расшифровки голосового.
+            logger.info("🔎 Служебный запрос к модели %s — описание видео", model_name)
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
             start = time.perf_counter()
             response = _http().post(
@@ -1004,10 +1020,11 @@ def _describe_video(video_base64: str, mime_type: str = "video/mp4",
             elapsed = time.perf_counter() - start
             text = _native_text_only(data)
             if not text:
-                logger.warning("🤖 %s вернула пустое описание видео — пробую следующую", model_name)
+                logger.warning("🔎 %s вернула пустое описание видео — пробую следующую", model_name)
                 failures.append((model_name, "пустой ответ"))
                 continue
-            logger.info("🤖 Ответ от %s за %.1f с (описание видео)", model_name, elapsed)
+            logger.info("🔎 Служебный ответ от %s за %.1f с (описание видео)",
+                        model_name, elapsed)
             return text
         except Exception as e:
             failures.append((model_name, _err_code(e)))
@@ -1016,7 +1033,8 @@ def _describe_video(video_base64: str, mime_type: str = "video/mp4",
                 logger.warning("🤖 %s не описала видео: %s %s", model_name, e, _err_body(e))
     logger.error("⚠️ 🤖 Видео не описала ни одна модель (пробовали моделей: %d)", len(failures))
     _notify_chain_dead(f"Видео (разбор {purpose})", failures,
-                       _DEAD_NO_KB if purpose == _PURPOSE_SEARCH else _DEAD_SILENT)
+                       _DEAD_STUB if purpose == _PURPOSE_ANSWER else
+                       (_DEAD_NO_KB if purpose == _PURPOSE_SEARCH else _DEAD_SILENT))
     return ""
 
 
@@ -2031,11 +2049,10 @@ def _media_understood(caption: str = "", *, image_base64: str = "",
     подпись. Разбор не удался (модели молчат) — тоже возвращаем подпись, то
     есть поведение ровно как до этой правки.
 
-    Цепочка моделей УКОРОЧЕНА: здесь, в отличие от проактивного режима,
-    человек ждёт ответа — см. _media_chain. У фото это три живых звена
-    (`_SEARCH_PHOTO_CHAIN_LIMIT`, 07.09.2026: одной подстраховки не хватало,
-    вторым звеном очереди стоит самое ненадёжное), у голосового и видео —
-    по-прежнему одно: там попытка сама по себе длиннее.
+    ⚠️ ЦЕПОЧКА БОЛЬШЕ НЕ УКОРАЧИВАЕТСЯ (21.09.2026, решение Максима): разбор
+    идёт по всей очереди подстраховки под общим потолком времени. До того в
+    личке пробовали три звена у фото и по одному у голосового и видео, чтобы
+    человек не ждал; отказ первой модели оставлял ответ без статей базы.
     """
     caption = (caption or "").strip()
     try:
@@ -2050,15 +2067,22 @@ def _media_understood(caption: str = "", *, image_base64: str = "",
     # (28.08.2026). До этого оно всегда говорило «для стенограммы», хотя ЗДЕСЬ
     # никакой стенограммы нет: это личка, разбор нужен поисковому запросу.
     # Максим получил такое письмо на живом тесте и справедливо не понял его.
+    # ⚠️ ОГРАНИЧЕНИЯ ЦЕПОЧКИ ЗДЕСЬ БОЛЬШЕ НЕТ (21.09.2026, решение Максима):
+    # разбор идёт по всей очереди подстраховки, как в проактивном режиме.
+    # Раньше в личке пробовали ОДНО живое звено у голосового и видео и три у
+    # фото — чтобы человек не ждал минуты. Цена той экономии: отказ первой
+    # модели (а Google отказывает регулярно) оставлял ответ без статей базы,
+    # а с этого дня ещё и без разбора, который стал сообщением человека.
+    # Ожидание держит не число попыток, а общий потолок по времени
+    # (_MEDIA_CHAIN_BUDGET_SEC) — он никуда не делся.
     if image_base64:
         kind, described = "фото", _describe_image(image_base64,
-                                                  chain_limit=_SEARCH_PHOTO_CHAIN_LIMIT,
                                                   purpose=_PURPOSE_SEARCH)
     elif audio_base64:
-        kind, described = "голосовое", _transcribe_audio(audio_base64, chain_limit=1,
+        kind, described = "голосовое", _transcribe_audio(audio_base64,
                                                          purpose=_PURPOSE_SEARCH)
     elif video_base64:
-        kind, described = "видео", _describe_video(video_base64, video_mime, chain_limit=1,
+        kind, described = "видео", _describe_video(video_base64, video_mime,
                                                    purpose=_PURPOSE_SEARCH)
     else:
         return caption, ""
@@ -2127,40 +2151,10 @@ def _native_media_chain(active_model: str, order: list, accepts) -> list:
     return chain
 
 
-def _media_hint(kind: str, described: str) -> str:
-    """
-    Подсказка отвечающей модели: что во вложении услышала/увидела вспомогательная
-    (21.09.2026).
-
-    ⚠️ ЗАЧЕМ. 20.09.2026 бот дважды ответил на голосовое мимо: модель не нашла
-    в трёхсекундной записи речи и вместо «не разобрал» уверенно пошутила про
-    таймкод «00:00», достроив ответ из прошлой темы разговора. При этом
-    ВСПОМОГАТЕЛЬНАЯ модель тот же файл расслышала — ей уходит только он, без
-    истории и промпта, и тонуть звуку не в чем. Разбор уже делался и молча
-    выбрасывался; теперь он едет рядом с файлом.
-
-    ⚠️ ФАЙЛ ПО-ПРЕЖНЕМУ УХОДИТ ЦЕЛИКОМ, и текст об этом говорит прямо: слушать
-    своими ушами, подсказка — на случай, если не вышло. Решение Максима от
-    2026-07-24 («модели уходит только сам файл, подсказок от бота нет») этим
-    не отменяется: бот по-прежнему не сочиняет за человека, он лишь передаёт
-    то, что услышала другая модель, и честно это называет.
-
-    ⚠️ ЦЕНА ОШИБКИ. Расшифровка может быть неверной, и тогда модель пойдёт за
-    ней вместо своих ушей. Отсюда порядок слов: сначала «слушай сам», потом
-    «если не разобрал».
-    """
-    described = " ".join((described or "").split())
-    if not described:
-        return ""
-    return (f"[Вспомогательная модель разобрала это вложение ({kind}) так: "
-            f"«{described}». Слушай/смотри файл сам — этот текст нужен только "
-            f"на случай, если разобрать не удалось, и в ответе его не упоминай.]")
-
-
 def _ask_native_media(chat_id: int, user_id: int, *, kind: str, notify_kind: str,
                       user_parts: list, understand_fn, context_note: str,
                       order: list, accepts, base_timeout: int, budget: int,
-                      dead_title: str, hint: bool = False) -> str:
+                      dead_title: str) -> str:
     """
     ОБЩИЙ ПУТЬ ФАЙЛА К ЗРЯЧЕЙ/СЛЫШАЩЕЙ МОДЕЛИ: голосовое и видео (21.09.2026).
 
@@ -2183,12 +2177,6 @@ def _ask_native_media(chat_id: int, user_id: int, *, kind: str, notify_kind: str
                        «текст для поиска по базе, разбор целиком». Зовётся
                        ТОЛЬКО при RAG_ENABLED, потому что сам по себе это
                        запрос к лёгкой модели;
-      hint           — класть ли разбор рядом с файлом подсказкой (см.
-                       _media_hint). ⚠️ У видео ВЫКЛЮЧЕНО и это намеренно:
-                       промахи были у голосового, видео разбирается верно, а
-                       правка «на всякий случай» в проекте без тестов стоит
-                       дороже, чем приносит. ⚠️ Без базы знаний подсказки не
-                       будет вовсе: разбор делает она;
       context_note   — что останется в памяти бота вместо файла;
       order/accepts  — очередь подстраховки и проверка «модель принимает этот тип»;
       base_timeout   — потолок одной попытки;
@@ -2216,7 +2204,6 @@ def _ask_native_media(chat_id: int, user_id: int, *, kind: str, notify_kind: str
     # «PROMPT ВЫКЛ»: статьи — это факты, а не характер. Файл сначала разбирает
     # лёгкая модель, и по её разбору ищутся статьи; сам разбор человеку НЕ
     # показывается (см. блок помощников выше).
-    hint_text = ""
     if RAG_ENABLED:
         search_text, described = understand_fn()
         block = _rag_block(search_text, remember_query=False)
@@ -2224,11 +2211,6 @@ def _ask_native_media(chat_id: int, user_id: int, *, kind: str, notify_kind: str
             current_system_prompt = (
                 f"{current_system_prompt}\n\n{block}" if current_system_prompt else block
             )
-        if hint:
-            hint_text = _media_hint(kind, described)
-            if hint_text:
-                logger.info("%s Подсказка о вложении добавлена к запросу (%s, %d символов)",
-                            RAG_ICON, kind, len(hint_text))
 
     native_history = []
     for msg in history:
@@ -2245,11 +2227,14 @@ def _ask_native_media(chat_id: int, user_id: int, *, kind: str, notify_kind: str
     while native_history and native_history[0]["role"] != "user":
         native_history.pop(0)
 
-    # Подсказка идёт ПЕРЕД файлом и отдельной частью: так видно, что это текст
-    # от бота, а не слова человека, и сам файл остаётся нетронутым.
-    native_history.append({"role": "user",
-                           "parts": ([{"text": hint_text}] + user_parts) if hint_text
-                                    else user_parts})
+    # ⚠️ ПОДСКАЗКИ «вспомогательная модель разобрала это так…» ЗДЕСЬ БОЛЬШЕ
+    # НЕТ (заведена и убрана 21.09.2026). Она добавлялась рядом с файлом на
+    # случай, если слушающая модель не разберёт речь. В тот же день путь
+    # изменился целиком: модель, которая файл не понимает, теперь получает
+    # разбор ВМЕСТО файла, а та, что понимает, слушает сама — и подсказка
+    # оказалась заплаткой без своей задачи. Максим увидел её в записи
+    # обращений и попросил убрать.
+    native_history.append({"role": "user", "parts": user_parts})
 
     payload = {"contents": native_history}
     # Персонаж/системный промпт для native API передаётся через systemInstruction
@@ -2409,14 +2394,33 @@ def ask_gemini_audio(chat_id: int, user_id: int, audio_base64: str) -> str:
     ⚠️ 2026-07-24 (решение Максима): зашитая фраза «Ответь на это голосовое
     сообщение пользователя.» УДАЛЕНА — модели уходит только сам файл, а как на
     него отвечать, ей объясняет характер бота. Не возвращать без его просьбы.
+
+    ⚠️ С 21.09.2026 ЭТОТ ПУТЬ — НЕ ЕДИНСТВЕННЫЙ: если активная модель звук не
+    принимает (Qwen, DeepSeek), голосовое к ней и не пойдёт — она получит
+    дословную расшифровку как сообщение человека (см. блок «Файл — активной
+    модели, которая его НЕ понимает»). Сюда попадают только те случаи, когда
+    активная слушает сама.
     """
+    active_model = hist.get_setting("active_model", GEMINI_MODEL)
+    if active_model not in AUDIO_FALLBACK_CHAIN:
+        described = _describe_for_answer("голосовое", audio_base64=audio_base64)
+        if described:
+            logger.info("🔎 Голосовое расшифровано для ответа (%d символов): активная "
+                        "модель %s звук не принимает", len(described), active_model)
+            return ask_gemini(chat_id, user_id,
+                              _as_human_message("голосовое", described),
+                              media_kind="голосовое")
+        # Расшифровки нет — отвечать не по чему. Старый путь (файл слышащей
+        # цепочке) остаётся страховкой: лучше ответ чужой модели, чем заглушка.
+        logger.warning("⚠️ 🔎 Расшифровки для ответа нет — отдаю голосовое слышащей "
+                       "цепочке, как до 21.09.2026")
+
     return _ask_native_media(
         chat_id, user_id,
         kind="аудио",
         notify_kind="голосовое",
         user_parts=[{"inlineData": {"mimeType": "audio/ogg", "data": audio_base64}}],
         understand_fn=lambda: _media_understood(audio_base64=audio_base64),
-        hint=True,
         context_note="[Голосовое сообщение]",
         order=AUDIO_FALLBACK_CHAIN,
         accepts=lambda model_name: model_name in AUDIO_FALLBACK_CHAIN,
@@ -2451,8 +2455,25 @@ def ask_gemini_video(chat_id: int, user_id: int, video_base64: str,
     зашитая заготовка на случай «видео без подписи» удалена 2026-07-24 по
     решению Максима — бот не должен подсказывать модели формулировки от себя.
     Не возвращать заготовку без его просьбы.
+
+    ⚠️ С 21.09.2026, как и у голосового: активная модель видео не принимает —
+    ролик к ней не пойдёт, она получит ОПИСАНИЕ как сообщение человека.
     """
     caption = (user_text or "").strip()
+
+    active_model = hist.get_setting("active_model", GEMINI_MODEL)
+    if not _supports_video(active_model):
+        described = _describe_for_answer("видео", video_base64=video_base64,
+                                         video_mime=mime_type)
+        if described:
+            logger.info("🔎 Видео описано для ответа (%d символов): активная модель %s "
+                        "видео не принимает", len(described), active_model)
+            return ask_gemini(chat_id, user_id,
+                              _as_human_message("видео", described, caption),
+                              media_kind="видео")
+        logger.warning("⚠️ 🔎 Описания для ответа нет — отдаю видео зрячей цепочке, "
+                       "как до 21.09.2026")
+
     parts = [{"text": caption}] if caption else []
     parts.append({"inlineData": {"mimeType": mime_type, "data": video_base64}})
 
@@ -2473,8 +2494,72 @@ def ask_gemini_video(chat_id: int, user_id: int, video_base64: str,
 
 
 # ───────────────────────────────────────────────
+#  Файл — активной модели, которая его НЕ понимает (21.09.2026)
+# ───────────────────────────────────────────────
+#
+#  ⚠️ ГЛАВНОЕ ПРАВИЛО ЭТОГО БЛОКА: файл уходит активной модели, если она его
+#  понимает; не понимает — получает ДОСЛОВНЫЙ РАЗБОР вспомогательной как
+#  сообщение человека. Решение Максима 21.09.2026 после разбора «как я думал,
+#  что это работает»: отвечать всегда должна та модель, которую он выбрал
+#  кнопкой, а не та, что умеет слушать.
+#
+#  ⚠️ ЭТО ОТМЕНЯЕТ ЕГО ЖЕ РЕШЕНИЕ ОТ 11.08.2026 («чтобы отвечала
+#  модель-разбиратель, а не активная») — но только для ЛИЧКИ и прямых
+#  обращений. Тогдашний довод (ответ по пересказу дал возню 10.08 с шутками
+#  про ИИ над живыми людьми) закрыт иначе: у разборщика теперь есть задание
+#  дословно расшифровывать (config.MEDIA_PROMPT_*, шаг 1 той же работы).
+#  Если беда вернётся — лечить заданием, а не тихим возвратом файла зрячей
+#  модели: иначе снова будет отвечать не та модель, что выбрана кнопкой.
+#
+#  ⚠️ РАЗБОР ЗДЕСЬ НЕ ЗАВИСИТ ОТ БАЗЫ ЗНАНИЙ. Разбор ради ПОИСКА
+#  (_media_understood) начинается с вопроса rag.is_active() — платить за
+#  описание при погашенной базе незачем. Здесь наоборот: разбор нужен САМ ПО
+#  СЕБЕ, без него отвечать не по чему, и база к этому отношения не имеет.
+
+
+def _describe_for_answer(kind: str, *, image_base64: str = "",
+                         audio_base64: str = "", video_base64: str = "",
+                         video_mime: str = "video/mp4") -> str:
+    """
+    Разбор вложения, когда он станет сообщением человека. Полная цепочка
+    подстраховки (chain_limit=0): в отличие от разбора ради поиска, здесь
+    пустой результат означает «бот не ответит вовсе», и экономить попытки
+    нельзя. Потолок по времени у перебора свой, общий — _MEDIA_CHAIN_BUDGET_SEC.
+    """
+    if kind == "фото":
+        return _describe_image(image_base64, purpose=_PURPOSE_ANSWER)
+    if kind == "голосовое":
+        return _transcribe_audio(audio_base64, purpose=_PURPOSE_ANSWER)
+    return _describe_video(video_base64, video_mime, purpose=_PURPOSE_ANSWER)
+
+
+def _as_human_message(kind: str, described: str, caption: str = "") -> str:
+    """
+    Разбор — в вид сообщения от человека.
+
+    ⚠️ ГОЛОСОВОЕ НЕ ОБОРАЧИВАЕТСЯ В СКОБКИ, фото и видео оборачиваются —
+    ровно как в стенограмме групп (решение Максима 10.08.2026, там же и
+    причина). Расшифровка речи И ЕСТЬ слова человека, подмена честная; а
+    описание картинки — не его слова, и без скобок выходит, что живой человек
+    вдруг заговорил машинным языком («На изображении силуэт танка…»). Бот
+    отвечал на такое шуткой про робота — с этого и началась вся возня.
+    ⚠️ Подпись человека стоит ПЕРЕД разбором, тоже как в стенограмме.
+    """
+    described = " ".join((described or "").split())
+    caption = (caption or "").strip()
+    if not described:
+        return caption
+    body = described if kind == "голосовое" else f"[{described}]"
+    return f"{caption} {body}".strip() if caption else body
+
+
+# ───────────────────────────────────────────────
 #  Дословный лог прямых обращений (logs/dialog)
 # ───────────────────────────────────────────────
+
+# Как вид вложения называется в записи обращений (services/dialog_log).
+_DIALOG_KIND = {"голосовое": "voice", "видео": "video", "фото": "photo"}
+
 
 def _dialog_note(fn, *args) -> None:
     """
@@ -2552,7 +2637,7 @@ def _dialog_native_prompt_text(system_prompt: str, contents: list) -> str:
 # ───────────────────────────────────────────────
 
 def ask_gemini(chat_id: int, user_id: int, user_text: str, image_base64: str = None,
-               reply_context: str = "") -> str:
+               reply_context: str = "", media_kind: str = "") -> str:
     """
     Отправляет сообщение пользователя в Gemini API вместе с объединённым
     контекстным окном (личка + группы одного пользователя).
@@ -2567,7 +2652,26 @@ def ask_gemini(chat_id: int, user_id: int, user_text: str, image_base64: str = N
     :param reply_context: готовый блок «на какое сообщение отвечают» — его
         собирает handlers/messages.py::_reply_context_block, когда человек
         отвечает Reply. Пустая строка — обычное сообщение, блок не добавляется.
+    :param media_kind: «голосовое»/«видео»/«фото», если `user_text` — это на
+        самом деле РАЗБОР вложения, а не то, что человек напечатал (активная
+        модель этот тип не понимает, см. блок «Файл — активной модели, которая
+        его НЕ понимает»). Меняет две вещи и больше ничего: тип в записи
+        обращений и запрет класть такой запрос в кэш векторов — он уникален
+        почти всегда и вымыл бы оттуда настоящие вопросы людей.
     """
+    # ── Фото, а активная модель слепая: спрашиваем не её глаза, а разбор ──
+    # (21.09.2026). Раньше здесь срабатывал vision-reroute: фото уходило
+    # цепочке Gemini, и отвечала ОНА, а не выбранная кнопкой модель. Механизм
+    # цел и остался страховкой: разбор не удался — фото по-прежнему уйдёт
+    # зрячей цепочке, лучше так, чем молчание.
+    if image_base64 and not _supports_vision(hist.get_setting("active_model", GEMINI_MODEL)):
+        described = _describe_for_answer("фото", image_base64=image_base64)
+        if described:
+            user_text = _as_human_message("фото", described, user_text)
+            image_base64 = None
+            media_kind = media_kind or "фото"
+            logger.info("🔎 Фото разобрано для ответа (%d символов): активная модель "
+                        "картинок не понимает", len(described))
     # ── Формируем системный промпт (+ RAG при необходимости) ──
     history = hist.get_history(user_id)
 
@@ -2595,7 +2699,8 @@ def ask_gemini(chat_id: int, user_id: int, user_text: str, image_base64: str = N
         # «Шапка»-инструкция настраивается из Телеграма (панель /prompt,
         # /rag_prompt_set); по умолчанию — заводской RAG_INSTRUCTION.
         # Сами статьи всегда подставляются под ней — сборка в _rag_block.
-        block = _rag_block(search_text, remember_query=not image_base64)
+        block = _rag_block(search_text,
+                           remember_query=not image_base64 and not media_kind)
         if block:
             current_system_prompt = (
                 f"{current_system_prompt}\n\n{block}" if current_system_prompt else block
@@ -2656,7 +2761,8 @@ def ask_gemini(chat_id: int, user_id: int, user_text: str, image_base64: str = N
     # был бы весь контекст на каждое сообщение (та же причина, что у chat_log).
     from services import dialog_log
     _dialog_note(dialog_log.note_ask, user_id, chat_id,
-                 "photo" if image_base64 else "text", user_text)
+                 _DIALOG_KIND.get(media_kind, "photo" if image_base64 else "text"),
+                 user_text)
 
     # ── Отправляем (2 попытки + авто-фолбэк на FALLBACK_MODEL) ──
     # has_image включает vision-reroute: фото у «слепой» модели (DeepSeek/Qwen)
@@ -3163,18 +3269,31 @@ def ask_group_proactive_media(chat_id: int, bot_id: int, trigger_text: str,
                               media_b64: str, mime_type: str, kind: str,
                               extra_media: list[tuple] | None = None) -> str | None:
     """
-    ⚡ ПРОАКТИВНЫЙ ОТВЕТ НА МЕДИА — отвечает та же модель, что СМОТРИТ файл
-    (2026-08-11, решение Максима: «чтобы отвечала модель-разбиратель, а не
-    активная»). Возвращает текст реплики (с блоком <thought>) или None.
+    ⚡ ПРОАКТИВНЫЙ ОТВЕТ НА МЕДИА — файл уходит АКТИВНОЙ модели, если она его
+    понимает (21.09.2026, решение Максима). Возвращает текст реплики (с блоком
+    <thought>), пустую строку («промолчать») или None.
 
-    Зачем: активная модель (сейчас qwen3.7-plus) картинок не видит вовсе, и до
-    этой правки она отвечала ПО ПЕРЕСКАЗУ — по строке разбора в стенограмме.
-    Пересказ и породил всю возню 10 августа: шутки про ИИ над живыми людьми,
-    скобки в стенограмме, споры про обрезку. Теперь на медиа отвечает Gemini
-    из цепочки `PROACTIVE_MEDIA_CHAIN`, получая САМ ФАЙЛ плюс ровно то же,
-    что и активная модель: системную часть (характер, RAG, справка об авторе,
-    инструкция участия) и стенограмму — она идёт вместе с файлом в сообщении
-    «от лица человека», а не в системной части.
+    ⚠️ ПРАВИЛО СМЕНИЛОСЬ ДВАЖДЫ, И ПОРЯДОК ВАЖЕН. До 11.08.2026 на медиа
+    отвечала активная модель ПО ПЕРЕСКАЗУ — по строке разбора в стенограмме;
+    пересказ породил возню 10 августа (шутки про ИИ над живыми людьми). Тогда
+    Максим решил: «пусть отвечает модель-разбиратель», и реплику стала писать
+    Gemini из `PROACTIVE_MEDIA_CHAIN`. 21.09.2026 решение уточнено: отвечать
+    должна та модель, которую он выбрал кнопкой, — и файл уходит ей, если она
+    его понимает. Не понимает (Qwen со звуком, DeepSeek с видео) — сюда дело
+    вовсе не доходит: `services/proactive.py` зовёт обычный
+    `ask_group_proactive`, и активная отвечает по стенограмме, где разбор уже
+    лежит строкой участника. Довод 11.08 закрыт иначе: у разборщика появилось
+    задание расшифровывать дословно (config.MEDIA_PROMPT_*).
+
+    Модель получает САМ ФАЙЛ плюс ровно то же, что и в текстовом пути:
+    системную часть (характер, RAG, справка об авторе, инструкция участия) и
+    стенограмму — она идёт вместе с файлом в сообщении «от лица человека», а
+    не в системной части.
+
+    ⚠️ ДВА ПУТИ ЗАПРОСА, И ВЫБИРАЕТ ИХ ПРОВАЙДЕР АКТИВНОЙ МОДЕЛИ. Gemini
+    понимает native generateContent (и только он принимает голосовое и видео);
+    зрячие Qwen, DeepSeek и Xiaomi ходят OpenAI-совместимым запросом — им файл
+    уходит через `_gemini_chat_request`, тем же путём, что фото в личке.
 
     ⚠️ РАЗБОР МЕДИА ПРИ ЭТОМ НЕ ОТМЕНЯЕТСЯ (services/proactive.py). Он нужен не
     для ответа, а для ПАМЯТИ: через несколько сообщений файла нет ни у кого, а
@@ -3207,6 +3326,22 @@ def ask_group_proactive_media(chat_id: int, bot_id: int, trigger_text: str,
     if transcript is None:
         return None
 
+    # ── Кому вообще уходит файл (21.09.2026) ──
+    # Активная модель тип не понимает — возвращаем None НЕ ДЕЛАЯ ЗАПРОСА:
+    # вызывающий уйдёт на обычный ask_group_proactive, и реплику напишет она
+    # же по стенограмме. Разбор там уже лежит строкой участника.
+    active_model = hist.get_setting("active_model", GEMINI_MODEL)
+    if kind == "видео":
+        understands = _supports_video(active_model)
+    elif kind == "голосовое":
+        understands = active_model in AUDIO_FALLBACK_CHAIN
+    else:
+        understands = _supports_vision(active_model)
+    if not understands:
+        logger.info("🤖 Чат %s: активная модель %s не принимает %s — реплику пишет "
+                    "она же по стенограмме", chat_id, active_model, kind)
+        return None
+
     # Файл впереди стенограммы: модель сначала смотрит, потом читает переписку.
     # ⚠️ Стенограмма переехала СЮДА из системной части (2026-08-16) — тем же
     # решением, что и у текстового пути, чтобы два пути не разъезжались.
@@ -3237,10 +3372,65 @@ def ask_group_proactive_media(chat_id: int, bot_id: int, trigger_text: str,
     # собранный целиком, от альбома, у которого взяли один кадр.
     _n = 1 + len(extra_media or [])
     _label = f"{kind} ×{_n}" if _n > 1 else kind
-    chat_log.note_request(f"{_label} + цепочка {', '.join(PROACTIVE_MEDIA_CHAIN)}",
-                          "\n\n".join(log_parts))
+    if _provider_of(active_model) == "gemini":
+        chat_log.note_request(f"{_label} + активная {active_model} и цепочка "
+                              f"{', '.join(PROACTIVE_MEDIA_CHAIN)}",
+                              "\n\n".join(log_parts))
 
-    for model_name in PROACTIVE_MEDIA_CHAIN:
+    # ── Активная не из семейства Gemini: свой формат запроса ──
+    # Зрячие Qwen, DeepSeek и Xiaomi native generateContent не понимают, но
+    # картинку принимают OpenAI-совместимым запросом. Отдаём файл им тем же
+    # помощником, что и фото в личке: он сам знает адрес и ключ провайдера, а
+    # при отказе подстрахует цепочкой. Голосовое и видео сюда не попадают —
+    # их не принимает ни одна не-Gemini модель, и до этого места дело не
+    # доходит (развилка выше).
+    if _provider_of(active_model) != "gemini":
+        content = [{"type": "image_url",
+                    "image_url": {"url": f"data:{mime_type};base64,{media_b64}"}}]
+        for _b64, _mime in (extra_media or []):
+            content.append({"type": "image_url",
+                            "image_url": {"url": f"data:{_mime};base64,{_b64}"}})
+        content.append({"type": "text", "text": transcript})
+        messages = []
+        if any(system_parts):
+            messages.append({"role": "system", "content": "\n\n".join(system_parts)})
+        messages.append({"role": "user", "content": content})
+
+        timing = {"own": 0.0, "total": 0.0}
+        chat_log.note_request(f"{_label} + активная {active_model}",
+                              "\n\n".join(log_parts))
+        data, used_model = _gemini_chat_request(messages, kind=f"группа (сам, {kind})",
+                                                has_image=True, timing=timing)
+        if data is None:
+            chat_log.note_answer(used_model or "—", timing["own"],
+                                 "(ни одна модель цепочки не ответила)", timing["total"])
+            return None
+        try:
+            answer = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError):
+            logger.error("⚠️ Неожиданный формат проактивного ответа на %s: %s",
+                         kind, str(data)[:300])
+            chat_log.note_answer(used_model or "—", timing["own"],
+                                 "(неожиданный формат ответа)", timing["total"])
+            return None
+        chat_log.note_answer(used_model or "—", timing["own"], answer, timing["total"])
+        answer = compress_newlines(answer)
+        # Решение промолчать — ПУСТАЯ строка, а не None (см. ниже, в ветке
+        # Gemini, там же и почему их нельзя путать).
+        if _is_proactive_skip(re.sub(r'<thought>.*?</thought>', '', answer,
+                                     flags=re.DOTALL | re.IGNORECASE)):
+            logger.info("🤖 Чат %s: %s — модель решила промолчать", chat_id, active_model)
+            return ""
+        return answer
+
+    # ── Активная из семейства Gemini: native generateContent ──
+    # ⚠️ ЦЕПОЧКА НАЧИНАЕТСЯ С АКТИВНОЙ (21.09.2026): раньше она шла строго по
+    # PROACTIVE_MEDIA_CHAIN, и на медиа отвечала первая живая Gemini, даже
+    # когда активной была другая Gemini. Остальные звенья остаются
+    # подстраховкой на случай её отказа.
+    chain = ([active_model] if active_model in AVAILABLE_MODELS else [])
+    chain += [m for m in PROACTIVE_MEDIA_CHAIN if m != active_model]
+    for model_name in chain:
         if _quota_blocked_now(model_name):
             continue          # недавно вернула 429 — не тратим время
         if kind == "видео" and not _supports_video(model_name):

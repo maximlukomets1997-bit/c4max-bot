@@ -1293,23 +1293,32 @@ def check_wait_budgets():
         run("видео в группе", lambda: g._describe_video("QQ"),
             g._MEDIA_CHAIN_BUDGET_SEC, 90, n_media)
 
-        # ── Фото в личке ради поиска по базе (07.09.2026) ──────────────
+        # ── Разбор в личке: подстраховка ПОЛНАЯ (21.09.2026) ───────────
         #
-        # ⚠️ ЭТОГО СЦЕНАРИЯ ЗДЕСЬ НЕ БЫЛО ВОВСЕ, а он единственный, где перебор
-        # режется ПО ЧИСЛУ моделей, а не только по времени. Проверка заведена
-        # в тот день, когда число подстраховок подняли с одной до трёх: без неё
-        # откат к единице не заметила бы ни одна проверка проекта.
+        # ⚠️ ЭТОТ ШАГ ПЕРЕВЁРНУТ В ТОТ ЖЕ ДЕНЬ. Он заводился 07.09.2026,
+        # когда перебор в личке резался ПО ЧИСЛУ моделей (три звена у фото,
+        # одно у голосового и видео), и сторожил именно укорот: откат к
+        # единице не заметила бы ни одна проверка проекта. 21.09 Максим
+        # укорот снял — разбор стал сообщением человека там, где активная
+        # модель файл не понимает, и экономить попытки стало нельзя.
+        # Сторожим теперь ОБРАТНОЕ: что цепочка снова не укоротилась молча.
         run("фото в личке (разбор ради поиска по базе)",
-            lambda: g._describe_image("QQ", g._SEARCH_PHOTO_CHAIN_LIMIT),
+            lambda: g._describe_image("QQ"),
             g._MEDIA_CHAIN_BUDGET_SEC, g._describe_timeout(1), n_media)
         done += 1
-        if len(calls) != g._SEARCH_PHOTO_CHAIN_LIMIT:
-            problems.append(f"фото в личке: пробовано моделей {len(calls)}, а "
-                            f"должно {g._SEARCH_PHOTO_CHAIN_LIMIT} — укорот цепочки не сработал")
+        # ⚠️ СРАВНИВАТЬ С ДЛИНОЙ ОЧЕРЕДИ НЕЛЬЗЯ: перебор имеет полное право
+        # оборваться по общему потолку времени — это и есть то, что сторожит
+        # сама группа. Сторожим другое: что он не урезан ПО ЧИСЛУ моделей до
+        # одной-двух попыток, как было до 21.09.2026.
+        if len(calls) < 3:
+            problems.append(f"фото в личке: пробовано моделей всего {len(calls)} — "
+                            f"похоже на возврат урезанной цепочки, снятой "
+                            f"21.09.2026 (перебор обрывает только потолок времени)")
 
-        # Связь «поиск по базе → настройка» жива. Отдельной проверкой, потому
-        # что предыдущая гоняет _describe_image НАПРЯМУЮ и слепа к тому, какое
-        # число просит сам поиск: верни туда жёсткую единицу — и она смолчит.
+        # Связь «поиск по базе → разбор» жива, и разбор зовётся БЕЗ урезания
+        # цепочки. Отдельной проверкой, потому что предыдущая гоняет
+        # _describe_image НАПРЯМУЮ и слепа к тому, о чём просит сам поиск:
+        # верни туда жёсткую единицу — и она смолчит.
         asked = []
         import services.rag as rag_module
         saved_describe, saved_rag_active = g._describe_image, rag_module.is_active
@@ -1322,10 +1331,10 @@ def check_wait_budgets():
             g._describe_image = saved_describe
             rag_module.is_active = saved_rag_active
         done += 1
-        if asked != [g._SEARCH_PHOTO_CHAIN_LIMIT]:
-            problems.append(f"поиск по базе просит у разбора фото {asked}, а "
-                            f"должен [{g._SEARCH_PHOTO_CHAIN_LIMIT}] — "
-                            f"настройка и вызов разъехались")
+        if asked != [0]:
+            problems.append(f"поиск по базе просит у разбора фото урезанную цепочку "
+                            f"{asked}, а должен полную [0] — вернулась экономия "
+                            f"попыток, снятая 21.09.2026")
 
     finally:
         g.time, g._http = saved_time, saved_http
@@ -1333,8 +1342,8 @@ def check_wait_budgets():
         g._quota_blocked.clear()
         g._quota_blocked.update(saved_blocked)
 
-    return problems, (f"{done} проверок: личка, группа, фото ради поиска по базе, "
-                      f"первая попытка не урезана")
+    return problems, (f"{done} проверок: личка, группа, разбор ради поиска по базе "
+                      f"с полной подстраховкой, первая попытка не урезана")
 
 
 # ───────────────────────────────────────────────
@@ -5771,6 +5780,55 @@ def check_photo_route():
             if blind(chain):
                 problems.append(f"обход фото у {model} привёл к слепым моделям: {blind(chain)}")
 
+        # ── 2б. Слепая активная отвечает ПО РАЗБОРУ, а не чужими глазами ──
+        #
+        # ⚠️ Блок 2 выше смотрит на `_gemini_chat_request` напрямую и поэтому
+        # видит только СТРАХОВКУ (vision-reroute: картинка уходит зрячей
+        # цепочке). С 21.09.2026 до неё дело не доходит: `ask_gemini` сначала
+        # отдаёт фото разборщику и подставляет активной модели его текст —
+        # отвечает та модель, которую Максим выбрал кнопкой. Сломай это, и
+        # блок 2 смолчит: он проверяет другой слой.
+        shown = "на фото танк с динамической защитой"
+        seen_photo = {}
+
+        class _Resp2:
+            @staticmethod
+            def raise_for_status(): pass
+
+            @staticmethod
+            def json():
+                return {"choices": [{"message": {"content": "ответ"}}],
+                        "usage": {"prompt_tokens": 1, "total_tokens": 2}}
+
+        def _seeing_provider(model_name, messages, thinking_override=None):
+            seen_photo["model"] = model_name
+            seen_photo["messages"] = messages
+            return {"choices": [{"message": {"content": "ответ"}}],
+                    "usage": {"prompt_tokens": 1, "total_tokens": 2}}
+
+        saved2 = (g._qwen_chat_request, g._describe_image, g._http,
+                  g.RAG_ENABLED, g._rag_block)
+        try:
+            g._qwen_chat_request = _seeing_provider
+            g._describe_image = lambda *a, **kw: shown
+            g._http = lambda: type("S", (), {"post": staticmethod(lambda *a, **kw: _Resp2)})
+            g.RAG_ENABLED = False
+            hist.set_setting("active_model", "qwen3.7-max")     # слепая
+            g.ask_gemini(1, 1, "что это?", image_base64="QQ")
+        finally:
+            (g._qwen_chat_request, g._describe_image, g._http,
+             g.RAG_ENABLED, g._rag_block) = saved2
+
+        sent = str(seen_photo.get("messages") or "")
+        done += 2
+        if shown not in sent:
+            problems.append("фото при слепой активной: разбор не стал сообщением "
+                            "человека — модель отвечает, не зная о картинке")
+        if "image_url" in sent or "base64" in sent:
+            problems.append("фото при слепой активной: в запрос всё равно уехала "
+                            "картинка — слепая модель молча её выбросит, а человек "
+                            "получит ответ вслепую")
+
         # ── 3. ТЕКСТ у слепой активной идёт ЕЙ, а не в обход ──
         # Иначе обход фото тихо утащил бы к Gemini всю переписку.
         chain = route("qwen3.7-max", has_image=False)
@@ -5789,7 +5847,8 @@ def check_photo_route():
     finally:
         hist.set_setting("active_model", saved_active)
 
-    return problems, (f"{done} проверок: фото идёт зрячей активной, слепую обходит, "
+    return problems, (f"{done} проверок: фото идёт зрячей активной, слепая отвечает "
+                      f"по разбору, обход остался страховкой, "
                       f"в цепочке нет слепых ни у кого, текст обходом не задет")
 
 
@@ -6079,13 +6138,21 @@ def check_stopwatch():
                cfg.FALLBACK_MODEL, 5.0, t0)
 
         # ── 4–5. Голосовое и видео в личке ──
-        hist.set_setting("active_model", slow)
+        # ⚠️ АКТИВНОЙ СТАВИМ МОДЕЛЬ ИЗ САМОЙ ОЧЕРЕДИ, а не «медленного»
+        # провайдера (так было до 21.09.2026). С того дня файл уходит модели,
+        # только если активная его ПОНИМАЕТ; не понимает — она получает
+        # расшифровку обычным текстовым путём, и мерить там нечего: это уже
+        # сценарий «текст», проверенный выше. Оставь здесь slow — и проверка
+        # будет молча гонять текстовый путь под именем «аудио».
         for label, ask, chain in (
                 ("аудио", lambda: g.ask_gemini_audio(USER, USER, "QQ"),
                  [m for m in cfg.AUDIO_FALLBACK_CHAIN if m in cfg.AVAILABLE_MODELS]),
                 ("видео", lambda: g.ask_gemini_video(USER, USER, "QQ"),
                  [m for m in cfg.VIDEO_FALLBACK_CHAIN
                   if cfg.AVAILABLE_MODELS.get(m, {}).get("video")])):
+            if not chain:
+                continue          # тип не принимает ни одна модель — мерить нечего
+            hist.set_setting("active_model", chain[0])
             script.clear()
             script["gemini"] = [(4.0, "ok")]
             run(ask)
@@ -6347,18 +6414,17 @@ def check_media_twins():
                     problems.append(f"«{name}»: этого не делает ни {one_label}, "
                                     f"ни {two_label} — {why_one}")
 
-        # ── Подсказка о вложении доезжает до модели (21.09.2026) ──────────
+        # ── Кому уходит файл, а кому — разбор (21.09.2026) ───────────────
         #
-        # ⚠️ ВЫШЕ ЭТОГО НЕ ВИДНО И НЕ МОЖЕТ БЫТЬ ВИДНО: там база знаний
-        # выключена (RAG_ENABLED = False), а разбор вложения делает именно она.
-        # Без этого блока правка 21.09.2026 не проверялась бы ничем.
-        #
-        # ⚠️ Ради чего: 20.09.2026 бот дважды ответил на голосовое мимо —
-        # модель не нашла речи в трёхсекундной записи и достроила ответ из
-        # прошлой темы. Разбор вспомогательной модели к тому моменту УЖЕ был
-        # сделан и выброшен. Теперь он едет рядом с файлом, и проверка следит
-        # за тремя вещами: подсказка дошла, файл при этом на месте, а у видео
-        # подсказки нет (там она намеренно выключена).
+        # ⚠️ ЭТОТ БЛОК ПЕРЕПИСАН В ДЕНЬ ЗАВЕДЕНИЯ. Утром он сторожил подсказку
+        # «вспомогательная модель разобрала это так…», которая ехала рядом с
+        # файлом; вечером Максим сменил саму схему, и подсказку убрали. Теперь
+        # сторожится развилка, ради которой всё делалось:
+        #   • активная модель тип ПОНИМАЕТ → ей уходит САМ ФАЙЛ;
+        #   • не понимает → файла нет вовсе, а сообщением человека становится
+        #     дословный разбор, и отвечает та модель, которую выбрал Максим.
+        # ⚠️ Без этого блока подмену «отвечает не выбранная модель» не заметит
+        # ни одна проверка проекта: бот при ней отвечает как ни в чём не бывало.
         HEARD = "расскажи про комплексы активной защиты"
         seen = {}
 
@@ -6366,42 +6432,79 @@ def check_media_twins():
             @staticmethod
             def post(url, json=None, headers=None, timeout=None, **kw):
                 seen.setdefault("payload", json)
+                seen.setdefault("url", url)
                 clock.t += 1.0
                 return _Answered
 
         g._http = lambda: _Catch()
         g.RAG_ENABLED = True
-        saved_understood, saved_rag = g._media_understood, g._rag_block
+        saved_understood = g._media_understood
+        saved_rag = g._rag_block
+        saved_describe = (g._transcribe_audio, g._describe_video)
         try:
             g._media_understood = lambda *a, **kw: ("поисковый текст", HEARD)
             g._rag_block = lambda *a, **kw: ""     # в базу не ходим: проверяем не её
-            for label, ask, want_hint in (
-                    ("голосовое", lambda: g.ask_gemini_audio(USER, USER, "QQ"), True),
-                    ("видео", lambda: g.ask_gemini_video(USER, USER, "QQ"), False)):
+            g._transcribe_audio = lambda *a, **kw: HEARD
+            g._describe_video = lambda *a, **kw: HEARD
+
+            # Модель, которая НЕ принимает ни аудио, ни видео: первая такая в
+            # реестре (сегодня это Qwen или DeepSeek — они и стоят активными
+            # у Максима). Нет такой вовсе — половину проверки пропускаем, а не
+            # выдумываем модель: проверять надо то, что бывает в жизни.
+            deaf = next((m for m in cfg.AVAILABLE_MODELS
+                         if m not in cfg.AUDIO_FALLBACK_CHAIN
+                         and not cfg.AVAILABLE_MODELS.get(m, {}).get("video")), "")
+
+            for label, ask, understanding in (
+                    ("голосовое", lambda: g.ask_gemini_audio(USER, USER, "QQ"),
+                     next((m for m in cfg.AUDIO_FALLBACK_CHAIN
+                           if m in cfg.AVAILABLE_MODELS), "")),
+                    ("видео", lambda: g.ask_gemini_video(USER, USER, "QQ"),
+                     next((m for m in cfg.VIDEO_FALLBACK_CHAIN
+                           if cfg.AVAILABLE_MODELS.get(m, {}).get("video")), ""))):
+                # ── активная ПОНИМАЕТ тип: уходит сам файл ──
+                if understanding:
+                    seen.clear()
+                    hist.set_setting("active_model", understanding)
+                    ask()
+                    parts = ((seen.get("payload") or {}).get("contents") or [{}])[-1].get("parts", [])
+                    files = [p for p in parts if isinstance(p, dict) and p.get("inlineData")]
+                    texts = " ".join(p.get("text", "") for p in parts if isinstance(p, dict))
+                    done += 1
+                    if not files:
+                        problems.append(
+                            f"{label}: активная модель тип понимает, а файла в запросе "
+                            f"НЕТ — она читает пересказ вместо оригинала")
+                    done += 1
+                    if HEARD in texts:
+                        problems.append(
+                            f"{label}: рядом с файлом уехал разбор вспомогательной "
+                            f"модели — подсказку убрали 21.09.2026, она вернулась")
+
+                # ── активная НЕ понимает: уходит разбор, файла нет ──
+                if not deaf:
+                    continue
                 seen.clear()
-                hist.set_setting("active_model", cfg.FALLBACK_MODEL)
+                hist.set_setting("active_model", deaf)
                 ask()
-                parts = ((seen.get("payload") or {}).get("contents") or [{}])[-1].get("parts", [])
-                texts = " ".join(p.get("text", "") for p in parts if isinstance(p, dict))
+                payload = seen.get("payload") or {}
+                parts = (payload.get("contents") or [{}])[-1].get("parts", [])
                 files = [p for p in parts if isinstance(p, dict) and p.get("inlineData")]
-
+                # текстовый путь идёт OpenAI-совместимым запросом: там messages
+                sent_text = str(payload.get("messages") or parts)
                 done += 1
-                if want_hint and HEARD not in texts:
+                if files:
                     problems.append(
-                        f"{label}: разбор вспомогательной модели НЕ доехал до отвечающей — "
-                        f"он снова делается и выбрасывается, как до 21.09.2026")
-                if not want_hint and HEARD in texts:
-                    problems.append(
-                        f"{label}: подсказка добавлена, хотя у видео она намеренно "
-                        f"выключена (hint=False) — правка задела не тот тип")
-
+                        f"{label}: активная модель {deaf} тип НЕ принимает, а файл "
+                        f"всё равно ушёл — отвечает не та модель, что выбрана кнопкой")
                 done += 1
-                if not files:
+                if HEARD not in sent_text:
                     problems.append(
-                        f"{label}: в запросе НЕТ самого файла — подсказка вытеснила его, "
-                        f"и модель теперь читает пересказ вместо оригинала")
+                        f"{label}: разбор не стал сообщением человека — активной "
+                        f"модели ушло что-то другое, и о вложении она не знает")
         finally:
             g._media_understood, g._rag_block = saved_understood, saved_rag
+            g._transcribe_audio, g._describe_video = saved_describe
     finally:
         for name, value in saved.items():
             setattr(g, name, value)
@@ -6412,7 +6515,7 @@ def check_media_twins():
     return problems, (f"{done} проверок: на обоих типах — расход на ответившую, письмо "
                       f"владельцу, память бота без мыслей и со своей подписью, мысли "
                       f"человеку, активная модель на месте; расхождение типов названо "
-                      f"отдельно; разбор вложения доезжает до модели, а файл остаётся")
+                      f"отдельно; понимающей модели уходит файл, непонимающей — разбор")
 
 
 def check_dialog_log():
@@ -6695,6 +6798,148 @@ def check_media_task():
                       f"своё из настроек перебивает заводское, в поиск уходит весь разбор")
 
 
+def check_proactive_media_route():
+    """
+    Режим «Сам в разговор»: кому достаётся вложение, а кому стенограмма
+    (21.09.2026).
+
+    Правило то же, что в личке: файл уходит АКТИВНОЙ модели, если она его
+    понимает; не понимает — реплику пишет она же по стенограмме, где разбор
+    уже лежит строкой участника.
+
+    ⚠️ ЧТО ЭТО ЛОМАЕТ, ЕСЛИ СЛОМАЕТСЯ, И ПОЧЕМУ НЕ ВИДНО ГЛАЗАМИ: бот
+    отвечает в обоих случаях, и в чате разницы не заметно. Заметно только
+    в счетах (платит не тот провайдер) и в характере реплик (отвечает не та
+    модель, которую выбрал Максим кнопкой).
+
+    Сверяется ТРИ развилки:
+      • активная зрячая, но НЕ Gemini (сегодня Qwen) — запрос уходит ей и
+        OpenAI-совместимым форматом, с файлом внутри;
+      • активная тип НЕ принимает (голосовое у Qwen) — запроса нет ВОВСЕ, а
+        функция возвращает None, чтобы вызывающий ушёл на стенограмму;
+      • активная Gemini — native-путь, и первой пробуют ИМЕННО ЕЁ, а не
+        первую модель цепочки разбора.
+    """
+    import config as cfg
+    from database import history as hist
+    from services import chat_log
+    from services import gemini as g
+
+    problems = []
+    done = 0
+
+    seen = []          # [(куда, что отправили)]
+
+    class _Resp:
+        @staticmethod
+        def raise_for_status(): pass
+
+        @staticmethod
+        def json():
+            return {"choices": [{"message": {"content": "реплика бота"}}],
+                    "usage": {"prompt_tokens": 1, "total_tokens": 2},
+                    "candidates": [{"content": {"parts": [{"text": "реплика бота"}]}}]}
+
+    class _Session:
+        @staticmethod
+        def post(url, json=None, headers=None, timeout=None, **kw):
+            seen.append((url, json))
+            return _Resp
+
+    def _provider_answer(model_name, messages, thinking_override=None):
+        seen.append((f"provider:{model_name}", messages))
+        return {"choices": [{"message": {"content": "реплика бота"}}],
+                "usage": {"prompt_tokens": 1, "total_tokens": 2}}
+
+    class Silent:
+        def _skip(self, *a, **kw): pass
+        debug = info = warning = error = exception = _skip
+
+    saved = {name: getattr(g, name) for name in (
+        "_http", "logger", "_qwen_chat_request", "_deepseek_chat_request",
+        "_xiaomi_chat_request", "_build_proactive_parts", "_notify_models_failed")}
+    saved_register = hist.register_api_call
+    saved_write = chat_log._write
+    saved_active = hist.get_setting("active_model", "")
+    try:
+        g._http = lambda: _Session()
+        g.logger = Silent()
+        g._qwen_chat_request = _provider_answer
+        g._deepseek_chat_request = _provider_answer
+        g._xiaomi_chat_request = _provider_answer
+        g._notify_models_failed = lambda *a, **kw: None
+        g._build_proactive_parts = lambda *a, **kw: (["характер"], "стенограмма", ["запрос"])
+        hist.register_api_call = lambda *a, **kw: None
+        chat_log._write = lambda *a, **kw: None
+
+        seeing_not_gemini = next((m for m, info in cfg.AVAILABLE_MODELS.items()
+                                  if info.get("vision") and info.get("provider") != "gemini"), "")
+        # ⚠️ БЕРЁМ НЕ ПЕРВУЮ модель цепочки, а следующую: на первой шаг 3
+        # прошёл бы и при сломанном коде — «первой спросили активную» и
+        # «первой спросили начало цепочки» совпали бы случайно. Поймано
+        # нарочной поломкой 21.09.2026.
+        gemini_model = next((m for m in list(cfg.PROACTIVE_MEDIA_CHAIN)[1:]
+                             if m in cfg.AVAILABLE_MODELS), "")
+
+        # ── 1. Зрячая активная не-Gemini: файл уходит ЕЙ ──
+        if seeing_not_gemini:
+            seen.clear()
+            hist.set_setting("active_model", seeing_not_gemini)
+            answer = g.ask_group_proactive_media(-1, 2, "повод", 3, "QQ", "image/jpeg", "фото")
+            done += 3
+            if not answer:
+                problems.append(f"фото в группе при активной {seeing_not_gemini}: "
+                                f"реплики нет вовсе")
+            asked = [where for where, _ in seen]
+            if not any(str(where).startswith(f"provider:{seeing_not_gemini}")
+                       for where in asked):
+                problems.append(f"фото в группе ушло мимо активной {seeing_not_gemini}: "
+                                f"спрашивали {asked} — отвечает не та модель, что "
+                                f"выбрана кнопкой")
+            if not any("image_url" in str(payload) for _, payload in seen):
+                problems.append(f"фото в группе при активной {seeing_not_gemini}: в "
+                                f"запросе нет самой картинки — она отвечает вслепую")
+
+        # ── 2. Активная тип НЕ принимает: запроса быть не должно ──
+        deaf = next((m for m in cfg.AVAILABLE_MODELS
+                     if m not in cfg.AUDIO_FALLBACK_CHAIN), "")
+        if deaf:
+            seen.clear()
+            hist.set_setting("active_model", deaf)
+            answer = g.ask_group_proactive_media(-1, 2, "повод", 3, "QQ", "audio/ogg",
+                                                 "голосовое")
+            done += 2
+            if answer is not None:
+                problems.append(f"голосовое в группе при активной {deaf}: функция "
+                                f"вернула {answer!r} вместо None — бот не уйдёт на "
+                                f"стенограмму, и реплику напишет чужая модель")
+            if seen:
+                problems.append(f"голосовое в группе при активной {deaf}: запрос всё "
+                                f"равно ушёл ({[w for w, _ in seen]}) — заплачено за "
+                                f"файл, который активная не понимает")
+
+        # ── 3. Активная Gemini: первой пробуют ЕЁ ──
+        if gemini_model:
+            seen.clear()
+            hist.set_setting("active_model", gemini_model)
+            g.ask_group_proactive_media(-1, 2, "повод", 3, "QQ", "image/jpeg", "фото")
+            done += 1
+            first = str(seen[0][0]) if seen else ""
+            if gemini_model not in first:
+                problems.append(f"фото в группе при активной {gemini_model}: первой "
+                                f"спросили «{first}» — цепочка снова идёт мимо активной")
+    finally:
+        for name, value in saved.items():
+            setattr(g, name, value)
+        hist.register_api_call = saved_register
+        chat_log._write = saved_write
+        hist.set_setting("active_model", saved_active)
+
+    return problems, (f"{done} проверок: зрячая не-Gemini получает файл своим форматом, "
+                      f"непонимающая активная не получает запроса вовсе, у Gemini "
+                      f"цепочка начинается с активной")
+
+
 CHECKS = (
     ("деньги — расчёт стоимости запросов", check_money),
     ("квота Qwen — оборванный ответ, срок и письма", check_qwen_quota),
@@ -6739,6 +6984,7 @@ CHECKS = (
     ("запись обращений: что в ней есть и чего в ней быть не должно",
      check_dialog_log),
     ("задание разборщику вложений доезжает до модели", check_media_task),
+    ("«Сам в разговор»: кому файл, а кому стенограмма", check_proactive_media_route),
 )
 
 
