@@ -58,6 +58,8 @@ from .panel_rag import _end_kb_test
 # двух показанных раскладок; вторая ставила новинку отдельной длинной строкой,
 # как делали с Gemini 3.8 Flash). Одиночный ряд Qwen снова стал парным, число
 # рядов не изменилось.
+# 2026-09-28: в ряду Xiaomi MiMo V2.5 / V2.5 Pro заменены на V2.6 Flash / V2.6 Pro
+# (решение Максима) — место ряда и порядок кнопок прежние.
 _MODEL_BUTTON_ROWS = [
     ["gemini-3.5-flash-lite", "gemini-3.6-flash"],
     ["gemini-3.5-flash", "gemini-3.7-flash"],
@@ -65,7 +67,7 @@ _MODEL_BUTTON_ROWS = [
     ["qwen3.7-plus", "qwen3.7-max"],
     ["qwen3.8-max", "qwen3.8-flash"],
     ["deepseek-flash"],
-    ["mimo-v2.5", "mimo-v2.5-pro"],
+    ["mimo-v2.6-flash", "mimo-v2.6-pro"],
 ]
 
 # Ряд моделей картинок (Nano Banana, gemini-*-image).

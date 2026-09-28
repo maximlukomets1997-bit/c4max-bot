@@ -317,13 +317,17 @@ XIAOMI_API_URL = "https://api.xiaomimimo.com/v1/chat/completions"
 
 # Официальные цены Xiaomi MiMo — ДОЛЛАРЫ ЗА 1 МЛН ТОКЕНОВ
 # (https://mimo.mi.com/docs/price/pay-as-you-go, сверено 2026-07-25).
+# 2026-09-28: V2.5 и V2.5 Pro заменены на V2.6 Flash и V2.6 Pro (решение
+# Максима). Цены у новых те же, что были у V2.5 и V2.5 Pro, — сверено по
+# OpenRouter и обзорам выхода серии (страница цен Xiaomi собирается
+# скриптом и снаружи не читается).
 # Устроены как у DeepSeek: вход из кэша дешевле входа без кэша, рассуждения
 # оплачиваются как обычный ответ (output). Кэш приходит в usage полем
 # prompt_tokens_details.cached_tokens (как у Qwen) — проверено живым запросом.
 # ⚠️ Xiaomi поменяет тарифы — обновить эти числа руками.
 XIAOMI_PRICES = {
-    "mimo-v2.5":     {"cache_hit": 0.0028, "cache_miss": 0.14,  "output": 0.28},
-    "mimo-v2.5-pro": {"cache_hit": 0.0036, "cache_miss": 0.435, "output": 0.87},
+    "mimo-v2.6-flash": {"cache_hit": 0.0028, "cache_miss": 0.14,  "output": 0.28},
+    "mimo-v2.6-pro":   {"cache_hit": 0.0036, "cache_miss": 0.435, "output": 0.87},
 }
 
 # Официальные цены Qwen (Alibaba Cloud Model Studio, эндпоинт Сингапур) —
@@ -621,9 +625,10 @@ KB_LOG_DAYS            = 30                    # срок хранения жу�
 #       с картинкой против 101 без неё). Обе сняты провайдером, но повадка
 #       осталась поучительной — у слепой модели молчание и согласие выглядят
 #       одинаково, и проверять новую зрячую модель надо ответом, а не кодом 200;
-#     • MiMo V2.5 картинки принимает, MiMo V2.5 Pro отвечает «No endpoints
-#       found that support image input» — это подтверждает и документация
-#       Xiaomi: из всего семейства картинки понимает только mimo-v2.5.
+#     • MiMo V2.6 Flash и V2.6 Pro картинки ВИДЯТ обе (28.09.2026, живой
+#       запрос: на картинке из двух половин обе назвали цвета верно — «верх
+#       синий, низ жёлтый»). В прежнем поколении зрячей была только V2.5:
+#       V2.5 Pro отвечала «No endpoints found that support image input».
 # Поле "video": True (2026-07-24) — модель принимает ВИДЕО. Стоит у всех Gemini
 #   («All Gemini can process video data», проверено живым тестом на 3.6 Flash:
 #   цвета кадров названы верно по порядку). У Qwen и DeepSeek его нет — видео
@@ -832,29 +837,33 @@ AVAILABLE_MODELS = {
         "thinking": True,
         "vision": True
     },
-    # ─── Xiaomi MiMo (подключены 2026-07-25) ───
-    # Живая проверка на API Xiaomi: mimo-v2.5 УЗНАЛА картинку (цвет назван верно),
-    # mimo-v2.5-pro картинки не принимает вовсе («No endpoints found that support
-    # image input») — отсюда разные значения vision.
+    # ─── Xiaomi MiMo (подключены 2026-07-25, поколение V2.6 — с 2026-09-28) ───
+    # 28.09.2026 V2.5 и V2.5 Pro заменены на V2.6 Flash и V2.6 Pro (решение
+    # Максима; серия вышла 21–22.09.2026). Живая проверка перед заменой: обе
+    # отвечают на нашем ключе и адресе, рычаг размышлений прежний (thinking.type:
+    # enabled — мысли есть, disabled — нет), картинку ВИДЯТ обе — на картинке из
+    # двух половин назвали цвета верно. Отсюда vision у обеих; у прежней V2.5 Pro
+    # его не было («No endpoints found that support image input»).
     # Поля "video" НЕТ ни у одной намеренно: видео и голосовые у бота идут
     # ОТДЕЛЬНЫМ, «гугловым» маршрутом (native generateContent в ask_gemini_video /
     # ask_gemini_audio), а MiMo понимает только OpenAI-формат. Поставишь "video":
     # True — модель попадёт в VIDEO_FALLBACK_CHAIN и запрос уйдёт к ней в чужом
-    # формате. Сама по себе mimo-v2.5 видео и речь понимает (проверено), но для
-    # этого нужен отдельный код — см. раздел 3 карты проекта.
-    "mimo-v2.5": {
-        "name": "MiMo V2.5",
-        "public_name": "MiMo V2.5",
+    # формате. Серия V2.6 заявлена всеядной (текст, картинки, видео, звук), но
+    # видео и речь нашим путём не проверялись: для них нужен отдельный код —
+    # см. раздел 3 карты проекта.
+    "mimo-v2.6-flash": {
+        "name": "MiMo V2.6 Flash",
+        "public_name": "MiMo V2.6 Flash",
         "provider": "xiaomi",
         "thinking": True,
         "vision": True
     },
-    "mimo-v2.5-pro": {
-        "name": "MiMo V2.5 Pro",
-        "public_name": "MiMo V2.5 Pro",
+    "mimo-v2.6-pro": {
+        "name": "MiMo V2.6 Pro",
+        "public_name": "MiMo V2.6 Pro",
         "provider": "xiaomi",
         "thinking": True,
-        "vision": False
+        "vision": True
     }
 }
 

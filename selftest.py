@@ -181,7 +181,7 @@ def check_money():
         _g.datetime = saved_dt
 
     # ── Xiaomi: кэш ограничен размером входа ──
-    model = "mimo-v2.5"
+    model = "mimo-v2.6-flash"
     p = XIAOMI_PRICES[model]
     usage = {"prompt_tokens": 800, "completion_tokens": 300,
              "prompt_tokens_details": {"cached_tokens": 200}}
@@ -886,8 +886,8 @@ _PRICES_EXPECTED = {
         "qwen3.7-plus": {"cache_hit": 0.08, "cache_miss": 0.40, "output": 1.60},
     },
     "XIAOMI_PRICES": {
-        "mimo-v2.5":     {"cache_hit": 0.0028, "cache_miss": 0.14,  "output": 0.28},
-        "mimo-v2.5-pro": {"cache_hit": 0.0036, "cache_miss": 0.435, "output": 0.87},
+        "mimo-v2.6-flash": {"cache_hit": 0.0028, "cache_miss": 0.14,  "output": 0.28},
+        "mimo-v2.6-pro":   {"cache_hit": 0.0036, "cache_miss": 0.435, "output": 0.87},
     },
     "IMAGE_PRICES": {
         "gemini-3.1-flash-image":      {"in": 0.50, "img_out": 60.0, "txt_out": 1.50},
@@ -5771,7 +5771,9 @@ def check_photo_route():
                 problems.append(f"у фото не осталось подстраховки ({seeing}): цепочка {chain}")
 
         # ── 2. Активная СЛЕПАЯ: её не должны пробовать вовсе ──
-        for model in ("qwen3.7-max", "mimo-v2.5-pro"):
+        # mimo-v2.5-pro, вторая слепая, ушла 28.09.2026 вместе с заменой MiMo на V2.6
+        # (обе новые зрячие) — слепой в наборе осталась одна qwen3.7-max.
+        for model in ("qwen3.7-max",):
             chain = route(model, has_image=True)
             done += 2
             if model in chain:
