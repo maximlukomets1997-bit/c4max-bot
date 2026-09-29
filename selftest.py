@@ -86,7 +86,7 @@ def check_money():
                             f"${got if got is not None else 0:.8f}")
 
     # ── Qwen: вход частично из кэша ──
-    model = "qwen3.8-max"
+    model = "qwen3.8-max-0902"
     p = QWEN_PRICES[model]
     usage = {"prompt_tokens": 1000, "completion_tokens": 500,
              "prompt_tokens_details": {"cached_tokens": 400}}
@@ -209,7 +209,7 @@ def check_money():
 
     # ── Нули не должны падать: на бесплатных вариантах приходят именно они ──
     done += 1
-    zero = _qwen_cost("qwen3.8-max", {"prompt_tokens": 0, "completion_tokens": 0})
+    zero = _qwen_cost("qwen3.8-max-0902", {"prompt_tokens": 0, "completion_tokens": 0})
     if zero != 0.0:
         problems.append(f"Qwen: пустой запрос должен стоить ровно 0, вышло {zero}")
 
@@ -881,7 +881,7 @@ def check_permissions():
 _PRICES_EXPECTED = {
     "QWEN_PRICES": {
         "qwen3.8-flash": {"cache_hit": 0.016, "cache_miss": 0.15, "output": 0.47},
-        "qwen3.8-max":  {"cache_hit": 0.25, "cache_miss": 2.00, "output": 6.00},
+        "qwen3.8-max-0902": {"cache_hit": 0.25, "cache_miss": 2.00, "output": 6.00},
         "qwen3.7-max":  {"cache_hit": 0.50, "cache_miss": 2.50, "output": 7.50},
         "qwen3.7-plus": {"cache_hit": 0.08, "cache_miss": 0.40, "output": 1.60},
     },
@@ -5757,7 +5757,7 @@ def check_photo_route():
         # qwen3.8-flash добавлена 21.09.2026: две панели ТТХ переписаны без
         # ошибок за 10 с, флаг Китая назван верно (флаг Омана — нет, но решение
         # Максима «активная модель отвечает сама» от этого не меняется).
-        for seeing in ("qwen3.7-plus", "qwen3.8-max", "qwen3.8-flash", "deepseek-flash"):
+        for seeing in ("qwen3.7-plus", "qwen3.8-max-0902", "qwen3.8-flash", "deepseek-flash"):
             chain = route(seeing, has_image=True)
             done += 3
             if not chain or chain[0] != seeing:
