@@ -3904,8 +3904,9 @@ def check_prompts_spec():
             hist.set_setting(key, saved)
 
     # ─── поле показывает ХРАНИМОЕ, а не запасное ───
-    # ⚠️ ПРОВЕРКА ДОЛЖНА РАБОТАТЬ, ДАЖЕ КОГДА ЗАПАСНЫЕ ТЕКСТЫ ПУСТЫ. Сегодня
-    # они пусты (убраны 16.08.2026), и просто «прочитать при пустой настройке»
+    # ⚠️ ПРОВЕРКА ДОЛЖНА РАБОТАТЬ, ДАЖЕ КОГДА ЗАПАСНЫЕ ТЕКСТЫ ПУСТЫ. У промптов
+    # «личности» они пусты (убраны 16.08.2026; непусты только у трёх заданий
+    # разборщику, 21.09.2026), и просто «прочитать при пустой настройке»
     # ничего не доказывает: подмена читалки на запасной текст такую проверку
     # прошла бы насквозь (наступил на это при написании 30.08.2026). Поэтому
     # временно КЛАДЁМ в константу метку и требуем, чтобы поле её не показало,
@@ -3933,6 +3934,111 @@ def check_prompts_spec():
         finally:
             setattr(cfg, const, saved_const)
             hist.set_setting(key, saved)
+
+    # ─── страница и лог говорят правду о ЗАВОДСКОМ тексте (29.09.2026) ───
+    # ⚠️ Ради чего. До 29.09.2026 страница про ВСЕ промпты писала «бот
+    # работает без этого куска» и при очистке — «восстановить будет нечем», а
+    # лог — «СТЁРТ». У трёх заданий разборщику это неправда: очистка
+    # возвращает заводское задание. Правило одно — prompts_spec.has_factory, и
+    # решает оно по САМОЙ константе, а не по списку ключей. Поэтому константы
+    # здесь выставляются руками: «с заводским» берётся задание голосового,
+    # «без» — шапка базы знаний, у которой запасная константа есть, но пуста.
+    # Так проверка не зависит от того, что сегодня лежит в config.
+    from web import actions as web_actions
+    from web import pages as web_pages
+
+    def card_of(page: str, key: str) -> str:
+        """Кусок страницы с карточкой одного промпта."""
+        title = web_pages.esc(prompts_spec.BY_KEY[key]["title"])
+        at = page.find(f"<h3>{title}</h3>")
+        if at < 0:
+            return ""
+        start = page.rfind('<div class="pcard', 0, at)
+        end = page.find('<div class="pcard', at)
+        return page[start:end if end > 0 else len(page)]
+
+    WITH, WITHOUT = "media_prompt_voice", "rag_instruction"
+    const_with = prompts_spec.BY_KEY[WITH]["fallback"]
+    const_without = prompts_spec.BY_KEY[WITHOUT]["fallback"]
+    saved_consts = {c: getattr(cfg, c) for c in (const_with, const_without)}
+    saved_texts = {k: hist.get_setting(k, "") for k in (WITH, WITHOUT)}
+    saved_logger = web_actions.logger
+    logged = []
+
+    class _Log:
+        def info(self, msg, *args):
+            logged.append(msg % args if args else msg)
+        warning = error = debug = info
+
+    try:
+        setattr(cfg, const_with, "ЗАВОДСКОЕ ЗАДАНИЕ")
+        setattr(cfg, const_without, "")
+        done += 2
+        if not prompts_spec.has_factory(WITH):
+            problems.append(f"has_factory(«{WITH}») = нет, хотя в config.{const_with} "
+                            f"лежит текст — страница и лог скажут «стёрт насовсем»")
+        if prompts_spec.has_factory(WITHOUT):
+            problems.append(f"has_factory(«{WITHOUT}») = да, хотя config.{const_without} "
+                            f"пуст — правило смотрит на наличие ключа, а не на текст")
+        done += 1
+        if any(prompts_spec.has_factory(i["key"]) for i in prompts_spec.PROMPTS
+               if not i.get("fallback")):
+            problems.append("has_factory нашёл заводской текст у промпта без запасной "
+                            "константы")
+
+        # Пустые поля: подпись карточки.
+        hist.set_setting(WITH, "")
+        hist.set_setting(WITHOUT, "")
+        page = web_pages.page_prompts("подпись")
+        c_with, c_without = card_of(page, WITH), card_of(page, WITHOUT)
+        done += 3
+        if "работает заводское задание" not in c_with:
+            problems.append("у пустого задания разборщику страница не пишет, что "
+                            "работает заводское задание")
+        if "без этого куска" in c_with:
+            problems.append("у пустого задания разборщику страница пишет «бот работает "
+                            "без этого куска» — это неправда, работает заводское")
+        if "без этого куска" not in c_without:
+            problems.append("у пустого промпта без заводского текста пропала подпись "
+                            "«бот работает без этого куска»")
+        done += 1
+        if f"«{web_pages.esc(prompts_spec.BY_KEY[WITH]['title'])}»" not in page.split('<div class="pcard')[0]:
+            problems.append("шапка страницы не называет промпт с заводским текстом — "
+                            "список в ней разошёлся с правилом has_factory")
+
+        # Вопрос перед очисткой.
+        hist.set_setting(WITH, "свой текст")
+        hist.set_setting(WITHOUT, "свой текст")
+        c_with = card_of(web_pages.page_prompts("подпись", confirm=WITH), WITH)
+        c_without = card_of(web_pages.page_prompts("подпись", confirm=WITHOUT), WITHOUT)
+        done += 3
+        if "Вернуть заводское задание?" not in c_with or "Да, вернуть заводское" not in c_with:
+            problems.append("перед очисткой задания разборщику страница не спрашивает "
+                            "«Вернуть заводское задание?»")
+        if "восстановить будет нечем" in c_with:
+            problems.append("перед очисткой задания разборщику страница пугает "
+                            "«восстановить будет нечем» — заводское вернётся само")
+        if "Стереть этот промпт?" not in c_without or "восстановить будет нечем" not in c_without:
+            problems.append("перед очисткой промпта без заводского текста пропало "
+                            "предупреждение «стереть… восстановить будет нечем»")
+
+        # Строка лога правки с сайта — та же, что говорит бот на кнопке сброса.
+        web_actions.logger = _Log()
+        web_actions.apply_prompt(1, WITH, "")
+        web_actions.apply_prompt(1, WITHOUT, "")
+        done += 2
+        if not logged or "заводск" not in logged[0] or "СТЁРТ" in logged[0]:
+            problems.append(f"лог очистки задания разборщику: {logged[:1]!r} — ждали "
+                            f"«возвращён к заводскому заданию»")
+        if len(logged) < 2 or "СТЁРТ" not in logged[1]:
+            problems.append(f"лог очистки промпта без заводского текста: {logged[1:2]!r} "
+                            f"— ждали «СТЁРТ»")
+    finally:
+        web_actions.logger = saved_logger
+        for c, v in saved_consts.items():
+            setattr(cfg, c, v)
+        for k, v in saved_texts.items():
+            hist.set_setting(k, v)
 
     # ─── собранный системный промпт = основной + дополнения ───
     saved_main = hist.get_setting("custom_system_prompt", "")
@@ -4969,10 +5075,12 @@ def check_web_auth():
     забытая проверка срока не мешают ВЛАДЕЛЬЦУ войти, поэтому руками такое
     не замечается вовсе.
 
-    Отдельно проверяются два ключа. Telegram считает подпись по-разному для
-    мини-приложения (ключ выведен из слова WebAppData) и для входа из
-    браузера (ключ — просто хэш токена). Подпись, посчитанная не тем ключом,
-    обязана быть отвергнута — иначе одна дверь открывалась бы ключом от другой.
+    Отдельно проверяется ключ подписи мини-приложения (выведен из слова
+    WebAppData). Подпись, посчитанная другим ключом Telegram — простым хэшем
+    токена, как у кнопки «Войти через Telegram», — обязана быть отвергнута.
+    ⚠️ Самой этой кнопки на сайте НЕТ: функция под неё (check_widget) не была
+    подключена ни к одному адресу и удалена 29.09.2026. Вход из браузера —
+    одноразовая ссылка, её проверяет блок ниже.
     """
     import hashlib
     import hmac
@@ -5004,7 +5112,9 @@ def check_web_auth():
         return out
 
     webapp_key = hmac.new(b"WebAppData", TOKEN.encode(), hashlib.sha256).digest()
-    widget_key = hashlib.sha256(TOKEN.encode()).digest()
+    # Ключ ДРУГОГО механизма Telegram (кнопка «Войти через Telegram»). У сайта
+    # такой двери нет, но подпись этим ключом — самая правдоподобная подделка.
+    other_key = hashlib.sha256(TOKEN.encode()).digest()
 
     try:
         now = int(time.time())
@@ -5020,9 +5130,9 @@ def check_web_auth():
         expect("подменённые данные при той же подписи",
                auth.check_webapp(urlencode(bad)), None)
 
-        # Тот же набор, подписанный ключом ДРУГОЙ двери.
+        # Тот же набор, подписанный ключом другого механизма Telegram.
         wrong_key = sign({"auth_date": str(now),
-                          "user": '{"id":%d,"first_name":"O"}' % OWNER}, widget_key)
+                          "user": '{"id":%d,"first_name":"O"}' % OWNER}, other_key)
         expect("подпись мини-приложения не тем ключом",
                auth.check_webapp(urlencode(wrong_key)), None)
 
@@ -5032,16 +5142,6 @@ def check_web_auth():
                auth.check_webapp(urlencode(stale)), None)
 
         expect("пустые данные мини-приложения", auth.check_webapp(""), None)
-
-        # ─── вход из браузера (второй ключ) ───
-        w_good = sign({"id": str(OWNER), "auth_date": str(now),
-                       "first_name": "O"}, widget_key)
-        expect("своя подпись входа из браузера", auth.check_widget(w_good), OWNER)
-
-        w_wrong = sign({"id": str(OWNER), "auth_date": str(now),
-                        "first_name": "O"}, webapp_key)
-        expect("подпись входа из браузера не тем ключом",
-               auth.check_widget(w_wrong), None)
 
         # ─── кто вообще имеет право войти ───
         expect("владелец допущен", auth.is_allowed(OWNER), True)
@@ -5108,13 +5208,19 @@ def check_web_auth():
         auth.TELEGRAM_TOKEN = ""
         expect("без токена мини-приложение не пускает",
                auth.check_webapp(urlencode(good)), None)
-        expect("без токена браузер не пускает", auth.check_widget(w_good), None)
+        # ⚠️ Ссылка подписана ЗДЕСЬ, уже без токена, то есть пустым ключом.
+        # Ссылку со старой подписью отвергла бы и простая несверка подписей —
+        # такой шаг не заметил бы снятую защиту. А пустой ключ знает кто
+        # угодно: без защиты бот без .env пускал бы по самодельной ссылке.
+        forged = auth.make_login_token(OWNER)
+        expect("без токена ссылка входа не пускает, даже подписанная пустым ключом",
+               auth.read_login_token(forged), None)
         expect("без токена кука не читается", auth.read_session(cookie), None)
     finally:
         auth.TELEGRAM_TOKEN, auth.ADMIN_IDS = saved_token, saved_admins
 
-    return problems, (f"{done} проверок: две схемы подписи, срок, подмена id, "
-                      f"кука, ссылка, подпись формы, чужие буквы")
+    return problems, (f"{done} проверок: подпись мини-приложения и чужой ключ, "
+                      f"срок, подмена id, кука, ссылка, подпись формы, чужие буквы")
 
 
 def check_update_notice():

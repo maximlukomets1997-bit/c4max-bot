@@ -1815,7 +1815,8 @@ def page_prompts(csrf: str = "", confirm: str = "", saved: str = "",
     Страница промптов.
 
     confirm — ключ промпта, для которого показать вопрос «точно стереть?»
-    (человек отправил пустое поле поверх непустого текста).
+    (человек отправил пустое поле поверх непустого текста); у промпта с
+    заводским текстом вопрос другой — «вернуть заводское задание?».
     saved   — ключ промпта, который только что сохранён (подсветить карточку).
     viewer_id — кто вошёл: от него зависит ЛИЧНЫЙ тумблер промпта (этап 7).
     """
@@ -1827,9 +1828,17 @@ def page_prompts(csrf: str = "", confirm: str = "", saved: str = "",
     for item in prompts_spec.PROMPTS:
         key = item["key"]
         text = prompts_spec.read(key)
+        # ⚠️ У заданий разборщику вложений очистка ВОЗВРАЩАЕТ заводской текст,
+        # у промптов «личности» — стирает насовсем (prompts_spec.has_factory,
+        # 29.09.2026). До этого дня страница про все промпты говорила «бот
+        # работает без этого куска» и «восстановить будет нечем» — про три
+        # задания разборщику это была неправда.
+        factory = prompts_spec.has_factory(key)
         marks = []
         if text:
             marks.append(f"{len(text)} символов")
+        elif factory:
+            marks.append("пусто — работает заводское задание")
         else:
             marks.append("пусто — бот работает без этого куска")
         # У основного промпта показываем, что уйдёт модели ЦЕЛИКОМ: он
@@ -1838,32 +1847,45 @@ def page_prompts(csrf: str = "", confirm: str = "", saved: str = "",
             marks.append(f"вместе с дополнениями модель получит {assembled_len}")
 
         if key == confirm:
+            if factory:
+                question = ('<b>Вернуть заводское задание?</b><br>'
+                            'Поле пустое, а свой текст в нём есть. Он будет '
+                            'удалён, и разбор пойдёт по заводскому заданию из '
+                            'настроек бота.')
+                yes = "Да, вернуть заводское"
+            else:
+                question = ('<b>Стереть этот промпт?</b><br>'
+                            'Поле пустое, а текст в нём есть. Заводского текста '
+                            'у этого промпта нет — восстановить будет нечем.')
+                yes = "Да, стереть"
             body = (
                 '<div class="warn-box">'
-                '<b>Стереть этот промпт?</b><br>'
-                'Поле пустое, а текст в нём есть. Заводского текста у промптов '
-                'нет — восстановить будет нечем.'
-                '<div class="warn-btns">'
+                + question
+                + '<div class="warn-btns">'
                 + f'<form method="post" action="/prompts">'
                   f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
                   f'<input type="hidden" name="key" value="{esc(key)}">'
                   f'<input type="hidden" name="text" value="">'
                   f'<input type="hidden" name="confirm" value="1">'
-                  f'<button type="submit" class="btn danger">Да, стереть</button>'
+                  f'<button type="submit" class="btn danger">{yes}</button>'
                   f'</form>'
                 + '<a class="btn" href="/prompts">Отмена</a>'
                 + '</div></div>'
             )
         else:
+            empty_hint = ("Пусто. Работает заводское задание." if factory
+                          else "Пусто. Бот работает без этого текста.")
+            how_to_clear = ("чтобы вернуть заводское задание — очистите поле и сохраните"
+                            if factory else "чтобы стереть — очистите поле и сохраните")
             body = (
                 f'<form method="post" action="/prompts">'
                 f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
                 f'<input type="hidden" name="key" value="{esc(key)}">'
                 f'<textarea name="text" rows="10" spellcheck="false" '
-                f'placeholder="Пусто. Бот работает без этого текста.">{esc(text)}</textarea>'
+                f'placeholder="{empty_hint}">{esc(text)}</textarea>'
                 f'<div class="pbtns">'
                 f'<button type="submit" class="btn primary">Сохранить</button>'
-                f'<span class="note">чтобы стереть — очистите поле и сохраните</span>'
+                f'<span class="note">{how_to_clear}</span>'
                 f'</div></form>'
             )
 
@@ -1881,11 +1903,19 @@ def page_prompts(csrf: str = "", confirm: str = "", saved: str = "",
             "<div class=\"ver\"><a href=\"/\">← к сводке</a></div>"
             "</header>")
 
+    # Список «у кого есть заводской текст» собирается тем же правилом, что
+    # подписи карточек, — а не зашит строкой, которая разъедется с кодом.
+    with_factory = [f"«{esc(item['title'])}»" for item in prompts_spec.PROMPTS
+                    if prompts_spec.has_factory(item["key"])]
+    factory_note = (f' У промптов {", ".join(with_factory)} — наоборот: пустое '
+                    f'поле возвращает заводское задание.' if with_factory else "")
     intro = ('<div class="card wide"><div class="note">'
-             'Промпты — это инструкции модели. Заводских текстов у них нет: '
-             'пустое поле означает «работать без этого куска», а не «взять '
-             'значение по умолчанию». Правка применяется сразу, следующий же '
-             'ответ бота пойдёт по новому тексту.'
+             'Промпты — это инструкции модели. У промптов характера бота '
+             'заводских текстов нет: пустое поле означает «работать без этого '
+             'куска», а не «взять значение по умолчанию».'
+             + factory_note +
+             ' Правка применяется сразу, следующий же ответ бота пойдёт по '
+             'новому тексту.'
              '</div></div>')
 
     foot = ('<footer><span><a href="/">← к сводке</a></span>'

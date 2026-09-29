@@ -1,6 +1,6 @@
 # Проводка: чем что запускается и где регистрируется
 
-Снимок от 2026-09-08 (код версии v5.09): числа и списки сверены с кодом
+Снимок от 2026-09-29 (код версии v5.39): числа и списки сверены с кодом
 в этот день. Всё ниже проверено чтением кода; если правишь что-то из
 этого — перечитай исходный файл, а не этот текст.
 
@@ -18,21 +18,25 @@
 ## Жизненный цикл процесса (`main.py`)
 
 - `post_init` — выставляет меню команд Telegram (публичное + отдельное для
-  персонала), поднимает **7 фоновых задач** в `application.bot_data["background_tasks"]`,
-  убирает устаревшее уведомление об обновлении, шлёт админам «Бот запущен»
-  и открывает каждому его панель `/adm`.
+  персонала), поднимает **8 фоновых задач** в `application.bot_data["background_tasks"]`,
+  убирает уведомление об обновлении — устаревшее (`forget_update_notice`,
+  код сменился другим путём) и отвисевшее свой срок (`drop_expired_notice`),
+  шлёт админам «Бот запущен» и открывает каждому его панель `/adm`.
 - `post_stop` — сообщение об остановке, пока бот ещё «живой».
 - `post_shutdown` — закрытие базы. Порядок важен: закрытие идёт ПОСЛЕ
   остановки фоновых задач.
 - `_error_handler` — единый обработчик ошибок (`application.add_error_handler`).
 - `_ALLOWED_UPDATES` — все типы обновлений, кроме реакций. Список строится
   вычитанием из `Update.ALL_TYPES`, а не перечислением.
-- До сборки приложения: `_write_pid`, `_kill_existing_instance`,
-  `_seed_db_if_missing`, `_restart_self`.
+- До сборки приложения, по порядку: `_kill_existing_instance`, `_write_pid`
+  (оба — только вне управляемой среды: при `IS_DOCKER` `main()` их не зовёт), `_seed_db_if_missing`
+  (ОБЯЗАТЕЛЬНО до `init_db`), `init_db`, загрузка кэшей персональных
+  настроек и прав. `_restart_self` зовётся ПОСЛЕ остановки `run_polling`,
+  когда остановка была перезапуском.
 
 ## Фоновые задачи — запускаются в `main.post_init`
 
-Все семь создаются как `asyncio.create_task(...)`; их имена приходят из
+Все восемь создаются как `asyncio.create_task(...)`; их имена приходят из
 `jobs/__init__.py` (re-export). Задача, не вписанная туда, роняет старт.
 
 | задача | файл |
@@ -40,6 +44,7 @@
 | `news_polling_loop` | `jobs/news.py` |
 | `cleanup_loop` | `jobs/cleanup.py` |
 | `rag_catchup_loop` | `jobs/rag.py` |
+| `balance_sync_loop` | `jobs/balance.py` (сверка остатка на счету с платформой, 14.09.2026) |
 | `daily_report_loop` | `jobs/reports.py` |
 | `watchdog_loop` | `jobs/watchdog.py` |
 | `auto_update_loop` | `jobs/update.py` |
@@ -54,9 +59,9 @@
 ## Регистрация обработчиков — только `handlers/__init__.py::setup_handlers`
 
 Второго места регистрации в проекте нет. `preflight.py::check_handlers`
-считает зарегистрированные обработчики и группы (на 2026-09-15 — **41 в 5
-группах**: пара заслона чужих групп в группе −3; до того 39 в 4 держалось
-с 16.08.2026).
+считает зарегистрированные обработчики и группы (на 2026-09-29 — **47 в 5
+группах**: 21.09.2026 прибавились шесть команд заданий разборщику вложений;
+15.09.2026 — пара заслона чужих групп в группе −3, 39 → 41).
 
 **Группа −3 — заслон чужих групп** (15.09.2026, `services/group_guard.py`).
 Самая первая: обновление из группы, которой нет в `known_chats`, дальше не
@@ -80,14 +85,16 @@
   `news_prompt_reset`, `rag_prompt_set`, `rag_prompt_reset`,
   `proactive_prompt_set`, `proactive_prompt_reset`,
   `author_prompt_set`, `author_prompt_reset`,
+  `voice_prompt_set`, `voice_prompt_reset`, `photo_prompt_set`,
+  `photo_prompt_reset`, `video_prompt_set`, `video_prompt_reset`,
   `adm`, `stats`, `mod`, `rag`, `unmute`, `users`,
   `quizadm`, `imagine` (`block=False`), `rank`, `ttx` (`block=False`)
 - `InlineQueryHandler(inline_ttx, block=False)`
 - `CallbackQueryHandler(handle_callback_query)` — **все** кнопки идут сюда
 - `PollAnswerHandler(handle_poll_answer)`
 - `MessageHandler`: документы в личке (`handle_kb_document`), `PHOTO`,
-  `VOICE|AUDIO`, `VIDEO`, `TEXT & ~COMMAND` (`handle_message`),
-  `COMMAND` (`handle_unknown_command`)
+  `VOICE|AUDIO`, `VIDEO`, `TEXT & ~COMMAND` (`handle_message`; четыре
+  последних — `block=False`), `COMMAND` (`handle_unknown_command`)
 - `ChatMemberHandler(on_chat_member, CHAT_MEMBER)`
 
 **Группа 1** — `collect_group_message`: архив сообщений группы.
@@ -99,16 +106,17 @@
 **Группа −2** — `_note_chat_activity`: отметка «в чатах кто-то пишет»
 (`filters.ALL`). Внутри — одно присваивание; её читает самообновление.
 
-⚠️ Команда `/quiz` (`handlers/quiz.py::cmd_quiz`) в проекте объявлена, но
-в `setup_handlers` НЕ зарегистрирована.
+Команды `/quiz` нет: `handlers/quiz.py::cmd_quiz` не регистрировалась ни
+разу и удалена 28.08.2026 (решение Максима). Викторину запускает кнопка
+«🎮 Викторина» (`quiz_start`) — подробности в `risks.md`, раздел 3.
 
 ## Кнопки
 
 Единственный роутер — `handlers/admin/router.py::handle_callback_query`.
 `preflight.py::check_callbacks` сверяет кнопки, найденные в коде панелей,
-с ветками роутера (на 2026-09-15 — **229 кнопок, 39 точных
-веток + 16 по приставке**; последними добавились `grp:stay:`/`grp:leave:`
-вопроса о чужой группе и их ветка `grp:`).
+с ветками роутера (на 2026-09-29 — **246 кнопок, 49 точных
+веток + 20 по приставке**; последними, 21.09.2026, добавились экраны
+«👤 Разговор с ботом» и подтверждения сброса трёх заданий разборщику).
 
 Ограничение Telegram: `callback_data` ≤ 64 байта. Права на нажатие
 проверяются через `services/roles.py` (`perm_for_callback`, `may_press`).
@@ -131,7 +139,7 @@
 групп — в `database/groups.py`, дела, персональные настройки и персонал — в
 `database/people.py`, переписка и гигиена панелей — в `database/chat.py`, копилки расхода и
 счётчики обращений — в `database/money.py`, викторина — в
-`database/quiz.py`. Сам `database/history.py` (124 строки) кода больше НЕ
+`database/quiz.py`. Сам `database/history.py` (127 строк) кода больше НЕ
 СОДЕРЖИТ: это оглавление пакета, собирающее имена из двенадцати файлов, и он же отдаёт наружу все имена, включая
 фундаментальные: `from database.history import …` работает как работал.
 
@@ -140,7 +148,7 @@
 во временную папку через `config.DB_PATH`; со снимком они молча писали бы в
 боевую `history.db`.
 
-Схема создаётся в `_schema.py::_create_schema`; на 2026-09-08 — **24 таблицы**
+Схема создаётся в `_schema.py::_create_schema`; на 2026-09-29 — **24 таблицы**
 (список сверен с кодом в этот день, имя в имя):
 
 ```
@@ -162,21 +170,23 @@ user_image_calls, user_settings, user_token_usage
 
 ## Конфигурация
 
-`config.py` (1454 строки, 124 константы) — читают 45 модулей. Значения
-берутся из `.env` (`python-dotenv`). Ключи из `.env.example`:
+`config.py` (1701 строка по счёту `map.py`, 133 константы) — читают 48
+модулей. Значения берутся из `.env` (`python-dotenv`). Ключи из
+`.env.example` (последние три там закомментированы — необязательные):
 
 ```
 TELEGRAM_TOKEN, GEMINI_API_KEY, GEMINI_IMAGEN_API_KEY, QWEN_API_KEY,
 DEEPSEEK_API_KEY, XIAOMI_API_KEY, RAG_ENABLED, RAG_TOP_K,
 RAG_MIN_SIMILARITY, RAG_CHUNK_MODE, RAG_LEX_BOOST, RAG_PEAK_MARGIN,
-RAG_STRONG_SIM, WATCHDOG_URL, WEB_ENABLED, WEB_PUBLIC_URL
+RAG_STRONG_SIM, WATCHDOG_URL, WEB_ENABLED, WEB_PUBLIC_URL,
+WEB_HOST, WEB_PORT, IS_DOCKER
 ```
 
 Заметные константы: `ADMIN_IDS` (список id владельцев, зашит в код),
 `DB_PATH = "history.db"`, `BACKUP_DIR = "backups"`,
 `RAG_INDEX_FILE = "knowledge/knowledge_base_vectors.json"`,
 `KNOWLEDGE_PENDING_DIR`, `KNOWLEDGE_APPROVED_DIR`,
-`AVAILABLE_MODELS` (11 моделей — 10.09.2026 две модели DeepSeek заменены одной V4.1 Flash), `PROVIDERS` (5 ключей: gemini, image, qwen, deepseek, xiaomi — «image» это
+`AVAILABLE_MODELS` (12 моделей: 21.09.2026 добавлена Qwen3.8 Flash, 28.09 MiMo V2.5 заменены на V2.6, 29.09 qwen3.8-max — на qwen3.8-max-0902), `PROVIDERS` (5 ключей: gemini, image, qwen, deepseek, xiaomi — «image» это
 не провайдер моделей, а картинки; `preflight` считает четвёрку по
 `AVAILABLE_MODELS`), `AVAILABLE_IMAGE_MODELS` (2), `QUIZ_RANKS` (20 званий),
 `AUTO_UPDATE_INTERVAL_SEC = 300`, `AUTO_UPDATE_QUIET_SEC = 60`,
@@ -189,9 +199,19 @@ RAG_STRONG_SIM, WATCHDOG_URL, WEB_ENABLED, WEB_PUBLIC_URL
 `preflight.py::check_models` сверяет `AVAILABLE_MODELS` с раскладкой кнопок
 в `handlers/admin/panel_main.py` — это место расходится чаще прочих.
 
+⚠️ **СМЕНА ИМЕНИ МОДЕЛИ ЗАДЕВАЕТ БОЕВУЮ БАЗУ, А НЕ ТОЛЬКО КОД.** В settings
+имя модели — часть ключа: `active_model` (выбрана удалённая модель —
+`get_setting` сам сбросит её на заводскую), `qwen_tokens_<модель>` и
+`qwen_quota_until_<модель>` (остаток и срок бесплатной квоты Qwen). Ключи
+старого имени остаются в базе: панель «💰 Счета и квоты» показывает их и даёт
+убрать прочерком (`panel_balance`, поле `qwen:` принимает и удалённую модель),
+но к новому имени квота сама НЕ переедет — её вписывают заново по консоли.
+Расход старого имени до месячного сброса уходит в отчётах в «прочие». Ни
+`preflight`, ни `selftest` этого не видят: они работают на пустой базе.
+
 ## Веб-админка (сайт) — с 30.08.2026
 
-Сайт живёт **внутри процесса бота**: седьмая фоновая задача `jobs/web.py`
+Сайт живёт **внутри процесса бота**: восьмая фоновая задача `jobs/web.py`
 поднимает aiohttp на `127.0.0.1:8080`, страницы лежат в пакете `web/`.
 Так сделано не для удобства: права и персональные настройки лежат в ПАМЯТИ
 процесса, и отдельная программа, пишущая в ту же базу, их правок не увидела
@@ -201,8 +221,8 @@ RAG_STRONG_SIM, WATCHDOG_URL, WEB_ENABLED, WEB_PUBLIC_URL
 |---|---|
 | `jobs/web.py` | фоновая задача: поднять и погасить сервер |
 | `web/routes.py` | `ROUTES` — единственный список адресов; `build_app()` |
-| `web/auth.py` | подпись Telegram (две схемы), кука входа, одноразовая ссылка |
-| `web/pages.py` | сборка HTML: сводка, органы управления, промпты, люди, база знаний, викторина, вход, отказ |
+| `web/auth.py` | подпись мини-приложения Telegram, кука входа, одноразовая ссылка (кнопки «Войти через Telegram» нет — функция под неё удалена 29.09.2026, так и не будучи подключённой) |
+| `web/pages.py` | сборка HTML: сводка, органы управления, промпты, люди, база знаний, викторина, журналы, обслуживание, вход, отказ |
 | `web/longjobs.py` | долгие работы фоном под общей с ботом защёлкой |
 | `web/actions.py` | что происходит при правке с сайта: лог, журнал персонала, побочные действия |
 | `web/static/style.css` | оформление; ничего со стороны не грузится |
@@ -250,14 +270,21 @@ RAG_STRONG_SIM, WATCHDOG_URL, WEB_ENABLED, WEB_PUBLIC_URL
 - Каждый орган управления на странице — ФОРМА. Страница полностью работает
   без JavaScript; сценарий только обновляет один орган на месте вместо
   перезагрузки. Формы подписаны (`auth.csrf_for`), чужая форма не принимается.
-- **Промпты (этап 2, `/prompts`).** Пять текстов плюс дополнения к основному,
-  список — `services/prompts_spec.py`. Сценария на этой странице НЕТ вовсе:
+- **Промпты (этап 2, `/prompts`).** Восемь текстов плюс дополнения к
+  основному (с 21.09.2026 к пяти промптам «личности» прибавились три задания
+  разборщику вложений), список — `services/prompts_spec.py`. Сценария на этой странице НЕТ вовсе:
   правка редкая и крупная, обычная форма надёжнее.
   ⚠️ Поле показывает ХРАНИМЫЙ текст, а не то, что отдаёт читалка бота: часть
   читалок подставляет запасное значение из `config`, и правя показанное ими,
   мы записали бы в базу копию запасного текста.
-  ⚠️ Заводских текстов у промптов нет — пустое поле поверх непустого сначала
-  спрашивает подтверждение, как кнопка сброса в боте.
+  ⚠️ Пустое поле поверх непустого сначала спрашивает подтверждение, как
+  кнопка сброса в боте. У пяти промптов «личности» заводского текста нет —
+  пустое значит «работать без этого куска»; у трёх заданий разборщику он
+  ЕСТЬ (`config.MEDIA_PROMPT_*`), и пустое поле возвращает заводское задание:
+  читалка `database/settings.get_media_prompt_*` подставляет его сама.
+  Страница и строка лога различают эти случаи одним правилом —
+  `prompts_spec.has_factory` (29.09.2026; до того про все промпты писалось
+  «бот работает без этого куска» и «СТЁРТ»).
 - **Люди (этап 3, `/users` и `/users/<id>`).** Карточка читает те же функции,
   что карточка в боте, и пишет в журнал персонала ТЕМИ ЖЕ кодами действий:
   журнал не должен зависеть от того, откуда нажали.
@@ -298,10 +325,12 @@ RAG_STRONG_SIM, WATCHDOG_URL, WEB_ENABLED, WEB_PUBLIC_URL
 ## Выкатка
 
 - `deploy.sh` (на сервере): `git fetch` → `git merge --ff-only origin/main`
-  → `compileall -q -f` → `preflight.py`. Любая осечка → `git reset --hard`
-  на прежний коммит. Отдельно проверяет, менялся ли `requirements.txt`.
-- `.github/workflows/preflight.yml`: те же две проверки на каждый
-  pull request и на push в `main`, Python 3.12 (как на сервере).
+  → `pip install`, если менялся `requirements.txt` → `compileall -q -f` →
+  `preflight.py` → `selftest.py`. Любая осечка → `git reset --hard` на
+  прежний коммит.
+- `.github/workflows/preflight.yml`: те же три шага (`compileall`,
+  `preflight.py`, `selftest.py`) на каждый pull request и на push в `main`,
+  Python 3.12 (как на сервере).
 - `jobs/update.py::auto_update_loop`: раз в 5 минут спрашивает GitHub про
   новый код и забирает его — но только если в чатах тихо ≥60 секунд.
   **Следствие: код, попавший в `main`, оказывается на боевом сервере сам,

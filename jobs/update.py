@@ -31,7 +31,8 @@ _STARTED_AT = time.time()
 # Уведомление «⬇️ Обновился сам…» живёт по особым правилам: оно переживает
 # перезапуск бота, поэтому его координаты лежат в settings, а не в памяти,
 # и убирает его не гигиена панелей, а этот файл. Подробности — в докстрингах
-# ниже и в карте проекта (`references/dependencies-runtime.md`).
+# ниже и в карте проекта: `references/wiring.md` (фоновые задачи) и
+# `references/checks.md` (проверка `check_update_notice`).
 
 
 def _load_notice() -> tuple[str, list, float]:

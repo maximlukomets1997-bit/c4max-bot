@@ -6,13 +6,18 @@
 #  бота. Токен знают только Telegram и наш сервер — значит, подделать подпись
 #  снаружи нельзя, а нам не приходится ничего хранить.
 #
-#  ДВА входа, и подписи у них считаются ПО-РАЗНОМУ (это не небрежность
-#  Telegram, а два разных механизма):
-#    • кнопка «Открыть админку» в самом боте (Mini App) — ключ подписи
-#      HMAC(токен, ключ="WebAppData"), вход происходит молча;
-#    • браузер, кнопка «Войти через Telegram» (Login Widget) — ключ подписи
-#      SHA256(токен).
-#  Перепутаешь ключи — обе проверки просто всегда будут говорить «подделка».
+#  ДВА входа, и подписывают их РАЗНЫЕ стороны:
+#    • кнопка «Открыть админку» в самом боте (Mini App) — подписывает
+#      Telegram, ключ подписи HMAC(токен, ключ="WebAppData"), вход происходит
+#      молча (check_webapp);
+#    • браузер — одноразовая ссылка, которую бот шлёт в личку по кнопке
+#      «🔗 Ссылка в браузер»: подписывает сам бот своим ключом из токена,
+#      живёт LOGIN_LINK_TTL_SEC (make_login_url / read_login_token).
+#  ⚠️ Третьего входа — кнопки «Войти через Telegram» (Login Widget, ключ
+#  SHA256(токен)) — НЕТ. Функцию под него написали при заведении сайта, но ни
+#  к одному адресу так и не подключили; 29.09.2026 она удалена (решение
+#  Максима). Заводить виджет заново — отдельная работа: он требует привязки
+#  домена у BotFather и своей проверки подписи.
 #
 #  ⚠️ Проверка подписи отвечает только на вопрос «данные правда от Telegram».
 #  На вопрос «а этому человеку сюда можно» отвечает список ADMIN_IDS, и это
@@ -89,9 +94,9 @@ def _fresh(pairs: dict) -> bool:
 
 
 def _user_id(pairs: dict) -> int | None:
-    """id человека из подписанных данных. У двух входов он лежит в разных
-    местах: в Mini App — внутри поля user (JSON), в Login Widget — прямо
-    полем id."""
+    """id человека из подписанных данных Mini App — внутри поля user (JSON).
+    Разбор прямого поля id остался от входа виджетом (удалён 29.09.2026);
+    вреда от него нет — сюда доходят только данные с уже сверенной подписью."""
     raw = pairs.get("id")
     if raw is None and pairs.get("user"):
         import json
@@ -115,19 +120,6 @@ def check_webapp(init_data: str) -> int | None:
         return None
     pairs = dict(parse_qsl(init_data, keep_blank_values=True))
     secret = hmac.new(b"WebAppData", _token_bytes(), hashlib.sha256).digest()
-    if not _verify(pairs, secret) or not _fresh(pairs):
-        return None
-    return _user_id(pairs)
-
-
-def check_widget(pairs: dict) -> int | None:
-    """
-    Вход из браузера (кнопка «Войти через Telegram»). На вход — поля из
-    адресной строки. Возвращает id человека или None.
-    """
-    if not pairs or not TELEGRAM_TOKEN:
-        return None
-    secret = hashlib.sha256(_token_bytes()).digest()
     if not _verify(pairs, secret) or not _fresh(pairs):
         return None
     return _user_id(pairs)
