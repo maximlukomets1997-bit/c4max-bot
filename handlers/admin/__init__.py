@@ -7,12 +7,14 @@
 #    common.py        — общие помощники (гейт админа, отправка панелей, логи)
 #    router.py        — handle_callback_query: ЕДИНСТВЕННЫЙ роутер всех кнопок
 #    panel_main.py    — главная панель /adm, статистика /stats, модели/API
-#    panel_prompts.py — панель промптов + /prompt_*, /news_prompt_*, /rag_prompt_*
+#    panel_prompts.py — панель промптов + /prompt_*, /news_prompt_*, /rag_prompt_* и др.
 #    panel_mod.py     — модерация: /mod, улики, размут
 #    panel_rag.py     — база знаний: /rag, приём файлов, «Проверить поиск»
 #    panel_quiz.py    — викторина: /quizadm, сборка вопросов по статьям базы
 #    panel_users.py   — «👥 Пользователи»: список и карточка участника
 #    panel_updates.py — «⬇️ Обновления»: история правок со ссылками на GitHub
+#    panel_balance.py — «💰 Счета и квоты»: остатки, квоты, «потрачено»
+#    panel_digest.py  — 📊 недельный дайджест группы: показ и кнопки
 #
 #  Этот файл — «оглавление»: собирает имена, которыми пользуется остальной
 #  код (handlers/__init__.py, main.py, handlers/messages.py), поэтому снаружи

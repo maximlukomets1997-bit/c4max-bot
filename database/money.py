@@ -251,7 +251,7 @@ def register_api_call(model_name: str):
         conn = _get_connection()
         conn.execute("INSERT INTO api_calls (model_name) VALUES (?)", (model_name,))
         conn.commit()
-    # Лог убран: дублировал строку «✅ Ответила …» (модель видна там). Запись в БД остаётся.
+    # Лог убран: дублировал строку «Ответ от …» (модель видна там). Запись в БД остаётся.
 
 
 def clear_api_calls() -> int:
@@ -271,7 +271,8 @@ def clear_user_token_usage() -> int:
     запросов всех пользователей (jobs/cleanup.py::_monthly_stats_reset).
     ВАЖНО: именно UPDATE до нулей, а НЕ DELETE — init_db при полностью пустой
     таблице заново заполнил бы её старыми числами из устаревшей user_context
-    (одноразовый перенос в init_db выше). Возвращает число затронутых строк."""
+    (одноразовый перенос в database/_schema.py::_seed_once). Возвращает число
+    затронутых строк."""
     with _lock:
         conn = _get_connection()
         cur = conn.execute(

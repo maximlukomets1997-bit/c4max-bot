@@ -12,14 +12,14 @@
 #  Рисует оба отчёта ОДНА функция `render` — чтобы они не разъехались по виду.
 #
 #  Кто зовёт:
-#    • jobs.py::daily_report_loop  — в 00:00 по Киеву: midnight_report() → в личку владельцу,
+#    • jobs/reports.py::daily_report_loop  — в 00:00 по Киеву: midnight_report() → в личку владельцу,
 #      и там же, если неделя закрылась (week_closed), weekly_report() вторым сообщением;
 #    • handlers/admin/panel_main.py — кнопки «📊 Отчёт за вчера» (last_report_text)
 #      и «📅 Отчёт за неделю» (last_weekly_text) в панели «📡 Настройки API».
 #
 #  ⚠️ Вызовы за период считаются ПО ВРЕМЕНИ из таблицы api_calls, а расходы —
 #  разницей снимков. Раз в месяц бот сам обнуляет api_calls и копилки Qwen и
-#  картинок (jobs.py::_monthly_stats_reset) — чтобы отчёт за 1-е число не
+#  картинок (jobs/cleanup.py::_monthly_stats_reset) — чтобы отчёт за 1-е число не
 #  занизил цифры, сброс перед обнулением откладывает уничтожаемую часть
 #  в «перенос» (note_monthly_reset ниже), а отчёт её прибавляет.
 # ───────────────────────────────────────────────
@@ -54,7 +54,7 @@ _WEEK_KEY = "weekly_report_acc"
 _WEEK_LAST_TEXT_KEY = "weekly_report_last_text"
 
 # Месяцы в родительном падеже — для подписи «24 июля 2026»
-# (_MONTHS_RU в jobs.py стоит в именительном: «июль» — там он для итогов месяца).
+# (_MONTHS_RU в jobs/cleanup.py стоит в именительном: «июль» — там он для итогов месяца).
 _MONTHS_GEN = ("января", "февраля", "марта", "апреля", "мая", "июня",
                "июля", "августа", "сентября", "октября", "ноября", "декабря")
 
@@ -65,7 +65,7 @@ _MONTHS_GEN = ("января", "февраля", "марта", "апреля", "
 
 def _kyiv_tz():
     """Часовой пояс Киева. Без tzdata — запасное летнее смещение UTC+3
-    (та же страховка, что в jobs.py и database/history.py)."""
+    (та же страховка, что в jobs/cleanup.py и database/stats.py)."""
     try:
         from zoneinfo import ZoneInfo
         return ZoneInfo("Europe/Kyiv")
@@ -225,7 +225,7 @@ def _carry_clear() -> None:
 
 
 def note_monthly_reset() -> None:
-    """Зовётся из jobs.py::_monthly_stats_reset ПЕРЕД обнулением счётчиков.
+    """Зовётся из jobs/cleanup.py::_monthly_stats_reset ПЕРЕД обнулением счётчиков.
 
     Месячный сброс стирает таблицу вызовов и копилки Qwen и картинок. Часть
     этих цифр относится к ТЕКУЩИМ суткам, за которые отчёт ещё не отправлен, —
@@ -249,8 +249,8 @@ def note_monthly_reset() -> None:
         # ЦЕЛИКОМ: расход периода = (значение на момент сброса − снимок) + то,
         # что накапает после сброса. См. формулу в шапке файла.
         # Переносим ТОЛЬКО те копилки, которые месячный сброс обнуляет
-        # (признак monthly_reset в реестре). Вечные счётчики — DeepSeek,
-        # Xiaomi, OpenRouter — он не трогает, и переносить их нечего.
+        # (признак monthly_reset в реестре). Вечные счётчики — DeepSeek и
+        # Xiaomi — он не трогает, и переносить их нечего.
         for pid, meta in PROVIDERS.items():
             if meta["cost_key"] and meta["monthly_reset"]:
                 key = f"{pid}_cost"
@@ -286,7 +286,7 @@ def _spent(current: float, base: float, carried: float = 0.0) -> tuple[float, bo
 
 def _calls_by_group(calls: dict) -> dict:
     """Раскладывает вызовы по блокам панели: gemini / image / qwen / deepseek /
-    xiaomi / openrouter и «прочие» (модель удалена из конфига, а вызовы за
+    xiaomi и «прочие» (модель удалена из конфига, а вызовы за
     период были). Порядок внутри блока — по числу вызовов, как в панели.
     Блоки берутся из реестра config.PROVIDERS (2026-08-03) — нового провайдера
     вписывать сюда не нужно, он приедет вместе с реестром. Раньше блоки были

@@ -189,7 +189,7 @@ def page_denied() -> str:
 #
 #  Все они — формы к POST /set. Поля:
 #    csrf  — подпись сессии (без неё правка не принимается);
-#    what  — «setting» | «model» | «image» | «think»;
+#    what  — «setting» | «model» | «image» | «theme» | «think»;
 #    key   — ключ настройки, модели или провайдера;
 #    value — значение; у тумблера его нет вовсе (это «переключи»).
 
@@ -429,7 +429,8 @@ def _tiles() -> str:
     img_title = AVAILABLE_IMAGE_MODELS.get(img, {}).get("name", img or "—")
 
     # Расход с последнего снимка (обычно с полуночи). Считается на лету и
-    # снимок НЕ трогает — та же функция, что у кнопки в панели статистики.
+    # снимок НЕ трогает — тот же счёт, что у кнопки «📊 Отчёт за вчера»
+    # в панели «📡 Настройки API».
     calls_today, money_today, _ = daily_report._open_day_totals()
 
     return (
@@ -1235,7 +1236,7 @@ def page_quiz(application, csrf: str = "", mode: str = "draft",
     cards = []
     for q in questions:
         options = q.get("options") or []
-        # ⚠️ Ключ именно correct_idx (database/history.py::_row_to_question).
+        # ⚠️ Ключ именно correct_idx (database/quiz.py::_row_to_question).
         # С «correct» подсветка молча не работала бы — вопросы одобрялись бы
         # вслепую, не видя, какой ответ считается верным.
         opts = "".join(
@@ -1505,7 +1506,7 @@ def _user_moderation_block(csrf: str, target_id: int) -> str:
 
 
 def _user_danger_block(csrf: str, target_id: int, confirm: str) -> str:
-    """Три действия, которые стирают данные, — каждое со своим вопросом."""
+    """Четыре действия, которые стирают данные, — каждое со своим вопросом."""
     jobs = [
         ("viol", "Обнулить нарушения",
          "счётчики мутов и удалённых ссылок обнулятся, взыскание снимется "

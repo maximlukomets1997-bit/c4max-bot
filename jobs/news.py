@@ -167,7 +167,7 @@ async def news_polling_loop(application):
                 # Загружаем полный текст статьи + карточки ТТХ
                 article = await loop.run_in_executor(None, fetch_article, url)
                 # Если активная модель сбоит, цепочка фолбэка внутри
-                # services/gemini.py сама уведомит админов (не чаще раза в час).
+                # services/gemini.py сама уведомит админов (на каждый сбойный запрос).
                 formatted_news = await loop.run_in_executor(
                     None, format_news_as_colonel,
                     item["title"], item["description"], item["tag"], article["text"]

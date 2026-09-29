@@ -76,9 +76,10 @@ def setup_handlers(application):
     application.add_handler(InlineQueryHandler(inline_ttx, block=False))
     application.add_handler(CallbackQueryHandler(handle_callback_query))
     application.add_handler(PollAnswerHandler(handle_poll_answer))
-    # Документы в личке: используется ТОЛЬКО заменой статей базы знаний
-    # (кнопка «Заменить» в панели /rag); во всех остальных случаях документ
-    # молча игнорируется — как и раньше, когда обработчика документов не было.
+    # Документы в личке: используются ТОЛЬКО панелью /rag — замена статьи
+    # (кнопка «Заменить») и новая статья (кнопка «➕ Добавить RAG»); во всех
+    # остальных случаях документ молча игнорируется — как и раньше, когда
+    # обработчика документов не было.
     application.add_handler(MessageHandler(filters.Document.ALL & filters.ChatType.PRIVATE, handle_kb_document))
     # block=False у трёх обработчиков ниже: ответ нейросети занимает от секунд
     # до минут (цепочка фолбэка) — пока один пользователь ждёт ответ, остальные

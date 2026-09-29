@@ -161,7 +161,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Единая отправка: форматирование + безопасная нарезка длинных ответов.
         # Текст ответа в лог не пишем: модель, время и токены уже логирует
-        # services/gemini.py строкой «♊️/🐪/🐋 Ответ от …» (значок провайдера).
+        # services/gemini.py строкой «♊️/🐪/🐋/🍚 Ответ от …» (значок провайдера).
         await send_formatted(context.bot, chat_id, answer, reply_to=message.message_id)
 
         # Свой ответ — в архив групп (стенограмма проактивного режима)
@@ -227,8 +227,8 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_formatted(context.bot, chat_id, answer, reply_to=message.message_id)
 
         # Свой ответ — в архив групп (стенограмма проактивного режима).
-        # Само голосовое в архив не попадает (фильтр TEXT|PHOTO), но текстовый
-        # ответ бота — видимая часть беседы, его сохраняем.
+        # Само голосовое архивирует collect_group_message, а текстовый ответ
+        # бота апдейтом не приходит — его сохраняем здесь.
         if is_group:
             await _archive_bot_group_reply(context.bot, chat_id, answer)
 

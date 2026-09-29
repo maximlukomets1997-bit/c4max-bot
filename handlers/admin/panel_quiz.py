@@ -338,6 +338,7 @@ async def _handle_quiz_callback(query, context, data: str, chat_id: int, user_id
     (запрет по умолчанию — см. services/roles.py).
 
       quiz:panel              — главный экран панели
+      quiz:auto               — тумблер «🕛 Вопрос дня»
       quiz:gen                — собрать вопросы по новым статьям (фоном)
       quiz:retry              — повторить РОВНО те статьи, что не дались
       quiz:fails              — список неудачных статей с причинами
@@ -349,6 +350,7 @@ async def _handle_quiz_callback(query, context, data: str, chat_id: int, user_id
       quiz:del:<режим>:<id>   — удалить вопрос совсем
       quiz:wipe / quiz:wipe_yes — очистить ВСЕ черновики (с подтверждением)
       quiz:seed               — загрузить вопросы из файла репозитория В ЧЕРНОВИКИ
+      quiz:reseed             — догнать банк до эталонного файла
       quiz:nuke / quiz:nuke_yes — стереть ВЕСЬ банк, включая игровые
       quiz:zero / quiz:zero_yes — обнулить статистику викторины У ВСЕХ ИГРОКОВ
       quiz:noop               — заглушка счётчика листания

@@ -23,7 +23,7 @@
 #    web/pages.py, web/actions.py — страница /journal и её очистка
 #    jobs/cleanup.py              — суточная чистка старых записей
 #
-#  ⚠️ ТРИ ФУНКЦИИ СОБРАНЫ СЮДА ИЗ РАЗНЫХ КОНЦОВ history.py: шесть основных
+#  ⚠️ ФУНКЦИИ СОБРАНЫ СЮДА ИЗ ТРЁХ РАЗНЫХ МЕСТ history.py: шесть основных
 #  лежали вместе, а обе чистки — за пятьсот и за восемьсот строк от них,
 #  среди чужих журналов. Код не менялся ни на символ.
 #
@@ -51,7 +51,8 @@ logger = logging.getLogger(__name__)
 def log_moderation_action(action: str, chat_id: int, user_id: int, name: str | None = None,
                           admin_name: str | None = None) -> int:
     """
-    Записывает действие модерации ('mute'/'unmute'/'linkdel') в журнал. Возвращает id строки.
+    Записывает действие модерации ('mute'/'mute_adm'/'mute_ai'/'unmute'/'linkdel'/'kick'/'ban')
+    в журнал. Возвращает id строки.
     admin_name — кто выполнил (передаётся при размуте кнопкой или /unmute; у автоматики None).
     """
     import time as _time

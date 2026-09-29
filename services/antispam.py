@@ -207,7 +207,7 @@ def _burst_records(user_id: int, chat_id: int) -> list[dict]:
         return []
     out = []
     for rec in dq:
-        # rec = (monotonic_ts, chat_id, message_id, text, has_photo)
+        # rec = (monotonic_ts, chat_id, message_id, text, has_photo, media_group_id)
         if rec[1] == chat_id:
             out.append({"message_id": rec[2], "text": rec[3], "has_photo": rec[4]})
     return out
