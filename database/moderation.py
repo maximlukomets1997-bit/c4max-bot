@@ -3,7 +3,7 @@
 #
 #  Шаг 4 разреза history.py. Две таблицы:
 #    moderation_log — кого, за что и когда наказали (мут, размут, кик, бан,
-#                     удалённая ссылка); показывает панель /mod и сайт
+#                     разбан, удалённая ссылка); показывает панель /mod и сайт
 #    mute_evidence  — ТЕКСТЫ удалённых при муте сообщений, привязанные к
 #                     записи журнала
 #
@@ -51,9 +51,9 @@ logger = logging.getLogger(__name__)
 def log_moderation_action(action: str, chat_id: int, user_id: int, name: str | None = None,
                           admin_name: str | None = None) -> int:
     """
-    Записывает действие модерации ('mute'/'mute_adm'/'mute_ai'/'unmute'/'linkdel'/'kick'/'ban')
-    в журнал. Возвращает id строки.
-    admin_name — кто выполнил (передаётся при размуте кнопкой или /unmute; у автоматики None).
+    Записывает действие модерации ('mute'/'mute_adm'/'mute_ai'/'unmute'/'linkdel'/'kick'/'ban'/
+    'unban') в журнал. Возвращает id строки.
+    admin_name — кто выполнил (ручные меры и мут от бота; у антифлуда и фильтра ссылок None).
     """
     import time as _time
     with _lock:

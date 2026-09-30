@@ -44,8 +44,8 @@ async def web_loop(application):
         return
 
     # application нужен сайту для действий через бота — объявления группам,
-    # меню персонала, меры в группах, отправка дайджеста — и для защёлок
-    # долгих работ в bot_data (web/actions.py, web/longjobs.py).
+    # меню персонала, меры в группах, отправка дайджеста, перезапуск — и для
+    # защёлок долгих работ в bot_data (web/actions.py, web/longjobs.py).
     runner = aioweb.AppRunner(build_app(application), access_log=None)
     try:
         await runner.setup()

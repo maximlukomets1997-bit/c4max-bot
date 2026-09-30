@@ -83,7 +83,7 @@ async def send_digest_panel(bot, chat_id: int, user_id: int, target_chat: int | 
     chat = next((c for c in chats if c["chat_id"] == target_chat), chats[0])
     title = chat.get("title") or str(chat["chat_id"])
 
-    # ⚠️ save_quiz=False: кнопка «показать сейчас» НЕ сдвигает точку отсчёта
+    # ⚠️ save_quiz=False: кнопка «📊 Дайджест недели» НЕ сдвигает точку отсчёта
     # викторины — иначе нажавший её человек обнулил бы себе цифры ближайшего
     # понедельничного дайджеста. Снимок обновляет только настоящая отправка.
     text = group_digest.build(chat["chat_id"], title, save_quiz=False,
