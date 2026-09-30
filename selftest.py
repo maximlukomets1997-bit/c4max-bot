@@ -6927,6 +6927,8 @@ def check_proactive_media_route():
         функция возвращает None, чтобы вызывающий ушёл на стенограмму;
       • активная Gemini — native-путь, и первой пробуют ИМЕННО ЕЁ, а не
         первую модель цепочки разбора.
+    И отдельно (30.09.2026) — что разбор вложения ложится в архиве на само
+    сообщение с вложением, а не на вопрос, написанный следом.
     """
     import config as cfg
     from database import history as hist
@@ -7036,6 +7038,39 @@ def check_proactive_media_route():
             if gemini_model not in first:
                 problems.append(f"фото в группе при активной {gemini_model}: первой "
                                 f"спросили «{first}» — цепочка снова идёт мимо активной")
+
+        # ── 4. Разбор ложится на сообщение С ВЛОЖЕНИЕМ (30.09.2026) ──
+        # ⚠️ Пока модель смотрит картинку, человек успевает дописать вопрос
+        # («что это за танк?»), и тот ложится в архив последним. До 30.09
+        # разбор писался в ПОСЛЕДНЮЮ запись человека и затирал вопрос: в
+        # стенограмме оставался один разбор, да ещё под видом слов человека.
+        # Гоняются настоящие запись в архив и сборка стенограммы — по ней
+        # модель и узнаёт, о чём говорят в группе.
+        chat, author = -730, 731            # свои номера: чужую переписку во временной базе не трогаем
+        analysis = "[На изображении танк Leopard 2A7]"
+        question = "что это за танк?"
+        saved_mark = hist.get_setting("proactive_reset_mark", "")
+        saved_rag = g.RAG_ENABLED
+        try:
+            if saved_mark:
+                hist.delete_setting("proactive_reset_mark")
+            g.RAG_ENABLED = False           # поиск по базе знаний ходил бы в сеть
+            hist.save_group_message(chat, author, "vasya", "Вася", "", has_photo=True)
+            hist.save_group_message(chat, author, "vasya", "Вася", question)
+            hist.update_last_group_message_text(chat, author, analysis)
+            _, transcript, _ = saved["_build_proactive_parts"](chat, 2, analysis, author)
+        finally:
+            g.RAG_ENABLED = saved_rag
+            if saved_mark:
+                hist.set_setting("proactive_reset_mark", saved_mark)
+        transcript = transcript or ""
+        done += 2
+        if question not in transcript:
+            problems.append("фото и вопрос следом: разбор фото ЗАТЁР вопрос человека — "
+                            "в стенограмме его нет, модель не знает, о чём спросили")
+        if f"прислал фото: {analysis}" not in transcript:
+            problems.append("фото и вопрос следом: разбор не лёг на строку с фото — "
+                            "модель не видит, что было на картинке")
     finally:
         for name, value in saved.items():
             setattr(g, name, value)
@@ -7045,7 +7080,7 @@ def check_proactive_media_route():
 
     return problems, (f"{done} проверок: зрячая не-Gemini получает файл своим форматом, "
                       f"непонимающая активная не получает запроса вовсе, у Gemini "
-                      f"цепочка начинается с активной")
+                      f"цепочка начинается с активной, разбор ложится на само вложение")
 
 
 def check_media_memory():
