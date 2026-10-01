@@ -299,11 +299,11 @@ def _create_schema(conn):
         -- Модераторы бота и их права (роли — services/roles.py).
         -- ВЛАДЕЛЬЦЕВ здесь НЕТ: они заданы в config.ADMIN_IDS и из панели
         -- не меняются. Каждая графа p_* — отдельная галочка права:
-        --   p_mod        мут / размут / кик, журнал и улики модерации
-        --   p_ban        бан и разбан
+        --   p_mod        мут / размут, журнал и улики модерации
+        --   p_ban        бан, разбан и кик
         --   p_cards      смотреть карточки пользователей
         --   p_cards_edit менять персональные настройки в карточках
-        --   p_antispam   общие настройки антиспама (действуют на все группы)
+        --   p_antispam   не читается с 2026-07-20 (право убрано, графа осталась)
         -- Читаются НЕ отсюда, а из кэша в памяти (services/roles.py):
         -- право проверяется на КАЖДОЕ нажатие кнопки.
         CREATE TABLE IF NOT EXISTS staff (
@@ -375,7 +375,7 @@ def _create_schema(conn):
 _COLUMN_MIGRATIONS = (
     # Какой моделью получен ответ.
     "ALTER TABLE messages ADD COLUMN model_name TEXT",
-    # Кто снял мут (кнопка или /unmute); у автоматики остаётся пустым.
+    # Кто выполнил меру: персонал или «бот (сам)»; у антифлуда и ссылок пусто.
     "ALTER TABLE moderation_log ADD COLUMN admin_name TEXT",
     # Накопительный учёт токенов и запросов на пару (chat_id, user_id).
     "ALTER TABLE user_context ADD COLUMN total_tokens INTEGER DEFAULT 0",

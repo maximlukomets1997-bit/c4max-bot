@@ -81,7 +81,7 @@ def setup_handlers(application):
     # остальных случаях документ молча игнорируется — как и раньше, когда
     # обработчика документов не было.
     application.add_handler(MessageHandler(filters.Document.ALL & filters.ChatType.PRIVATE, handle_kb_document))
-    # block=False у трёх обработчиков ниже: ответ нейросети занимает от секунд
+    # block=False у четырёх обработчиков ниже: ответ нейросети занимает от секунд
     # до минут (цепочка фолбэка) — пока один пользователь ждёт ответ, остальные
     # апдейты (другие пользователи, кнопки панелей, антиспам) не должны стоять
     # в очереди. Всё «чувствительное к порядку» (панели, коллектор групп,
@@ -101,7 +101,7 @@ def setup_handlers(application):
     # молча перестанет срабатывать, без единой ошибки в логе.
     application.add_handler(ChatMemberHandler(on_chat_member, ChatMemberHandler.CHAT_MEMBER))
 
-    # Handler group=1: runs independently from group=0, captures ALL group messages for context archiving
+    # Handler group=1: runs independently from group=0, captures group text/photo/voice/audio/video for context archiving
     group_filter = (filters.TEXT | filters.PHOTO | filters.VOICE | filters.AUDIO | filters.VIDEO) & (filters.ChatType.GROUP | filters.ChatType.SUPERGROUP)
     application.add_handler(MessageHandler(group_filter, collect_group_message), group=1)
 

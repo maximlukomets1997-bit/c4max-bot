@@ -2,10 +2,10 @@
 #  services/antispam.py — антифлуд для групп (MVP)
 #
 #  Контракт:
-#  • Единственная точка входа — check_and_mute(bot, chat_id, user, ...),
-#    её зовёт handlers.messages.collect_group_message на КАЖДОЕ
-#    сообщение группы (handler group=1). Функция обязана быть
-#    «тихой»: любое исключение глушится, бот не должен падать из-за
+#  • Точки входа — check_and_mute и check_and_delete_links (фильтр ссылок):
+#    их зовёт handlers.messages.collect_group_message на КАЖДОЕ
+#    сообщение группы (handler group=1). Функции обязаны быть
+#    «тихими»: любое исключение глушится, бот не должен падать из-за
 #    модерации.
 #  • Счётчик частоты живёт В ПАМЯТИ процесса (без БД на каждое
 #    сообщение). При перезапуске бота сбрасывается — это ОК для
@@ -54,11 +54,11 @@ from database.history import (
 
 logger = logging.getLogger(__name__)
 
-# user_id -> deque[(monotonic_ts, chat_id, message_id, text, has_photo)] последних
-# сообщений (в памяти процесса). Глобальный по user_id: для антифлуда важна частота
-# сообщений одного человека. chat_id/message_id хранятся, чтобы при муте можно было
-# удалить весь спам-всплеск; text/has_photo — чтобы сохранить улики (тексты удаляемых
-# сообщений) в журнал модерации перед удалением их из чата.
+# user_id -> deque[(monotonic_ts, chat_id, message_id, text, has_photo, media_group_id)]
+# последних сообщений (в памяти процесса). Глобальный по user_id: для антифлуда важна
+# частота сообщений одного человека. chat_id/message_id — чтобы при муте удалить весь
+# всплеск; text/has_photo — улики для журнала модерации перед удалением из чата;
+# media_group_id — чтобы кадры одного альбома считались одним отправлением.
 _timestamps: dict[int, deque] = defaultdict(deque)
 
 # (chat_id, user_id) -> момент времени, до которого мут уже выдан.
@@ -77,7 +77,7 @@ MOD_STATS_DAYS = 7
 
 
 def get_mute_stats(days: int = MOD_STATS_DAYS) -> dict:
-    """Счётчики мутов/размутов за последние `days` дней (из БД)."""
+    """Счётчики модерации за `days` дней (из БД): муты, размуты, ссылки, кики, баны."""
     try:
         return get_moderation_counts(days)
     except Exception as e:
@@ -252,7 +252,7 @@ async def _is_protected(bot, chat_id: int, user_id: int) -> bool:
     return False
 
 
-# ─── статус «проверенный» (личное дело, бонус к порогу) ─────────────
+# ─── статус «проверенный» (личное дело; бонус к порогу снят 2026-07-20) ───
 
 def trust_info(user_id: int) -> dict:
     """
@@ -718,7 +718,7 @@ async def kick_user(bot, chat_id: int, user_id: int,
 async def ban_user(bot, chat_id: int, user_id: int,
                    name: str | None = None, admin_name: str | None = None,
                    actor_id: int | None = None) -> str:
-    """Бан: выгнать без права вернуться. Снимается кнопкой «Разбанить»."""
+    """Бан: выгнать без права вернуться. Снимается кнопкой «🔙 Разбан»."""
     deny = _manual_guard(bot, user_id, actor_id)
     if deny:
         return deny

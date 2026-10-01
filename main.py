@@ -331,7 +331,7 @@ async def post_init(application):
         asyncio.create_task(daily_report_loop(application)),
         # «Отметки живости» внешнему сторожу (healthchecks.io): по их пропаже
         # владелец узнаёт о выключенном компьютере, пропавшем интернете или
-        # умершем боте. WATCHDOG_URL не задан в .env — задача завершается сразу.
+        # умершем боте. Нет WATCHDOG_URL — цикл всё равно пишет местную метку.
         asyncio.create_task(watchdog_loop(application)),
         # Самообновление: раз в 5 минут смотрит, нет ли на GitHub новой
         # версии, и забирает её в тишине (см. jobs.auto_update_loop).
@@ -399,12 +399,12 @@ async def post_init(application):
 async def post_stop(application):
     """
     Вызывается python-telegram-bot ПОСЛЕ остановки, но ДО закрытия бота
-    (bot ещё «живой», сообщение успеет уйти). Сюда попадаем и при Ctrl+C,
-    и при SIGTERM от кнопки перезапуска.
+    (bot ещё «живой», сообщение успеет уйти). Сюда попадаем и при Ctrl+C или
+    SIGTERM, и при перезапуске кнопкой (Application.stop_running).
 
     Если остановка — это перезапуск кнопкой (флаг shutdown_reason == "restart"),
     молчим: в панели уже показан текст перезапуска, а новый процесс сам сообщит
-    о запуске. Иначе это ручная остановка (Ctrl+C) — честно сообщаем об этом.
+    о запуске. Иначе остановка ручная (Ctrl+C, стоп службы) — сообщаем об этом.
     """
     if application.bot_data.get("shutdown_reason") == "restart":
         return

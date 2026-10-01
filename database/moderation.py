@@ -19,7 +19,7 @@
 #  Кто это читает:
 #    services/antispam.py         — пишет записи при муте, кике, бане, ссылке
 #    handlers/admin/panel_mod.py  — панель /mod, экран улик, размут
-#    handlers/admin/panel_users.py — карточка участника
+#    services/group_digest.py     — счёт наказаний за неделю для дайджеста
 #    web/pages.py, web/actions.py — страница /journal и её очистка
 #    jobs/cleanup.py              — суточная чистка старых записей
 #
@@ -87,7 +87,7 @@ def save_mute_evidence(log_id: int, messages: list) -> None:
 
 
 def get_moderation_counts(days: int = 7) -> dict:
-    """Сколько мутов/размутов было за последние `days` дней (по журналу)."""
+    """Счётчики за `days` дней: муты, размуты (с разбанами), ссылки, кики, баны."""
     import time as _time
     cutoff = _time.time() - days * 86400
     with _lock:

@@ -1228,6 +1228,7 @@ async def _handle_users_callback(query, context, data: str, chat_id: int, admin_
       usr:rights:<id>              — экран «⚙️Настройки Прав Модератора»
       usr:role:<id>:on|off|offgo   — назначить / спросить / снять модератора
       usr:perm:<id>:<код>          — галочка права (на экране прав)
+      usr:slog / usr:slogclear     — журнал персонала и его очистка
       usr:noop                     — средняя кнопка регулятора (значение)
     """
     parts = data.split(":")

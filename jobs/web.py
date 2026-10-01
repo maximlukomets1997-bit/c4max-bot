@@ -26,7 +26,7 @@ async def web_loop(application):
     чтобы аккуратно закрыть сервер в post_shutdown.
 
     WEB_ENABLED=false (по умолчанию, то есть дома) — задача завершается сразу,
-    как watchdog без URL или rag_catchup при выключенном RAG.
+    как rag_catchup при выключенном RAG или самообновление дома.
     """
     from config import WEB_ENABLED, WEB_HOST, WEB_PORT, WEB_PUBLIC_URL
 
