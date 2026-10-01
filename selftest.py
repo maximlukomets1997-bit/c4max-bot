@@ -7201,6 +7201,178 @@ def check_media_memory():
                       f"в памяти бота; при погашенной базе — прежняя заглушка")
 
 
+def check_quiz_thinking():
+    """
+    Сборка вопросов викторины думает В ПОЛНУЮ СИЛУ при любом положении кнопок
+    глубины раздумий, а обычный ответ бота — по кнопке (01.10.2026, решение
+    Максима).
+
+    ⚠️ РАДИ ЧЕГО. «Вопросы собираются на полную» решено 05.08.2026 — и молча
+    сломалось 29.08, когда у провайдеров появились кнопки глубины: рычаг
+    thinking_override=True перебивал только «Выкл», а «Коротко» и «Средне»
+    доходили до сборки. Глубину раздумий до этой группы не проверял никто.
+
+    ⚠️ ГОНЯЕТСЯ НАСТОЯЩИЙ ПУТЬ: настоящая сборка вопросов (перехвачен только её
+    поход к модели — чтобы увидеть, ЧТО она просит), настоящая очередь
+    _gemini_chat_request и настоящие отправлялки всех четырёх провайдеров.
+    Подставные только сеть и потоковый запрос. Сверяется то, что УШЛО БЫ
+    провайдеру, а не переменные внутри.
+
+    ⚠️ ОЖИДАНИЯ ВЫПИСАНЫ ЗДЕСЬ РУКАМИ, а не взяты из gemini._FULL_THINKING:
+    Gemini — «high», Qwen — без потолка, DeepSeek — «high» (НЕ «max»: так решил
+    Максим, у потоковых ответов предел 90 секунд), MiMo — мысли включены.
+    Поменяется решение — поменяется и эта таблица.
+    """
+    import config as cfg
+    from database import history as hist
+    from services import gemini as g
+    from services import knowledge_store, quiz_bank
+
+    problems = []
+    done = 0
+    MSG = [{"role": "user", "content": "статья"}]
+
+    # Полная сила по провайдерам — так, как её увидел бы сам провайдер.
+    FULL = {"gemini": "high", "qwen": "без потолка", "deepseek": "high", "xiaomi": "enabled"}
+
+    def expect(title, got, want):
+        nonlocal done
+        done += 1
+        if got != want:
+            problems.append(f"{title}: ушло {got!r}, а должно {want!r}")
+
+    # ── 1. Новый провайдер без решения о «полной силе» не проскочит ──
+    expect("провайдеры с кнопкой глубины против таблицы этой проверки",
+           sorted(cfg.THINKING_LEVELS), sorted(FULL))
+
+    # ── 2. Сборка вопросов вообще просит «в полную силу» ──
+    asked = []
+    saved_request, saved_read = g._gemini_chat_request, knowledge_store.read_article
+    try:
+        g._gemini_chat_request = lambda messages, **kw: (asked.append(kw), (None, ""))[1]
+        knowledge_store.read_article = lambda folder, fname: (
+            "статья.md", "# Танк\n" + "Текст статьи о технике. " * 20)
+        quiz_bank.generate_for_article({"folder": "approved", "fname": "статья.md"})
+    finally:
+        g._gemini_chat_request, knowledge_store.read_article = saved_request, saved_read
+    expect("сборка вопросов: рычаг глубины в запросе к модели",
+           [kw.get("thinking_override") for kw in asked], [True])
+
+    # ── 3. Что уходит провайдеру: сборка вопросов против обычного ответа ──
+    sent = []
+
+    class _Answer:
+        @staticmethod
+        def raise_for_status(): pass
+
+        @staticmethod
+        def json():
+            return {"choices": [{"message": {"content": "ответ"}}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}
+
+    class _Session:
+        @staticmethod
+        def post(url, json=None, **kw):
+            google = ((json or {}).get("extra_body") or {}).get("google") or {}
+            sent.append(google.get("thinking_config") or {})
+            return _Answer
+
+    def _stream(model_name, messages, api_url, api_key, extra_payload):
+        sent.append(dict(extra_payload))
+        return _Answer.json()
+
+    class Silent:
+        def _skip(self, *a, **kw): pass
+        debug = info = warning = error = exception = _skip
+
+    def model_of(provider):
+        # У Gemini — модель, принимающая нулевой уровень: «Выкл» у неё и есть «minimal».
+        return next((m for m, info in cfg.AVAILABLE_MODELS.items()
+                     if info.get("provider", "gemini") == provider and info.get("thinking")
+                     and info.get("minimal_thinking", True)), None)
+
+    def depth(provider, payload):
+        """Глубина, которую увидел бы провайдер, — одним словом для сверки."""
+        if payload is None:
+            return "запрос не ушёл"
+        if provider == "gemini":
+            return payload.get("thinking_level")
+        if provider == "qwen":
+            if not payload.get("enable_thinking"):
+                return "off"
+            if "thinking_budget" in payload:
+                return f"потолок {payload['thinking_budget']}"
+            return "без потолка"
+        if provider == "deepseek":
+            if (payload.get("thinking") or {}).get("type") != "enabled":
+                return "off"
+            return payload.get("reasoning_effort", "ступень по умолчанию провайдера")
+        return (payload.get("thinking") or {}).get("type")
+
+    def sent_for(provider, model, override):
+        """Глубина ОДНОГО запроса с этой активной моделью."""
+        sent.clear()
+        hist.set_setting("active_model", model)
+        g._gemini_chat_request(MSG, kind="проверка", thinking_override=override)
+        return depth(provider, sent[0] if sent else None)
+
+    # Обычный ответ обязан слушаться кнопки — иначе правка «сборки» задела бы чат.
+    CONTROL = {
+        "gemini": {"off": "minimal", "low": "low"},
+        "qwen": {"off": "off", "low": f"потолок {cfg.QWEN_THINKING_BUDGET['low']}"},
+        "deepseek": {"off": "off", "low": "low"},
+        "xiaomi": {"off": "disabled"},
+    }
+
+    # Кнопки глубины возвращаем как были, включая «не было вовсе». active_model —
+    # как в соседних группах: её читалка сама чинит незнакомое значение.
+    MISSING = object()
+    saved_levels = {k: hist.get_setting(k, MISSING)
+                    for k in (cfg.THINKING_SETTING_PREFIX + p for p in FULL)}
+    saved_active = hist.get_setting("active_model", "")
+    saved = {name: getattr(g, name) for name in
+             ("_http", "_openai_stream_request", "logger", "_notify_models_failed")}
+    saved_hist = {name: getattr(hist, name) for name in
+                  ("register_api_call", "add_provider_cost", "spend_qwen_tokens")}
+    try:
+        g._http = lambda: _Session()
+        g._openai_stream_request = _stream
+        g.logger = Silent()
+        g._notify_models_failed = lambda *a, **kw: None
+        for name in saved_hist:
+            setattr(hist, name, lambda *a, **kw: None)
+
+        for provider, full in FULL.items():
+            model = model_of(provider)
+            if not model:
+                continue
+            setting = cfg.THINKING_SETTING_PREFIX + provider
+            # Сборка вопросов — при КАЖДОМ положении кнопки, включая верхнее.
+            for code, label in cfg.THINKING_LEVELS[provider]:
+                hist.set_setting(setting, code)
+                expect(f"сборка вопросов, {model}, кнопка «{label}»",
+                       sent_for(provider, model, True), full)
+            for code, want in CONTROL[provider].items():
+                hist.set_setting(setting, code)
+                expect(f"обычный ответ, {model}, кнопка «{code}»",
+                       sent_for(provider, model, None), want)
+    finally:
+        for name, value in saved.items():
+            setattr(g, name, value)
+        for name, value in saved_hist.items():
+            setattr(hist, name, value)
+        for key, value in saved_levels.items():
+            if value is MISSING:
+                hist.delete_setting(key)
+            else:
+                hist.set_setting(key, value)
+        hist.set_setting("active_model", saved_active)
+
+    return problems, (f"{done} проверок: сборка вопросов просит полную силу и получает "
+                      f"её у всех провайдеров при любом положении кнопки (DeepSeek — "
+                      f"«Высокая»); обычный ответ слушается кнопки")
+
+
 CHECKS = (
     ("деньги — расчёт стоимости запросов", check_money),
     ("квота Qwen — оборванный ответ, срок и письма", check_qwen_quota),
@@ -7247,6 +7419,7 @@ CHECKS = (
     ("задание разборщику вложений доезжает до модели", check_media_task),
     ("«Сам в разговор»: кому файл, а кому стенограмма", check_proactive_media_route),
     ("разбор вложения остаётся в памяти бота", check_media_memory),
+    ("сборка вопросов думает в полную силу", check_quiz_thinking),
 )
 
 
