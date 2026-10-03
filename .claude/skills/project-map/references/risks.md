@@ -180,7 +180,7 @@ v5.00). Панель викторины и страница сайта пока�
 
 | файл | имена |
 |---|---|
-| `services/rag.py` | `cosine_similarity`, `RagQuotaError`, `get_embedding`, `parse_article_file`, `normalize_query` — используются внутри самого файла |
+| `services/rag.py` | `RagQuotaError`, `get_embedding`, `parse_article_file`, `normalize_query` — используются внутри самого файла |
 | `services/daily_report.py` | `collect_counters`, `period_totals`, `week_add_day` |
 | `services/quiz_bank.py` | `articles_without_questions`, `generate_for_article` |
 | `services/antispam.py` | `get_thresholds_for` |

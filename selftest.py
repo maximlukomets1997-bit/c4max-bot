@@ -3185,13 +3185,19 @@ def check_rag_pick():
     expect_norm("дефис сохраняется", "T-72 броня", "t-72 броня")
     expect_norm("пустая строка", "   ", "")
 
-    # ── Мера близости ──
+    # ── Мера близости — ТА ЖЕ, что в поиске: `_cosine_fast` с длинами от
+    # `_norm` (до 03.10.2026 здесь проверялась отдельная cosine_similarity,
+    # которой поиск не пользовался). Векторы НЕ единичной длины намеренно: на
+    # единичных проверка не заметила бы поиск, забывший поделить на длины.
+    def closeness(v1, v2):
+        return rag._cosine_fast(v1, rag._norm(v1), v2, rag._norm(v2))
+
     done += 1
-    same = rag.cosine_similarity([1.0, 0.0], [1.0, 0.0])
+    same = closeness([3.0, 4.0], [3.0, 4.0])
     if abs(same - 1.0) > 1e-9:
         problems.append(f"одинаковые векторы дали близость {same}, а не 1.0")
     done += 1
-    orth = rag.cosine_similarity([1.0, 0.0], [0.0, 1.0])
+    orth = closeness([3.0, 4.0], [-4.0, 3.0])
     if abs(orth) > 1e-9:
         problems.append(f"перпендикулярные векторы дали близость {orth}, а не 0")
 

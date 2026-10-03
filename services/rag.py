@@ -59,18 +59,6 @@ _KNOWLEDGE_FILES = 0
 _COMMON_STEMS = set()
 
 
-def cosine_similarity(v1: list, v2: list) -> float:
-    """Вычисляет косинусное сходство двух векторов на чистом Python."""
-    if not v1 or not v2 or len(v1) != len(v2):
-        return 0.0
-    dot_product = sum(a * b for a, b in zip(v1, v2))
-    norm_a = math.sqrt(sum(a * a for a in v1))
-    norm_b = math.sqrt(sum(b * b for b in v2))
-    if norm_a == 0.0 or norm_b == 0.0:
-        return 0.0
-    return dot_product / (norm_a * norm_b)
-
-
 def _norm(vector: list) -> float:
     """Длина вектора. Считается ОДИН раз и запоминается — см. _load_into_memory."""
     return math.sqrt(sum(a * a for a in vector))
@@ -81,7 +69,8 @@ def _cosine_fast(v1: list, norm1: float, v2: list, norm2: float) -> float:
     То же косинусное сходство, но длины векторов ПРИХОДЯТ ГОТОВЫМИ
     (2026-07-27, ускорение).
 
-    Раньше поиск звал cosine_similarity, и та на каждую статью пересчитывала
+    Раньше поиск звал общую функцию сходства (удалена 03.10.2026 — ею
+    пользовалась одна проверка), и та на каждую статью пересчитывала
     длину и вектора статьи, и вектора запроса — хотя длина статьи не меняется
     никогда, а длина запроса одна на весь поиск. Выходило втрое больше работы:
     замерено на 80 статьях по 3072 числа — 30.5 мс против 12.5 мс.
