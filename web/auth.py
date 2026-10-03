@@ -26,14 +26,11 @@
 
 import hashlib
 import hmac
-import logging
 import time
 from urllib.parse import parse_qsl
 
 from config import (ADMIN_IDS, TELEGRAM_TOKEN, WEB_AUTH_MAX_AGE_SEC,
                     WEB_COOKIE_NAME, WEB_SESSION_TTL_SEC)
-
-logger = logging.getLogger(__name__)
 
 
 def _token_bytes() -> bytes:

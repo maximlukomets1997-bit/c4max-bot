@@ -22,7 +22,7 @@ import html
 import logging
 import os
 
-from config import (AUTO_UPDATE_ENABLED_DEFAULT, AVAILABLE_IMAGE_MODELS,
+from config import (AVAILABLE_IMAGE_MODELS,
                     AVAILABLE_MODELS, BOT_VERSION, BOT_VERSION_URL,
                     GEMINI_MODEL, PROVIDERS, THINKING_LEVELS, THINKING_PHASES)
 from services import settings_spec as spec

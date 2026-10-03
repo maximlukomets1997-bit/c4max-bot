@@ -23,11 +23,7 @@
 #  выше «для единообразия».
 # ───────────────────────────────────────────────
 
-import logging
-
 from database.history import get_setting, set_setting
-
-logger = logging.getLogger(__name__)
 
 
 # Порядок здесь задаёт порядок карточек на странице сайта.

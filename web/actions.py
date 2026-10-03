@@ -20,7 +20,7 @@
 
 import logging
 
-from database.history import get_setting, set_setting
+from database.history import set_setting
 from services import settings_spec as spec
 
 logger = logging.getLogger(__name__)

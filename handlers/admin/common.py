@@ -10,7 +10,6 @@ import logging_setup
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
-from config import ADMIN_IDS
 from utils import register_and_clean_bot_message, delete_user_message_safe
 
 

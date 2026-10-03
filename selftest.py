@@ -3539,7 +3539,7 @@ def check_daily_report():
                         f"деньги со знаком минус")
 
     # ── Раскладка вызовов по провайдерам ──
-    from config import AVAILABLE_MODELS, AVAILABLE_IMAGE_MODELS, PROVIDERS
+    from config import AVAILABLE_MODELS, AVAILABLE_IMAGE_MODELS
 
     some_gemini = next(m for m, v in AVAILABLE_MODELS.items() if v["provider"] == "gemini")
     some_qwen = next(m for m, v in AVAILABLE_MODELS.items() if v["provider"] == "qwen")
@@ -3580,8 +3580,6 @@ def check_daily_report():
 
     # ── Недельная копилка ──
     # ⚠️ Работает на ВРЕМЕННОЙ базе (main увёл DB_PATH), боевую не трогаем.
-    from database import history as hist
-
     try:
         dr._week_clear()
         dr.week_add_day("2026-08-25 21:00:00", "2026-08-26 21:00:00",
@@ -4260,8 +4258,6 @@ def check_web_pages():
     # ⚠️ Полоса собирается в каждой странице отдельным вызовом. Забудешь её
     # в новой странице — с неё будет некуда уйти, кроме как «назад» браузером,
     # и заметишь это только руками. Поэтому проверяем каждую поимённо.
-    import asyncio as _aio
-
     made = {
         "/":        lambda: pages.page_summary("подпись"),
         "/prompts": lambda: pages.page_prompts("подпись"),
@@ -4761,7 +4757,7 @@ def check_web_wiring():
     """
     import re as _re
 
-    from web import actions, pages, routes
+    from web import actions, pages
 
     problems = []
     done = 0

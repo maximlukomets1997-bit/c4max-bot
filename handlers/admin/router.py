@@ -28,7 +28,7 @@ from .common import (_LOG_FILE_TTL, _TG_FILE_MAX, _adm_back_row, _audit,
                      _read_current_log, _read_file_bytes)
 from .panel_balance import _handle_balance_callback
 from .panel_digest import _handle_digest_callback
-from .panel_main import (_build_api_keyboard, build_adm_keyboard,
+from .panel_main import (_build_api_keyboard,
                          send_adm_panel, send_api_panel,
                          send_daily_report_panel, send_weekly_report_panel,
                          send_stats_panel)

@@ -28,14 +28,10 @@
 #  страховка КОСВЕННАЯ и только на чтение. Проверено нарочной поломкой.
 # ───────────────────────────────────────────────
 
-import logging
-
 from config import MAX_CONTEXT_MESSAGES
 
 from ._core import _lock, _get_connection
 from .settings import get_setting
-
-logger = logging.getLogger(__name__)
 
 # ───────────────────────────────────────────────
 #  Чтение истории

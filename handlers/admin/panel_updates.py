@@ -14,7 +14,6 @@
 # ───────────────────────────────────────────────
 
 import html
-import logging
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -22,8 +21,6 @@ from config import AUTO_UPDATE_ENABLED_DEFAULT, BOT_VERSION_HTML
 from database.history import get_setting
 
 from .common import _adm_back_row, _send_panel_message
-
-logger = logging.getLogger(__name__)
 
 _ICON = "⬇️"
 

@@ -8,7 +8,7 @@ import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
-from database.history import set_setting, get_setting
+from database.history import set_setting
 from utils import register_and_clean_bot_message, delete_user_message_safe
 from utils import mention, schedule_delete
 
