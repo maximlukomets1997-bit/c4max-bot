@@ -8,17 +8,24 @@
 #    register_and_clean_bot_message() — авто-удаление старых сообщений бота
 #    delete_user_message_safe()       — тихое удаление сообщения пользователя
 #    schedule_delete()                — отложенное удаление сообщения
+#    restore_pending_deletes()        — подхват отложенных удалений после перезапуска
+#    cancel_pending_deletes()         — отмена их таймеров при остановке
 #    mention()                        — текстовое обращение к пользователю
 # ───────────────────────────────────────────────
 
 import asyncio
 import logging
+import time
 from contextlib import asynccontextmanager
 from telegram import Update
+from telegram.error import BadRequest, Forbidden
 from database.history import (
     register_bot_message,
     get_old_bot_messages,
     remove_bot_message,
+    add_pending_delete,
+    remove_pending_delete,
+    list_pending_deletes,
 )
 
 logger = logging.getLogger(__name__)
@@ -133,27 +140,140 @@ def mention(user) -> str:
     return getattr(user, "first_name", None) or str(getattr(user, "id", ""))
 
 
-async def _delete_after(bot, chat_id: int, message_id: int, delay: int):
+# ───────────────────────────────────────────────
+#  Самоудаление сообщений бота
+# ───────────────────────────────────────────────
+#
+#  ⚠️ ТАЙМЕР ПЕРЕЖИВАЕТ ПЕРЕЗАПУСК (03.10.2026, вопрос Максима «почему не
+#  удалилось это уведомление»). Раньше отложенное удаление жило только в
+#  памяти процесса: «✅ RAG пересобрана заново!» должно было исчезнуть через
+#  минуту, но через 29 секунд бота перезапустили кнопкой, и таймер умер
+#  вместе со старым процессом. Так было у ВСЕХ самоудалений сразу — итоги,
+#  файлы логов, подсказки, ссылка входа, приветствие новичка в группе, — а
+#  перезапусков с самообновлением бывает по нескольку в день.
+#
+#  Теперь у каждого таймера есть заметка в базе (таблица pending_deletes):
+#    • schedule_delete ставит её вместе с задачей;
+#    • _delete_after снимает её ПОСЛЕ попытки удаления, а не при отмене
+#      задачи: остановка бота отменяет задачи, и заметка обязана это пережить;
+#    • restore_pending_deletes при запуске (main.post_init) подхватывает
+#      оставшиеся: просроченное удаляет сразу, остальное — в свой срок;
+#    • cancel_pending_deletes при остановке (main.post_shutdown) отменяет
+#      задачи, а не бросает их: брошенные asyncio отмечал в журнале строкой
+#      «Task was destroyed but it is pending!».
+#  Сбой записи заметки удаления не отменяет: таймер в памяти работает как
+#  прежде, теряется только страховка на случай перезапуска.
+
+# Telegram не даёт ботам удалять сообщения старше 48 часов: такие заметки
+# после долгого простоя выбрасываются без попытки.
+_PENDING_DELETE_MAX_AGE = 48 * 3600
+
+# Таймеры, ждущие своего часа. Ссылки держим сами: цикл событий хранит задачи
+# слабо, а остановке бота нужен их список, чтобы отменить.
+_DELETE_TASKS: set = set()
+
+
+async def _delete_after(bot, chat_id: int, message_id: int, delay: float):
+    # Отмена (остановка бота) прерывает сон, и заметка остаётся в базе —
+    # удаление доделает следующий запуск. Поэтому отмену здесь не ловим.
+    await asyncio.sleep(delay)
     try:
-        await asyncio.sleep(delay)
         await bot.delete_message(chat_id=chat_id, message_id=message_id)
-    except Exception:
-        # Сообщение уже удалено / нет прав / чат пропал — молча игнорируем.
+    except (BadRequest, Forbidden):
+        # Сообщение уже удалено, старше 48 часов, нет прав, чат пропал —
+        # повторять бессмысленно, заметку снимаем.
         pass
+    except Exception as e:
+        # Сеть, таймаут, флуд-контроль: заметка остаётся, удаление повторит
+        # следующий запуск бота.
+        logger.debug("🧹 Самоудаление сообщения %s в чате %s не прошло (%s) — "
+                     "повторит следующий запуск", message_id, chat_id, e)
+        return
+    _forget_pending_delete(chat_id, message_id)
 
 
-def schedule_delete(bot, chat_id: int, message_id: int, delay: int = 30):
+def _arm_delete(bot, chat_id: int, message_id: int, delay: float) -> bool:
+    """Заводит таймер в памяти. False — нет цикла событий (вне хендлеров, в тестах)."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    task = loop.create_task(_delete_after(bot, chat_id, message_id, delay))
+    _DELETE_TASKS.add(task)
+    task.add_done_callback(_DELETE_TASKS.discard)
+    return True
+
+
+def _forget_pending_delete(chat_id: int, message_id: int) -> None:
+    try:
+        remove_pending_delete(chat_id, message_id)
+    except Exception as e:
+        # Не снялась — следующий запуск попробует удалить ещё раз, получит
+        # «сообщения нет» и снимет её сам.
+        logger.warning("⚠️ Не удалось снять заметку о самоудалении %s в чате %s: %s",
+                       message_id, chat_id, e)
+
+
+def schedule_delete(bot, chat_id: int, message_id: int, delay: float = 30):
     """
     Запланировать удаление сообщения через `delay` секунд (fire-and-forget).
-    Реализовано на asyncio, без JobQueue: задача живёт в памяти процесса,
-    при рестарте бота незавершённые удаления теряются — для коротких
-    служебных сообщений это приемлемо.
+    Таймер живёт в памяти процесса, а на случай перезапуска рядом ложится
+    заметка в базе — см. шапку раздела.
+    """
+    if not _arm_delete(bot, chat_id, message_id, delay):
+        # Нет запущенного цикла событий (вне хендлеров, в тестах) — пропускаем.
+        return
+    # Заметка пишется сразу за таймером, без await между ними: таймер не
+    # может сработать и снять её раньше, чем она записана.
+    try:
+        add_pending_delete(chat_id, message_id, time.time() + delay)
+    except Exception as e:
+        logger.warning("⚠️ Не удалось записать заметку о самоудалении %s в чате %s: %s — "
+                       "перезапуск в этот срок оставит сообщение висеть",
+                       message_id, chat_id, e)
+
+
+def restore_pending_deletes(bot) -> None:
+    """
+    Подхватывает заметки, оставшиеся от прошлого процесса (зовёт main.post_init):
+    просроченное удаляет сразу, остальное — в свой срок. Заметки старше
+    48 часов выбрасывает без попытки — такие сообщения Telegram удалять не даёт.
     """
     try:
-        asyncio.create_task(_delete_after(bot, chat_id, message_id, delay))
-    except RuntimeError:
-        # Нет запущенного event loop (например, вне хендлеров/в тестах) — пропускаем.
-        pass
+        notes = list_pending_deletes()
+    except Exception as e:
+        logger.warning("⚠️ Не удалось прочитать заметки о самоудалении: %s", e)
+        return
+    now = time.time()
+    overdue = waiting = stale = 0
+    for chat_id, message_id, delete_at in notes:
+        if delete_at < now - _PENDING_DELETE_MAX_AGE:
+            _forget_pending_delete(chat_id, message_id)
+            stale += 1
+            continue
+        delay = delete_at - now
+        if not _arm_delete(bot, chat_id, message_id, max(0.0, delay)):
+            return
+        if delay > 0:
+            waiting += 1
+        else:
+            overdue += 1
+    if notes:
+        logger.info("🧹 Самоудаления от прошлого запуска: просрочено %d (удаляю сейчас), "
+                    "ждут срока %d, старше двух суток и выброшено %d", overdue, waiting, stale)
+
+
+async def cancel_pending_deletes() -> None:
+    """
+    Отменяет таймеры самоудаления при остановке бота (зовёт main.post_shutdown).
+    Заметки остаются в базе — сообщения удалит следующий запуск.
+    """
+    loop = asyncio.get_running_loop()
+    tasks = [t for t in _DELETE_TASKS if t.get_loop() is loop]
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def register_and_clean_bot_message(bot, chat_id: int, message_id: int, keep_count: int = 1):

@@ -17,15 +17,20 @@
 
 ## Жизненный цикл процесса (`main.py`)
 
-- `post_init` — выставляет меню команд Telegram (публичное + отдельное для
+- `post_init` — ПЕРВЫМ ДЕЛОМ подхватывает самоудаления, которые не успел
+  сделать прошлый процесс (`utils.restore_pending_deletes`, с 03.10.2026:
+  просроченное удаляет сразу, остальное — в свой срок), затем выставляет меню
+  команд Telegram (публичное + отдельное для
   персонала), поднимает **8 фоновых задач** в `application.bot_data["background_tasks"]`,
   убирает уведомление об обновлении — устаревшее (`forget_update_notice`,
   код сменился другим путём) и отвисевшее свой срок (`drop_expired_notice`),
   шлёт персоналу «Бот запущен» (владельцам и модераторам хотя бы с одним
   правом — `main._staff_recipients`) и открывает каждому его панель `/adm`.
 - `post_stop` — сообщение об остановке, пока бот ещё «живой».
-- `post_shutdown` — закрытие базы. Порядок важен: закрытие идёт ПОСЛЕ
-  остановки фоновых задач.
+- `post_shutdown` — отменяет фоновые задачи и таймеры самоудаления
+  (`utils.cancel_pending_deletes`, заметки о них остаются в базе для
+  следующего запуска), затем закрывает базу. Порядок важен: закрытие идёт
+  ПОСЛЕ остановки фоновых задач.
 - `_error_handler` — единый обработчик ошибок (`application.add_error_handler`).
 - `_ALLOWED_UPDATES` — все типы обновлений, кроме реакций. Список строится
   вычитанием из `Update.ALL_TYPES`, а не перечислением.
@@ -151,18 +156,19 @@
 во временную папку через `config.DB_PATH`; со снимком они молча писали бы в
 боевую `history.db`.
 
-Схема создаётся в `_schema.py::_create_schema`; на 2026-09-29 — **24 таблицы**
-(список сверен с кодом в этот день, имя в имя):
+Схема создаётся в `_schema.py::_create_schema`; на 2026-10-03 — **25 таблиц**
+(список сверен с кодом в этот день, имя в имя; 25-я — `pending_deletes`,
+заметки самоудаления, v5.50):
 
 ```
 api_calls, bot_sent_messages, group_messages, join_log, knowledge_log,
 known_chats, messages, moderation_log, mute_evidence, news_subscriptions,
-proactive_log, quiz_bank, quiz_failed, quiz_stats, sent_news, settings,
-staff, staff_log, stats_snapshots, user_context, user_dossier,
-user_image_calls, user_settings, user_token_usage
+pending_deletes, proactive_log, quiz_bank, quiz_failed, quiz_stats,
+sent_news, settings, staff, staff_log, stats_snapshots, user_context,
+user_dossier, user_image_calls, user_settings, user_token_usage
 ```
 
-`reset_db.py::USER_TABLES` перечисляет **23** из них — без `settings`
+`reset_db.py::USER_TABLES` перечисляет **24** из них — без `settings`
 (она добавляется отдельно, когда `KEEP_SETTINGS = False`).
 `preflight.py::check_tables` сверяет эти два списка.
 
@@ -173,7 +179,7 @@ user_image_calls, user_settings, user_token_usage
 
 ## Конфигурация
 
-`config.py` (1673 строки по счёту `map.py`, 133 константы) — читают 48
+`config.py` (1669 строк по счёту `map.py`, 133 константы) — читают 48
 модулей. Значения берутся из `.env` (`python-dotenv`). Ключи из
 `.env.example` (последние три там закомментированы — необязательные):
 

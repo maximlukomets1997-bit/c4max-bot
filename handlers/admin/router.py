@@ -790,9 +790,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         # 30.08.2026): дальше в переписке висел бы мёртвый ключ от админки.
         # Гигиеной панелей это сообщение убирать нельзя — она снесла бы его
         # первой же открытой панелью, не дав перейти по ссылке.
-        # ⚠️ Удаление живёт в памяти процесса (utils.schedule_delete):
-        # перезапустится бот в эти минуты — сообщение останется висеть.
-        # Ссылка к тому моменту всё равно уже не работает.
+        # Таймер (utils.schedule_delete) переживает и перезапуск бота в эти
+        # минуты — с 03.10.2026.
         if sent_link:
             schedule_delete(context.bot, user_id, sent_link.message_id,
                             LOGIN_LINK_TTL_SEC)

@@ -131,6 +131,19 @@ def _create_schema(conn):
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
 
+        -- Отложенные удаления сообщений бота (03.10.2026): заметка «в этом
+        -- чате удалить это сообщение в такое-то время». Кладёт её
+        -- utils.schedule_delete, снимает — сама попытка удаления. Нужна, чтобы
+        -- перезапуск бота не терял таймеры: новый процесс подхватывает
+        -- заметки при запуске (utils.restore_pending_deletes из
+        -- main.post_init). delete_at — unix-время.
+        CREATE TABLE IF NOT EXISTS pending_deletes (
+            chat_id    INTEGER NOT NULL,
+            message_id INTEGER NOT NULL,
+            delete_at  REAL    NOT NULL,
+            PRIMARY KEY (chat_id, message_id)
+        );
+
         CREATE TABLE IF NOT EXISTS settings (
             key   TEXT PRIMARY KEY,
             value TEXT NOT NULL

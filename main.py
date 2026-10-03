@@ -270,6 +270,16 @@ async def _notify_admins(bot, text: str, html: bool = False):
 
 
 async def post_init(application):
+    # Самоудаления, которые не успел сделать прошлый процесс (03.10.2026):
+    # заметки о них лежат в базе, см. utils.py, раздел «Самоудаление».
+    # Стоит ПЕРВЫМ, до запуска фоновых задач ниже: иначе их свежие таймеры
+    # подхватывались бы второй раз (безвредно, но с лишней попыткой удаления).
+    try:
+        from utils import restore_pending_deletes
+        restore_pending_deletes(application.bot)
+    except Exception as e:
+        logger.warning("⚠️ Не удалось подхватить самоудаления прошлого запуска: %s", e)
+
     # Список публичных команд ОДИН на весь проект — handlers/commands.py.
     # Второй читатель — _sync_staff_menu (панель /users): он пересобирает меню
     # в момент выдачи и снятия прав модератора. Здесь списка руками нет
@@ -459,6 +469,15 @@ async def post_shutdown(application):
         # return_exceptions=True — собираем CancelledError, не поднимая их наверх
         await asyncio.gather(*tasks, return_exceptions=True)
     logger.info("🚀 Фоновые задачи остановлены")
+
+    # Таймеры самоудаления (03.10.2026) тоже отменяем, а не бросаем: заметки о
+    # них лежат в базе, и следующий запуск удалит сообщения в срок. Брошенные
+    # таймеры asyncio отмечал в журнале «Task was destroyed but it is pending!».
+    try:
+        from utils import cancel_pending_deletes
+        await cancel_pending_deletes()
+    except Exception as e:
+        logger.debug("🚀 Не удалось отменить таймеры самоудаления: %s", e)
 
     # Соединение с базой одно на весь процесс (2026-07-27) — закрываем его здесь,
     # после остановки фоновых задач: пока они живы, они ещё могут писать.

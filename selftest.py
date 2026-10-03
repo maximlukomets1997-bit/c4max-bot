@@ -5228,9 +5228,9 @@ def check_update_notice():
     (03.09.2026, просьба Максима: «пусть удаляется через 10 минут»).
 
     ⚠️ Ради чего проверка существует. Уведомление отправляется ПРЯМО ПЕРЕД
-    перезапуском, поэтому обычный отложенный удалитель (utils.schedule_delete)
-    для него не годится — задача умерла бы вместе со старым процессом. Срок
-    считает УЖЕ ДРУГОЙ процесс по времени, записанному в след. Значит ошибиться
+    перезапуском, поэтому у него свой удалитель (решено 03.09.2026, когда
+    utils.schedule_delete ещё терял таймеры при перезапуске): срок считает
+    УЖЕ ДРУГОЙ процесс по времени, записанному в след. Значит ошибиться
     можно двумя тихими способами: забыть время при записи следа (уведомление
     повиснет навсегда) или зашить срок числом мимо config (он разъедется с
     тем, что обещано человеку). Проверка закрывает оба.
@@ -7380,6 +7380,141 @@ def check_quiz_thinking():
                       f"«Высокая»); обычный ответ слушается кнопки")
 
 
+def check_pending_deletes():
+    """
+    Сообщение, поставленное на самоудаление, исчезает и после перезапуска бота
+    (03.10.2026, вопрос Максима «почему не удалилось это уведомление»).
+
+    ⚠️ Ради чего проверка существует. Итог пересборки базы знаний должен был
+    исчезнуть через минуту, но через 29 секунд бота перезапустили кнопкой, и
+    таймер умер вместе со старым процессом — он жил только в памяти. Так было
+    у всех самоудалений бота. Теперь рядом с таймером лежит заметка в базе, и
+    тихо сломаться это может пятью способами: заметку перестали писать; её
+    снимают при остановке вместе с таймером; новый запуск не удаляет
+    просроченное или удаляет раньше срока; сбой сети стирает заметку без
+    удаления; древние заметки не выбрасываются и долбят Telegram на каждом
+    запуске. Проверка закрывает все пять.
+
+    «Перезапуск» — конец одного asyncio.run и начало другого; таймеры старого
+    отменяются тем же cancel_pending_deletes, что зовёт main.post_shutdown.
+    Без Телеграма и без сети: бот подделан, база временная.
+    """
+    import asyncio
+    import time
+    import utils as u
+    from database import history as hist
+    from telegram.error import BadRequest, TimedOut
+
+    problems = []
+    done = 0
+    CHAT = -100_777_000  # выдуманный чат проверки
+
+    class _Bot:
+        def __init__(self, fail=None):
+            self.tried, self.deleted = [], []
+            self.fail = fail or {}
+
+        async def delete_message(self, chat_id=None, message_id=None):
+            if chat_id != CHAT:
+                return True  # хвосты других групп проверок — не наше дело
+            self.tried.append(message_id)
+            if message_id in self.fail:
+                raise self.fail[message_id]
+            self.deleted.append(message_id)
+            return True
+
+    def notes():
+        return {m: at for c, m, at in hist.list_pending_deletes() if c == CHAT}
+
+    # ── 1. Старый процесс: два таймера, один успевает, другой нет ───────────
+    old = _Bot()
+    leftover = []
+
+    async def old_process():
+        u.schedule_delete(old, CHAT, 11, 3600)
+        u.schedule_delete(old, CHAT, 12, 0.01)
+        await asyncio.sleep(0.1)
+        await u.cancel_pending_deletes()  # как при остановке бота
+        loop = asyncio.get_running_loop()
+        leftover.extend(t for t in u._DELETE_TASKS if t.get_loop() is loop)
+
+    started = time.time()
+    asyncio.run(old_process())
+    left = notes()
+    done += 1
+    if old.deleted != [12]:
+        problems.append(f"удаление в срок без перезапуска сломалось: удалены {old.deleted!r}, "
+                        f"ждали [12]")
+    done += 1
+    if 11 not in left:
+        problems.append("заметки о таймере нет после остановки бота — перезапуск снова "
+                        "оставит сообщение висеть навсегда")
+    elif not started + 3590 <= left[11] <= time.time() + 3610:
+        problems.append(f"в заметке не тот срок: через {left[11] - started:.0f} с, "
+                        f"а ставили 3600")
+    done += 1
+    if 12 in left:
+        problems.append("удалённое сообщение осталось в заметках — следующий запуск "
+                        "будет удалять его снова")
+    done += 1
+    if leftover:
+        problems.append(f"после остановки остались неотменённые таймеры: {len(leftover)} — "
+                        f"asyncio снова напишет в журнал «Task was destroyed but it is pending!»")
+
+    # ── 2. Новый процесс: заметки разного возраста ──────────────────────────
+    now = time.time()
+    hist.add_pending_delete(CHAT, 11, now - 5)           # срок прошёл, пока бот лежал
+    hist.add_pending_delete(CHAT, 13, now + 3600)        # срок ещё не пришёл
+    hist.add_pending_delete(CHAT, 14, now - 3 * 86400)   # старше двух суток
+    hist.add_pending_delete(CHAT, 15, now - 5)           # сбой сети при удалении
+    hist.add_pending_delete(CHAT, 16, now - 5)           # сообщение уже стёрли руками
+    hist.add_pending_delete(CHAT, 17, now + 0.05)        # срок придёт через миг
+    new = _Bot(fail={15: TimedOut(), 16: BadRequest("Message to delete not found")})
+
+    async def new_process():
+        u.restore_pending_deletes(new)
+        await asyncio.sleep(0.3)
+        await u.cancel_pending_deletes()
+
+    asyncio.run(new_process())
+    left = notes()
+    done += 1
+    if 11 not in new.deleted:
+        problems.append("просроченное за время простоя не удалено после запуска")
+    done += 1
+    if 17 not in new.deleted:
+        problems.append("заметка со сроком «через миг» не удалена в свой срок")
+    done += 1
+    if 13 in new.tried:
+        problems.append("сообщение удалено раньше своего срока (ждало ещё час)")
+    done += 1
+    if 13 not in left:
+        problems.append("заметка, чей срок не пришёл, пропала после запуска")
+    done += 1
+    if 14 in new.tried or 14 in left:
+        problems.append("заметка старше двух суток не выброшена: "
+                        + ("бот пытался удалить" if 14 in new.tried else "осталась в базе"))
+    done += 1
+    if 15 not in left:
+        problems.append("сбой сети стёр заметку — удаление больше никто не повторит")
+    done += 1
+    if 16 in left:
+        problems.append("сообщения уже нет, а заметка осталась — каждый запуск будет "
+                        "снова пытаться его удалить")
+    done += 1
+    if 11 in left or 17 in left:
+        problems.append("после удаления заметка не снята")
+
+    # Уборка: временная база общая для всех групп проверок.
+    for m in notes():
+        hist.remove_pending_delete(CHAT, m)
+
+    return problems, (f"{done} проверок: заметка переживает остановку и снимается после "
+                      f"удаления; новый запуск удаляет просроченное, ждёт срока остальных, "
+                      f"выбрасывает старше двух суток; сбой сети заметку бережёт, "
+                      f"«сообщения уже нет» — снимает")
+
+
 CHECKS = (
     ("деньги — расчёт стоимости запросов", check_money),
     ("квота Qwen — оборванный ответ, срок и письма", check_qwen_quota),
@@ -7427,6 +7562,7 @@ CHECKS = (
     ("«Сам в разговор»: кому файл, а кому стенограмма", check_proactive_media_route),
     ("разбор вложения остаётся в памяти бота", check_media_memory),
     ("сборка вопросов думает в полную силу", check_quiz_thinking),
+    ("самоудаление переживает перезапуск бота", check_pending_deletes),
 )
 
 

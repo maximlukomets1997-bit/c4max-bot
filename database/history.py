@@ -65,7 +65,8 @@ from .settings import (get_setting, set_setting, delete_setting,
 from .chat import (get_history, get_history_length, get_user_usage,
                    add_messages, add_bot_message, clear_history,
                    register_bot_message, get_old_bot_messages,
-                   remove_bot_message)
+                   remove_bot_message, add_pending_delete,
+                   remove_pending_delete, list_pending_deletes)
 
 # ─── архив сообщений групп и известные группы ───────────────────────
 from .groups import (save_group_message, update_last_group_message_text,

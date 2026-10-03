@@ -8,6 +8,9 @@
 #        берётся контекст КАЖДОГО ответа модели
 #    bot_sent_messages — гигиена панелей: какие сообщения бот прислал сам,
 #        чтобы стереть прошлую панель, когда рисует новую
+#    pending_deletes — заметки об отложенном удалении (03.10.2026): что и
+#        когда стереть, чтобы перезапуск бота не терял таймеры самоудаления
+#        (utils.schedule_delete / utils.restore_pending_deletes)
 #
 #  ⚠️ КОНТЕКСТ БЕРЁТСЯ ПО ЧЕЛОВЕКУ, А НЕ ПО ЧАТУ. get_history собирает
 #  последние MAX_CONTEXT_MESSAGES сообщений участника ПО ВСЕМ чатам сразу:
@@ -251,3 +254,42 @@ def remove_bot_message(chat_id: int, message_id: int):
             (chat_id, message_id),
         )
         conn.commit()
+
+
+# ───────────────────────────────────────────────
+#  Отложенные удаления (03.10.2026)
+# ───────────────────────────────────────────────
+#  Пишет и читает их только utils.py — там же объяснено, когда заметка
+#  ставится и когда снимается. delete_at — unix-время.
+
+def add_pending_delete(chat_id: int, message_id: int, delete_at: float):
+    """Заметка «удалить это сообщение бота в такое-то время». Повтор — перезапись срока."""
+    with _lock:
+        conn = _get_connection()
+        conn.execute(
+            "INSERT OR REPLACE INTO pending_deletes (chat_id, message_id, delete_at) "
+            "VALUES (?, ?, ?)",
+            (chat_id, message_id, delete_at),
+        )
+        conn.commit()
+
+
+def remove_pending_delete(chat_id: int, message_id: int):
+    """Снимает заметку об отложенном удалении."""
+    with _lock:
+        conn = _get_connection()
+        conn.execute(
+            "DELETE FROM pending_deletes WHERE chat_id=? AND message_id=?",
+            (chat_id, message_id),
+        )
+        conn.commit()
+
+
+def list_pending_deletes() -> list[tuple[int, int, float]]:
+    """Все заметки: (чат, номер сообщения, когда удалить), раньше срок — раньше в списке."""
+    with _lock:
+        conn = _get_connection()
+        rows = conn.execute(
+            "SELECT chat_id, message_id, delete_at FROM pending_deletes ORDER BY delete_at"
+        ).fetchall()
+    return [(r["chat_id"], r["message_id"], r["delete_at"]) for r in rows]

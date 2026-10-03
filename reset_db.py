@@ -32,6 +32,7 @@ USER_TABLES = [
     "api_calls",
     "group_messages",
     "bot_sent_messages",
+    "pending_deletes",
     "news_subscriptions",
     "sent_news",
     "moderation_log",
