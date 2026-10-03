@@ -212,16 +212,22 @@ def _clean_question(item: dict) -> dict | None:
     }
 
 
-def articles_without_questions() -> list[dict]:
+def articles_without_questions(articles: list | None = None) -> list[dict]:
     """
     Одобренные статьи базы знаний, по которым вопросов ещё нет вовсе.
 
     ⚠️ Берём ТОЛЬКО папку approved: статьи в pending ещё не приняты Максимом,
     и собирать вопросы по тому, что может быть переписано или удалено, —
     выбрасывать деньги и получать вопросы про несуществующую технику.
+
+    articles — уже прочитанный список knowledge_store.list_articles() (03.10.2026):
+    его передаёт stats(), чтобы не читать все статьи с диска дважды подряд.
+    Не передан — читаем сами, как раньше.
     """
     covered = get_quiz_articles_covered()
-    return [a for a in knowledge_store.list_articles()
+    if articles is None:
+        articles = knowledge_store.list_articles()
+    return [a for a in articles
             if a["folder"] == "approved" and a["fname"] not in covered]
 
 
@@ -405,9 +411,10 @@ def retry_failed(limit_articles: int = None) -> dict:
 
 def stats() -> dict:
     """Цифры для шапки панели: статьи всего, без вопросов и в очереди на повтор."""
-    approved = [a for a in knowledge_store.list_articles() if a["folder"] == "approved"]
+    articles = knowledge_store.list_articles()
+    approved = [a for a in articles if a["folder"] == "approved"]
     return {"articles_total": len(approved),
-            "articles_left": len(articles_without_questions()),
+            "articles_left": len(articles_without_questions(articles)),
             "failed": count_quiz_failures()}
 
 
