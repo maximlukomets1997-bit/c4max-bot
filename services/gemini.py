@@ -152,7 +152,7 @@ def _model_title(model_name: str) -> str:
 
 
 def _failed_list(failures: list) -> str:
-    """«Gemini 3.7 Flash (код 503), Qwen3.7 Plus (таймаут)» — кто и почему."""
+    """«Gemini 3.7 Flash (код 503), Qwen3.8 Flash (таймаут)» — кто и почему."""
     return ", ".join(f"{_model_title(m)} ({why})" for m, why in failures) or "—"
 
 
@@ -1819,7 +1819,9 @@ def _gemini_chat_request(messages: list, kind: str = "текст", has_image: bo
         # Принцип: запас уходит на ДРУГОГО провайдера / на быструю бесплатную Gemini-lite,
         # чтобы пережить сбой целого сервиса и не жечь зря токены думающих моделей.
         #   • активная Gemini        → FALLBACK_MODEL, Gemini-lite, и в самом
-        #     конце Qwen (последний рубеж на случай падения всего Google);
+        #     конце Qwen (последний рубеж на случай падения всего Google;
+        #     с 03.10.2026 это qwen3.8-flash — прежняя qwen3.7-plus удалена
+        #     вместе со всем поколением 3.7, решение Максима);
         #   • активная Qwen/DeepSeek/Xiaomi → FALLBACK_MODEL и Gemini-lite
         #     (другой провайдер).
         # Модели Xiaomi MiMo сами в подстраховку НЕ ставятся (решение Максима
@@ -1839,8 +1841,10 @@ def _gemini_chat_request(messages: list, kind: str = "текст", has_image: bo
         # значит, что первой запасной на ОБЫЧНЫЙ вопрос идёт модель без
         # замеров скорости на тексте — и на положении кнопки «Выкл» она всё
         # равно думает, нулевого уровня она не принимает.
+        # ⚠️ Все запасные обязаны быть ЗРЯЧИМИ ("vision": True): при отказе
+        # активной фото уходит им же. Ставишь сюда другую модель — проверь поле.
         if _provider_of(active_model) == "gemini":
-            fallback_candidates = [FALLBACK_MODEL, "gemini-3.5-flash-lite", "qwen3.7-plus"]
+            fallback_candidates = [FALLBACK_MODEL, "gemini-3.5-flash-lite", "qwen3.8-flash"]
         else:  # активная — Qwen, DeepSeek или Xiaomi
             fallback_candidates = [FALLBACK_MODEL, "gemini-3.5-flash-lite"]
 

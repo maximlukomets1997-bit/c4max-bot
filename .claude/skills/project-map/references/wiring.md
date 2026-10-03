@@ -189,7 +189,7 @@ WEB_HOST, WEB_PORT, IS_DOCKER
 `DB_PATH = "history.db"`, `BACKUP_DIR = "backups"`,
 `RAG_INDEX_FILE = "knowledge/knowledge_base_vectors.json"`,
 `KNOWLEDGE_PENDING_DIR`, `KNOWLEDGE_APPROVED_DIR`,
-`AVAILABLE_MODELS` (12 моделей: 21.09.2026 добавлена Qwen3.8 Flash, 28.09 MiMo V2.5 заменены на V2.6, 29.09 qwen3.8-max — на qwen3.8-max-0902), `PROVIDERS` (5 ключей: gemini, image, qwen, deepseek, xiaomi — «image» это
+`AVAILABLE_MODELS` (10 моделей: 21.09.2026 добавлена Qwen3.8 Flash, 28.09 MiMo V2.5 заменены на V2.6, 29.09 qwen3.8-max — на qwen3.8-max-0902, 03.10 удалены обе Qwen 3.7; слепых моделей с 03.10 нет), `PROVIDERS` (5 ключей: gemini, image, qwen, deepseek, xiaomi — «image» это
 не провайдер моделей, а картинки; `preflight` считает четвёрку по
 `AVAILABLE_MODELS`), `AVAILABLE_IMAGE_MODELS` (2), `QUIZ_RANKS` (20 званий),
 `AUTO_UPDATE_INTERVAL_SEC = 300`, `AUTO_UPDATE_QUIET_SEC = 60`,

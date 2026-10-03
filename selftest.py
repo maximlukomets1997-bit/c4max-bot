@@ -882,8 +882,6 @@ _PRICES_EXPECTED = {
     "QWEN_PRICES": {
         "qwen3.8-flash": {"cache_hit": 0.016, "cache_miss": 0.15, "output": 0.47},
         "qwen3.8-max-0902": {"cache_hit": 0.25, "cache_miss": 2.00, "output": 6.00},
-        "qwen3.7-max":  {"cache_hit": 0.50, "cache_miss": 2.50, "output": 7.50},
-        "qwen3.7-plus": {"cache_hit": 0.08, "cache_miss": 0.40, "output": 1.60},
     },
     "XIAOMI_PRICES": {
         "mimo-v2.6-flash": {"cache_hit": 0.0028, "cache_miss": 0.14,  "output": 0.28},
@@ -5851,19 +5849,28 @@ def check_photo_route():
         return [m for m in models
                 if not cfg.AVAILABLE_MODELS.get(m, {}).get("vision", False)]
 
+    # ⚠️ СЛЕПАЯ МОДЕЛЬ — ПОДСТАВНАЯ (03.10.2026). Настоящих слепых в наборе
+    # больше нет: последней была qwen3.7-max, удалённая вместе со всем
+    # поколением 3.7 (решение Максима). А путь для слепой в боте остался —
+    # вернётся такая модель, заработает сам, — и проверять его надо, пока он
+    # есть. Поэтому на время проверки в реестр вписывается запись Qwen без
+    # "vision", какой была 3.7 Max, а в finally убирается.
+    BLIND = "проверка-слепая-qwen"
     saved_active = hist.get_setting("active_model", "")
+    cfg.AVAILABLE_MODELS[BLIND] = {"name": "Подставная слепая", "provider": "qwen",
+                                   "thinking": True, "vision": False}
     try:
         # ── 1. Активные ЗРЯЧИЕ не-Gemini: фото должна получить сама активная ──
         # ⚠️ Все перечислены поимённо НАМЕРЕННО. Каждая проверена живыми
         # запросами на игровых скриншотах и включена по прямой просьбе
-        # Максима: две Qwen 04.09.2026 (обе переписали панель ТТХ и верно
-        # назвали флаг страны), deepseek-flash — 10.09.2026 (12 значений из 12
-        # за 13 с, страну назвала сама). Вернёт любая из них пометку «слепая» —
-        # эта строка обязана покраснеть.
+        # Максима: Qwen 3.8 Max 04.09.2026 (переписала панель ТТХ и верно
+        # назвала флаг страны; снимок 0902 — так же, 29.09), deepseek-flash —
+        # 10.09.2026 (12 значений из 12 за 13 с, страну назвала сама). Вернёт
+        # любая из них пометку «слепая» — эта строка обязана покраснеть.
         # qwen3.8-flash добавлена 21.09.2026: две панели ТТХ переписаны без
         # ошибок за 10 с, флаг Китая назван верно (флаг Омана — нет, но решение
         # Максима «активная модель отвечает сама» от этого не меняется).
-        for seeing in ("qwen3.7-plus", "qwen3.8-max-0902", "qwen3.8-flash", "deepseek-flash"):
+        for seeing in ("qwen3.8-max-0902", "qwen3.8-flash", "deepseek-flash"):
             chain = route(seeing, has_image=True)
             done += 3
             if not chain or chain[0] != seeing:
@@ -5877,16 +5884,13 @@ def check_photo_route():
                 problems.append(f"у фото не осталось подстраховки ({seeing}): цепочка {chain}")
 
         # ── 2. Активная СЛЕПАЯ: её не должны пробовать вовсе ──
-        # mimo-v2.5-pro, вторая слепая, ушла 28.09.2026 вместе с заменой MiMo на V2.6
-        # (обе новые зрячие) — слепой в наборе осталась одна qwen3.7-max.
-        for model in ("qwen3.7-max",):
-            chain = route(model, has_image=True)
-            done += 2
-            if model in chain:
-                problems.append(f"фото отправили СЛЕПОЙ активной модели {model} — "
-                                f"обход (vision-reroute) не сработал")
-            if blind(chain):
-                problems.append(f"обход фото у {model} привёл к слепым моделям: {blind(chain)}")
+        chain = route(BLIND, has_image=True)
+        done += 2
+        if BLIND in chain:
+            problems.append(f"фото отправили СЛЕПОЙ активной модели {BLIND} — "
+                            f"обход (vision-reroute) не сработал")
+        if blind(chain):
+            problems.append(f"обход фото у {BLIND} привёл к слепым моделям: {blind(chain)}")
 
         # ── 2б. Слепая активная отвечает ПО РАЗБОРУ, а не чужими глазами ──
         #
@@ -5921,7 +5925,7 @@ def check_photo_route():
             g._describe_image = lambda *a, **kw: shown
             g._http = lambda: type("S", (), {"post": staticmethod(lambda *a, **kw: _Resp2)})
             g.RAG_ENABLED = False
-            hist.set_setting("active_model", "qwen3.7-max")     # слепая
+            hist.set_setting("active_model", BLIND)
             g.ask_gemini(1, 1, "что это?", image_base64="QQ")
         finally:
             (g._qwen_chat_request, g._describe_image, g._http,
@@ -5939,9 +5943,9 @@ def check_photo_route():
 
         # ── 3. ТЕКСТ у слепой активной идёт ЕЙ, а не в обход ──
         # Иначе обход фото тихо утащил бы к Gemini всю переписку.
-        chain = route("qwen3.7-max", has_image=False)
+        chain = route(BLIND, has_image=False)
         done += 1
-        if not chain or chain[0] != "qwen3.7-max":
+        if not chain or chain[0] != BLIND:
             problems.append(f"текст у слепой активной ушёл мимо неё: {chain} — "
                             f"обход сработал там, где картинки нет вовсе")
 
@@ -5953,6 +5957,7 @@ def check_photo_route():
         if blind(chain):
             problems.append(f"в запасе у активной Gemini есть слепые: {blind(chain)}")
     finally:
+        cfg.AVAILABLE_MODELS.pop(BLIND, None)
         hist.set_setting("active_model", saved_active)
 
     return problems, (f"{done} проверок: фото идёт зрячей активной, слепая отвечает "
