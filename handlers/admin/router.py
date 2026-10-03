@@ -681,8 +681,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     # Шестнадцать кнопок, одна логика: стереть ключ в settings → попап →
     # переписать сообщение. Тексты и ключи — в таблице `_PROMPTS`
     # (panel_prompts.py), там же исполнитель `handle_prompt_reset`.
-    # ⚠️ СПИСОК ЛИТЕРАЛОВ НИЖЕ НЕ ЗАМЕНЯТЬ ВЫЧИСЛЯЕМЫМ (`_PROMPT_RESET_CALLBACKS`
-    # или приставкой): preflight.py читает роутер разбором ast и видит только
+    # ⚠️ СПИСОК ЛИТЕРАЛОВ НИЖЕ НЕ ЗАМЕНЯТЬ ВЫЧИСЛЯЕМЫМ (кортежем, собранным из
+    # `_PROMPTS`, или приставкой): preflight.py читает роутер разбором ast и видит только
     # `data == "…"`, `data in (…)` и `data.startswith("…")` — за вычисляемым
     # ключом проверка «кнопки ↔ роутер» объявит все шестнадцать необработанными.
     # Отвечает на callback сам handle_prompt_reset, здесь `query.answer` НЕТ:

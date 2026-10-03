@@ -1242,14 +1242,6 @@ _PROMPTS = {
     },
 }
 
-# Все callback'ы таблицы одной строкой — для проверок и подсказки
-# читателю. В САМ РОУТЕР их подставлять нельзя (см. предупреждение выше).
-_PROMPT_RESET_CALLBACKS = tuple(
-    f"{name}_reset_{action}"
-    for name in _PROMPTS
-    for action in ("confirm", "cancel")
-)
-
 
 async def handle_prompt_reset(query, user_id: int, data: str):
     """

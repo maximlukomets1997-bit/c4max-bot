@@ -178,7 +178,7 @@ def _register_and_check(user_id: int, chat_id: int, message_id: int,
     таймстампам в памяти — без БД и без I/O.
     text/has_photo хранятся, чтобы при муте сохранить улики до удаления;
     media_group_id — чтобы не считать альбом за флуд. Порядок элементов записи
-    менять НЕЛЬЗЯ: _burst_message_ids/_burst_records читают их по номеру.
+    менять НЕЛЬЗЯ: _burst_records читает их по номеру.
     """
     now = time.monotonic()
     dq = _timestamps[user_id]
@@ -190,14 +190,6 @@ def _register_and_check(user_id: int, chat_id: int, message_id: int,
         dq.popleft()
 
     return _count_messages(dq) >= msg_count
-
-
-def _burst_message_ids(user_id: int, chat_id: int) -> list[int]:
-    """message_id сообщений пользователя в данном чате, что сейчас в окне (для чистки спама)."""
-    dq = _timestamps.get(user_id)
-    if not dq:
-        return []
-    return [rec[2] for rec in dq if rec[1] == chat_id and rec[2]]
 
 
 def _burst_records(user_id: int, chat_id: int) -> list[dict]:

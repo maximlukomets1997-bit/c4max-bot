@@ -51,8 +51,6 @@ logger = logging.getLogger(__name__)
 
 # Загруженный в оперативную память индекс: список словарей с "title", "content", "vector"
 _KNOWLEDGE_INDEX = []
-# Сколько файлов-статей в загруженном индексе (для статистики панели /rag)
-_KNOWLEDGE_FILES = 0
 # Основы слов, встречающиеся в БОЛЬШИНСТВЕ чанков («танк», «ранг» и т.п.) —
 # в лексическом бонусе не участвуют: они не различают статьи, а только
 # раздувают баллы всем подряд. Пересчитывается при каждой загрузке индекса.
@@ -316,7 +314,7 @@ def _load_into_memory(files_index: dict) -> None:
     для каждой статьи, хотя она не меняется никогда — см. _cosine_fast);
     в файл индекса ни то, ни другое не пишется — только в память.
     """
-    global _KNOWLEDGE_INDEX, _KNOWLEDGE_FILES, _COMMON_STEMS
+    global _KNOWLEDGE_INDEX, _COMMON_STEMS
     flat = []
     for entry in files_index.values():
         for chunk in entry.get("chunks", []):
@@ -334,7 +332,6 @@ def _load_into_memory(files_index: dict) -> None:
             counts[s] = counts.get(s, 0) + 1
     _COMMON_STEMS = {s for s, n in counts.items() if n > max(1, len(flat) // 2)}
     _KNOWLEDGE_INDEX = flat
-    _KNOWLEDGE_FILES = len(files_index)
     logger.info("🚀 База знаний RAG загружена: %d чанков из %d файлов (частых основ: %d)",
                 len(flat), len(files_index), len(_COMMON_STEMS))
 

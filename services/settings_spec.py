@@ -331,7 +331,3 @@ def write(key: str, raw) -> object:
 def keys_of(section: str) -> list:
     """Ключи одного раздела в порядке объявления в SPEC."""
     return [k for k, v in SPEC.items() if v["section"] == section]
-
-
-def title(key: str) -> str:
-    return SPEC[key]["title"]
