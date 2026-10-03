@@ -1324,7 +1324,7 @@ def check_wait_budgets():
             rag_module.is_active = lambda: True
             g._describe_image = lambda img, chain_limit=0, **kw: (asked.append(chain_limit)
                                                                   or "описание картинки.")
-            g._media_search_text(image_base64="QQ")
+            g._media_understood(image_base64="QQ")
         finally:
             g._describe_image = saved_describe
             rag_module.is_active = saved_rag_active

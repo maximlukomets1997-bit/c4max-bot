@@ -2024,19 +2024,6 @@ def _gemini_chat_request(messages: list, kind: str = "текст", has_image: bo
 # схлопываются (модель любит отвечать списком).
 
 
-def _media_search_text(caption: str = "", *, image_base64: str = "",
-                       audio_base64: str = "", video_base64: str = "",
-                       video_mime: str = "video/mp4") -> str:
-    """
-    Только текст для поиска по базе знаний — прежнее имя и прежний ответ.
-    Разбор файла делает _media_understood, здесь берётся первый из двух его
-    ответов (боевой код это имя больше не зовёт — только проверка selftest.py).
-    """
-    return _media_understood(caption, image_base64=image_base64,
-                             audio_base64=audio_base64, video_base64=video_base64,
-                             video_mime=video_mime)[0]
-
-
 def _media_understood(caption: str = "", *, image_base64: str = "",
                       audio_base64: str = "", video_base64: str = "",
                       video_mime: str = "video/mp4") -> tuple:
@@ -2735,8 +2722,8 @@ def ask_gemini(chat_id: int, user_id: int, user_text: str, image_base64: str = N
         # вытеснял бы оттуда настоящие вопросы людей.
         # ⚠️ БЕРЁМ ОБА ОТВЕТА РАЗБОРА (21.09.2026): первый — текст для поиска,
         # второй — полный разбор, он же ляжет в ПАМЯТЬ бота вместо заглушки
-        # «[Фотография]». Раньше здесь звался `_media_search_text`, который
-        # отдаёт только первый и молча теряет второй.
+        # «[Фотография]». Раньше здесь звалась обёртка, отдававшая только
+        # первый и молча терявшая второй (удалена 03.10.2026).
         if image_base64:
             search_text, media_described = _media_understood(
                 user_text, image_base64=image_base64)
