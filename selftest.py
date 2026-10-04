@@ -4749,7 +4749,7 @@ def check_web_wiring():
       • «Снять и скачать» отдавало САМУЮ СТАРУЮ копию базы: список копий идёт
         от старых к свежим, а код брал первую;
       • сборка вопросов всегда рапортовала «добавлено 0» — читался ключ
-        «added», а возвращается «saved»;
+        «added», а возвращается «saved» (сборку удалили 04.10.2026);
       • обработчик очистки журнала базы знаний был написан, а кнопки к нему
         не было — ветка висела недостижимой.
     Всё это — «работает, но неправда». Такое ловится только сверкой с
@@ -4779,18 +4779,8 @@ def check_web_wiring():
     expect("скачивание копии базы берёт не последнюю (самую свежую) запись",
            bool(src) and "copies[-1]" in src.group(0))
 
-    # ── 2. Ключи, которые сайт читает у сборки вопросов, реально возвращаются ──
-    quiz_src = pathlib.Path(ROOT, "services", "quiz_bank.py").read_text(encoding="utf-8")
-    run_over = _re.search(r"def _run_over(.|\n)*?return \{([^}]*)\}", quiz_src)
-    returned = set(_re.findall(r'"([a-z_]+)"', run_over.group(2))) if run_over else set()
-    expect(f"не разобрал, что возвращает _run_over (нашёл {returned})",
-           {"articles", "saved", "failed"} <= returned)
-    act_src = pathlib.Path(ROOT, "web", "actions.py").read_text(encoding="utf-8")
-    describe = _re.search(r"def quiz_generate(.|\n)*?return longjobs", act_src)
-    used = set(_re.findall(r"result\.get\('([a-z_]+)'", describe.group(0))) if describe else set()
-    expect(f"сайт читает у сборки вопросов ключи {sorted(used)}, "
-           f"а возвращаются {sorted(returned)}",
-           used and used <= returned)
+    # ── 2. (снято 04.10.2026) Ключи итога машинной сборки вопросов, которые
+    # читал сайт: сборку удалили, читать больше нечего. ──
 
     # ── 3. Каждая форма страницы имеет обработчик, и наоборот ──
     # ⚠️ СМОТРИМ НА НАРИСОВАННОЕ, А НЕ НА ИСХОДНИК. Первая версия этой
@@ -4832,7 +4822,6 @@ def check_web_wiring():
     # 100%), и сверка «кнопка ↔ обработчик» объявила бы обработчик сиротой.
     # Уберёшь эту строку — проверка покраснеет на ровном месте (04.09.2026).
     _hist.add_quiz_attempt(777000111, "проверка", False)
-    _hist.note_quiz_failure("проверочная.md", "проверка проводки")
 
     # ⚠️ Статью заводим во ВРЕМЕННОЙ папке: настоящие статьи базы знаний —
     # единственное, чего нет ни в git, ни в базе, и трогать их проверкой нельзя.
@@ -4871,7 +4860,6 @@ def check_web_wiring():
         _roles.unmake_moderator(777000111)
         _ks._FOLDERS.update(saved_folders)
         _shutil.rmtree(art_dir, ignore_errors=True)
-        _hist.clear_quiz_failures()
         for q in _hist.list_quiz_questions(approved=False, limit=20):
             _hist.delete_quiz_question(q["id"])
         for q in _hist.list_quiz_questions(approved=True, limit=20):
@@ -4943,7 +4931,7 @@ def check_web_wiring():
             problems.append(f"остаток {_meta['title']} пропал с экрана «Счета и квоты» "
                             f"в боте — правку убрать можно, показ нельзя")
 
-    return problems, (f"{done} проверок: порядок копий, ключи сборки вопросов, "
+    return problems, (f"{done} проверок: порядок копий, "
                       f"формы ↔ обработчики, разметка, дайджест, остатки видны везде")
 
 
@@ -5806,7 +5794,7 @@ def check_photo_route():
         """Возвращает список моделей, которых РЕАЛЬНО попробовали по порядку."""
         tried = []
 
-        def _fake_provider(model_name, messages, thinking_override=None):
+        def _fake_provider(model_name, messages):
             tried.append(model_name)
             return None          # «не ответила» — цепочка идёт дальше
 
@@ -5914,7 +5902,7 @@ def check_photo_route():
                 return {"choices": [{"message": {"content": "ответ"}}],
                         "usage": {"prompt_tokens": 1, "total_tokens": 2}}
 
-        def _seeing_provider(model_name, messages, thinking_override=None):
+        def _seeing_provider(model_name, messages):
             seen_photo["model"] = model_name
             seen_photo["messages"] = messages
             return {"choices": [{"message": {"content": "ответ"}}],
@@ -6061,7 +6049,7 @@ def check_stopwatch():
         }
 
     def _provider_request(provider):
-        def fake(model_name, messages, thinking_override=None):
+        def fake(model_name, messages):
             _step(provider, model_name)
             return _answer_json()
         return fake
@@ -6963,7 +6951,7 @@ def check_proactive_media_route():
             seen.append((url, json))
             return _Resp
 
-    def _provider_answer(model_name, messages, thinking_override=None):
+    def _provider_answer(model_name, messages):
         seen.append((f"provider:{model_name}", messages))
         return {"choices": [{"message": {"content": "реплика бота"}}],
                 "usage": {"prompt_tokens": 1, "total_tokens": 2}}
@@ -7208,178 +7196,6 @@ def check_media_memory():
                       f"в памяти бота; при погашенной базе — прежняя заглушка")
 
 
-def check_quiz_thinking():
-    """
-    Сборка вопросов викторины думает В ПОЛНУЮ СИЛУ при любом положении кнопок
-    глубины раздумий, а обычный ответ бота — по кнопке (01.10.2026, решение
-    Максима).
-
-    ⚠️ РАДИ ЧЕГО. «Вопросы собираются на полную» решено 05.08.2026 — и молча
-    сломалось 29.08, когда у провайдеров появились кнопки глубины: рычаг
-    thinking_override=True перебивал только «Выкл», а «Коротко» и «Средне»
-    доходили до сборки. Глубину раздумий до этой группы не проверял никто.
-
-    ⚠️ ГОНЯЕТСЯ НАСТОЯЩИЙ ПУТЬ: настоящая сборка вопросов (перехвачен только её
-    поход к модели — чтобы увидеть, ЧТО она просит), настоящая очередь
-    _gemini_chat_request и настоящие отправлялки всех четырёх провайдеров.
-    Подставные только сеть и потоковый запрос. Сверяется то, что УШЛО БЫ
-    провайдеру, а не переменные внутри.
-
-    ⚠️ ОЖИДАНИЯ ВЫПИСАНЫ ЗДЕСЬ РУКАМИ, а не взяты из gemini._FULL_THINKING:
-    Gemini — «high», Qwen — без потолка, DeepSeek — «high» (НЕ «max»: так решил
-    Максим, у потоковых ответов предел 90 секунд), MiMo — мысли включены.
-    Поменяется решение — поменяется и эта таблица.
-    """
-    import config as cfg
-    from database import history as hist
-    from services import gemini as g
-    from services import knowledge_store, quiz_bank
-
-    problems = []
-    done = 0
-    MSG = [{"role": "user", "content": "статья"}]
-
-    # Полная сила по провайдерам — так, как её увидел бы сам провайдер.
-    FULL = {"gemini": "high", "qwen": "без потолка", "deepseek": "high", "xiaomi": "enabled"}
-
-    def expect(title, got, want):
-        nonlocal done
-        done += 1
-        if got != want:
-            problems.append(f"{title}: ушло {got!r}, а должно {want!r}")
-
-    # ── 1. Новый провайдер без решения о «полной силе» не проскочит ──
-    expect("провайдеры с кнопкой глубины против таблицы этой проверки",
-           sorted(cfg.THINKING_LEVELS), sorted(FULL))
-
-    # ── 2. Сборка вопросов вообще просит «в полную силу» ──
-    asked = []
-    saved_request, saved_read = g._gemini_chat_request, knowledge_store.read_article
-    try:
-        g._gemini_chat_request = lambda messages, **kw: (asked.append(kw), (None, ""))[1]
-        knowledge_store.read_article = lambda folder, fname: (
-            "статья.md", "# Танк\n" + "Текст статьи о технике. " * 20)
-        quiz_bank.generate_for_article({"folder": "approved", "fname": "статья.md"})
-    finally:
-        g._gemini_chat_request, knowledge_store.read_article = saved_request, saved_read
-    expect("сборка вопросов: рычаг глубины в запросе к модели",
-           [kw.get("thinking_override") for kw in asked], [True])
-
-    # ── 3. Что уходит провайдеру: сборка вопросов против обычного ответа ──
-    sent = []
-
-    class _Answer:
-        @staticmethod
-        def raise_for_status(): pass
-
-        @staticmethod
-        def json():
-            return {"choices": [{"message": {"content": "ответ"}}],
-                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}
-
-    class _Session:
-        @staticmethod
-        def post(url, json=None, **kw):
-            google = ((json or {}).get("extra_body") or {}).get("google") or {}
-            sent.append(google.get("thinking_config") or {})
-            return _Answer
-
-    def _stream(model_name, messages, api_url, api_key, extra_payload):
-        sent.append(dict(extra_payload))
-        return _Answer.json()
-
-    class Silent:
-        def _skip(self, *a, **kw): pass
-        debug = info = warning = error = exception = _skip
-
-    def model_of(provider):
-        # У Gemini — модель, принимающая нулевой уровень: «Выкл» у неё и есть «minimal».
-        return next((m for m, info in cfg.AVAILABLE_MODELS.items()
-                     if info.get("provider", "gemini") == provider and info.get("thinking")
-                     and info.get("minimal_thinking", True)), None)
-
-    def depth(provider, payload):
-        """Глубина, которую увидел бы провайдер, — одним словом для сверки."""
-        if payload is None:
-            return "запрос не ушёл"
-        if provider == "gemini":
-            return payload.get("thinking_level")
-        if provider == "qwen":
-            if not payload.get("enable_thinking"):
-                return "off"
-            if "thinking_budget" in payload:
-                return f"потолок {payload['thinking_budget']}"
-            return "без потолка"
-        if provider == "deepseek":
-            if (payload.get("thinking") or {}).get("type") != "enabled":
-                return "off"
-            return payload.get("reasoning_effort", "ступень по умолчанию провайдера")
-        return (payload.get("thinking") or {}).get("type")
-
-    def sent_for(provider, model, override):
-        """Глубина ОДНОГО запроса с этой активной моделью."""
-        sent.clear()
-        hist.set_setting("active_model", model)
-        g._gemini_chat_request(MSG, kind="проверка", thinking_override=override)
-        return depth(provider, sent[0] if sent else None)
-
-    # Обычный ответ обязан слушаться кнопки — иначе правка «сборки» задела бы чат.
-    CONTROL = {
-        "gemini": {"off": "minimal", "low": "low"},
-        "qwen": {"off": "off", "low": f"потолок {cfg.QWEN_THINKING_BUDGET['low']}"},
-        "deepseek": {"off": "off", "low": "low"},
-        "xiaomi": {"off": "disabled"},
-    }
-
-    # Кнопки глубины возвращаем как были, включая «не было вовсе». active_model —
-    # как в соседних группах: её читалка сама чинит незнакомое значение.
-    MISSING = object()
-    saved_levels = {k: hist.get_setting(k, MISSING)
-                    for k in (cfg.THINKING_SETTING_PREFIX + p for p in FULL)}
-    saved_active = hist.get_setting("active_model", "")
-    saved = {name: getattr(g, name) for name in
-             ("_http", "_openai_stream_request", "logger", "_notify_models_failed")}
-    saved_hist = {name: getattr(hist, name) for name in
-                  ("register_api_call", "add_provider_cost", "spend_qwen_tokens")}
-    try:
-        g._http = lambda: _Session()
-        g._openai_stream_request = _stream
-        g.logger = Silent()
-        g._notify_models_failed = lambda *a, **kw: None
-        for name in saved_hist:
-            setattr(hist, name, lambda *a, **kw: None)
-
-        for provider, full in FULL.items():
-            model = model_of(provider)
-            if not model:
-                continue
-            setting = cfg.THINKING_SETTING_PREFIX + provider
-            # Сборка вопросов — при КАЖДОМ положении кнопки, включая верхнее.
-            for code, label in cfg.THINKING_LEVELS[provider]:
-                hist.set_setting(setting, code)
-                expect(f"сборка вопросов, {model}, кнопка «{label}»",
-                       sent_for(provider, model, True), full)
-            for code, want in CONTROL[provider].items():
-                hist.set_setting(setting, code)
-                expect(f"обычный ответ, {model}, кнопка «{code}»",
-                       sent_for(provider, model, None), want)
-    finally:
-        for name, value in saved.items():
-            setattr(g, name, value)
-        for name, value in saved_hist.items():
-            setattr(hist, name, value)
-        for key, value in saved_levels.items():
-            if value is MISSING:
-                hist.delete_setting(key)
-            else:
-                hist.set_setting(key, value)
-        hist.set_setting("active_model", saved_active)
-
-    return problems, (f"{done} проверок: сборка вопросов просит полную силу и получает "
-                      f"её у всех провайдеров при любом положении кнопки (DeepSeek — "
-                      f"«Высокая»); обычный ответ слушается кнопки")
-
-
 def check_pending_deletes():
     """
     Сообщение, поставленное на самоудаление, исчезает и после перезапуска бота
@@ -7515,6 +7331,152 @@ def check_pending_deletes():
                       f"«сообщения уже нет» — снимает")
 
 
+def check_quiz_queue():
+    """
+    Новый вопрос встаёт в очередь викторины правильно, а панель показывает,
+    по каким статьям вопросов ещё нет (04.10.2026, решения Максима).
+
+    ⚠️ Ради чего проверка существует.
+      • Очередь. Выбор идёт по «реже всего заданным», и вопрос с нулём показов
+        против двух у старых «догонял» их дважды: месяц новых, потом ещё месяц
+        тех же новых. Теперь при попадании в игру счётчик поднимается до
+        «самый малый минус один» (database/quiz.py::set_quiz_question_approved).
+        Тихо сломаться это может так: правило перестанут применять (снова
+        два круга), начнут ОПУСКАТЬ счётчик (вопрос, вернувшийся из
+        черновиков, пойдёт по второму кругу раньше всех) или уйдут в минус на
+        пустом банке.
+      • Список статей. Вместо удалённой машинной сборки — экран «📋 Статьи без
+        вопросов» и кнопка к нему. Экран обязан показывать ровно одобренные
+        статьи без вопросов, экранировать их названия (чужой текст) и
+        пропадать вместе с работой.
+    Всё на временной базе и во временной папке статей.
+    """
+    import shutil as _shutil
+    import tempfile as _tempfile
+
+    from database import history as hist
+    import services.knowledge_store as _ks
+    from handlers.admin import panel_quiz
+
+    problems = []
+    done = 0
+
+    def expect(title, ok):
+        nonlocal done
+        done += 1
+        if not ok:
+            problems.append(title)
+
+    def wipe_bank():
+        for q in hist.list_all_quiz_questions():
+            hist.delete_quiz_question(q["id"])
+
+    def add(article, text, shows=None, live=True):
+        qid = hist.add_quiz_question(article, text, ["раз", "два", "три", "четыре"], 0, "")
+        if live:
+            hist.set_quiz_question_approved(qid, True)
+        if shows is not None:
+            # ⚠️ Показы ставим ПРЯМО, а не через note_quiz_question_asked:
+            # само одобрение по проверяемому правилу уже поднимает счётчик, и
+            # показы легли бы сверху — подготовка врала бы, а не код.
+            with hist._lock:
+                conn = hist._get_connection()
+                conn.execute("UPDATE quiz_bank SET asked_count=? WHERE id=?", (shows, qid))
+                conn.commit()
+        return qid
+
+    def asked(qid):
+        return hist.get_quiz_question(qid)["asked_count"]
+
+    art_dir = _tempfile.mkdtemp(prefix="c4max-selftest-noq-")
+    saved_folders = dict(_ks._FOLDERS)
+    try:
+        wipe_bank()
+
+        # ── 1. Пустой банк: новому не на кого равняться — ноль, без минуса ──
+        first = add("очередь.md", "Первый в пустом банке?")
+        expect(f"в пустом банке новый вопрос получил счётчик {asked(first)} вместо 0",
+               asked(first) == 0)
+        wipe_bank()
+
+        # ── 2. Обычный случай: старые по 2–3 показа, новый идёт первым ОДИН раз ──
+        old_a = add("очередь.md", "Старый А?", shows=2)
+        old_b = add("очередь.md", "Старый Б?", shows=2)
+        old_c = add("очередь.md", "Старый В?", shows=3)
+        new = add("очередь.md", "Новый?", live=False)
+        expect(f"черновик не должен трогать очередь, а счётчик {asked(new)}", asked(new) == 0)
+        hist.set_quiz_question_approved(new, True)
+        expect(f"новый вопрос в игре получил счётчик {asked(new)}, а надо 1 — на единицу "
+               f"меньше самого малого (2): иначе он пойдёт по кругу дважды", asked(new) == 1)
+        pick = hist.get_random_quiz_question()
+        expect(f"следующим задан не новый вопрос, а «{pick and pick['question']}»",
+               pick and pick["id"] == new)
+        hist.note_quiz_question_asked(new)
+        picks = {hist.get_random_quiz_question()["asked_count"] for _ in range(20)}
+        expect(f"после первого показа новый обязан идти вперемешку со всеми (по 2 "
+               f"показа), а выбор берёт вопросы с показами {sorted(picks)}", picks == {2})
+
+        # ── 3. Вернули в черновики и снова одобрили — счётчик не опускается ──
+        hist.set_quiz_question_approved(old_c, False)
+        hist.set_quiz_question_approved(old_c, True)
+        expect(f"вопрос с 3 показами после возврата из черновиков получил {asked(old_c)}: "
+               f"опущенный счётчик пустит его по кругу раньше других", asked(old_c) == 3)
+
+        # ── 4. В игре есть ни разу не заданный — новый встаёт рядом с ним (0) ──
+        zero = add("очередь.md", "Ещё ни разу не заданный?", shows=0)
+        late = add("очередь.md", "Пришёл следом?")
+        expect(f"при вопросе с нулём показов в игре новый получил {asked(late)} вместо 0",
+               asked(late) == 0)
+        expect("старые вопросы не должны меняться от чужого одобрения",
+               (asked(old_a), asked(old_b)) == (2, 2))
+        wipe_bank()
+
+        # ── 5. Экран «📋 Статьи без вопросов» и кнопка в панели ──
+        _ks._FOLDERS["pending"] = os.path.join(art_dir, "pending")
+        _ks._FOLDERS["approved"] = os.path.join(art_dir, "approved")
+        os.makedirs(_ks._FOLDERS["pending"], exist_ok=True)
+        os.makedirs(_ks._FOLDERS["approved"], exist_ok=True)
+        for folder, fname, title in (("approved", "a1.md", "Первая статья"),
+                                     ("approved", "a2.md", "Т-80 <У>"),
+                                     ("pending", "p1.md", "Неодобренная статья")):
+            with open(os.path.join(_ks._FOLDERS[folder], fname), "w", encoding="utf-8") as f:
+                f.write(f"# {title}\n\nТекст статьи.\n")
+        add("a1.md", "Вопрос по первой статье?", live=False)
+
+        text, keyboard = panel_quiz._build_noq_screen()
+        expect("экран не показал статью без вопросов", "Т-80 &lt;У&gt;" in text)
+        expect("название статьи не экранировано — «<» сломает разметку экрана",
+               "<У>" not in text)
+        expect("экран показал статью, по которой вопрос уже есть (хоть и черновиком)",
+               "Первая статья" not in text)
+        expect("экран показал статью из неодобренных", "Неодобренная" not in text)
+        panel_text, panel_kb = panel_quiz._build_panel(None)
+        buttons = {b.callback_data: b.text for row in panel_kb.inline_keyboard for b in row}
+        expect(f"в панели нет кнопки списка со счётчиком 1: {buttons.get('quiz:noq')}",
+               buttons.get("quiz:noq") == "📋 Статьи без вопросов (1)")
+        expect("в панели осталась кнопка машинной сборки",
+               "quiz:gen" not in buttons and "quiz:retry" not in buttons)
+        expect("строка панели не зовёт написать вопросы по оставшимся статьям",
+               "Статей без вопросов: <code>1</code>" in panel_text)
+
+        add("a2.md", "Вопрос по второй статье?", live=False)
+        text, _kb = panel_quiz._build_noq_screen()
+        panel_text, panel_kb = panel_quiz._build_panel(None)
+        buttons = {b.callback_data for row in panel_kb.inline_keyboard for b in row}
+        expect("все статьи с вопросами, а кнопка списка не пропала", "quiz:noq" not in buttons)
+        expect("все статьи с вопросами, а экран не говорит об этом",
+               "вопросы уже есть" in text and "вопросы уже есть" in panel_text)
+    finally:
+        _ks._FOLDERS.update(saved_folders)
+        _shutil.rmtree(art_dir, ignore_errors=True)
+        wipe_bank()
+
+    return problems, (f"{done} проверок: новый вопрос звучит первым один раз и идёт "
+                      f"вперемешку, возврат из черновиков не опускает счётчик, пустой "
+                      f"банк без минуса; список статей без вопросов — ровно нужные, "
+                      f"с экранированием, кнопка пропадает вместе с работой")
+
+
 CHECKS = (
     ("деньги — расчёт стоимости запросов", check_money),
     ("квота Qwen — оборванный ответ, срок и письма", check_qwen_quota),
@@ -7561,8 +7523,8 @@ CHECKS = (
     ("задание разборщику вложений доезжает до модели", check_media_task),
     ("«Сам в разговор»: кому файл, а кому стенограмма", check_proactive_media_route),
     ("разбор вложения остаётся в памяти бота", check_media_memory),
-    ("сборка вопросов думает в полную силу", check_quiz_thinking),
     ("самоудаление переживает перезапуск бота", check_pending_deletes),
+    ("новый вопрос викторины встаёт в очередь правильно", check_quiz_queue),
 )
 
 

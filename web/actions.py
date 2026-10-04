@@ -520,46 +520,6 @@ def kb_test_search(text: str) -> dict:
 
 # ─── викторина ──────────────────────────────────────────────────────
 
-QUIZ_GEN_LATCH = "quiz_gen_running"
-
-
-def quiz_generate(actor_id: int, application, retry: bool = False) -> str:
-    """
-    Сборка вопросов по статьям, фоном. retry=True — только те статьи, на
-    которых сборка раньше сорвалась.
-
-    ⚠️ Защёлка ОБЩАЯ с кнопкой в боте: два прогона разом дали бы вопросы-дубли.
-    """
-    from . import longjobs
-    from services import quiz_bank
-
-    kb = quiz_bank.stats()
-    todo = kb["failed"] if retry else kb["articles_left"]
-    if not todo:
-        return ("✅ Список неудачных пуст — повторять нечего." if retry else
-                "✅ По всем статьям вопросы уже собраны.")
-
-    def describe(result):
-        if result is None:
-            return "⚠️ Сборка сорвалась. Подробности в логе бота."
-        # ⚠️ КЛЮЧ ИМЕННО «saved» (services/quiz_bank.py::_run_over). С «added»
-        # и страница, и журнал бодро сообщали «вопросов добавлено 0» после
-        # удачной сборки сорока вопросов — ничего не падало, просто цифра была
-        # ложью. Тот же класс ошибки, что «correct» вместо «correct_idx».
-        # В журнал пишем ПОСЛЕ завершения и тем же кодом, что у кнопки в боте.
-        _staff_audit(actor_id, "quiz_retry" if retry else "quiz_generate", 0,
-                     f"статей {result.get('articles', 0)}, "
-                     f"вопросов {result.get('saved', 0)}")
-        return (f"✅ Готово: статей {result.get('articles', 0)}, "
-                f"вопросов добавлено {result.get('saved', 0)}, "
-                f"не вышло {result.get('failed', 0)}.")
-
-    logger.info("🌐 Сайт: запущена %s вопросов (статей %d, админ %s)",
-                "ПОВТОРНАЯ сборка" if retry else "сборка", todo, actor_id)
-    work = quiz_bank.retry_failed if retry else quiz_bank.generate_batch
-    return longjobs.start(application, QUIZ_GEN_LATCH, work, describe)
-
-
 def quiz_approve(actor_id: int, qid: int) -> None:
     """Одобрение вопроса: черновик уходит в игру."""
     from database.history import get_quiz_question, set_quiz_question_approved
@@ -578,15 +538,6 @@ def quiz_delete(actor_id: int, qid: int) -> None:
     delete_quiz_question(qid)
     _staff_audit(actor_id, "quiz_delete", 0, f"вопрос #{qid}")
     logger.info("🌐 Сайт: удалён вопрос викторины №%s (админ %s)", qid, actor_id)
-
-
-def quiz_forget_fails(actor_id: int) -> int:
-    """Забыть список статей, на которых сборка срывалась."""
-    from database.history import clear_quiz_failures
-    removed = clear_quiz_failures()
-    _staff_audit(actor_id, "quiz_forget_fails", 0, f"забыто статей: {removed}")
-    logger.info("🌐 Сайт: забыты неудачные статьи (%d, админ %s)", removed, actor_id)
-    return removed
 
 
 def quiz_seed(actor_id: int) -> dict:

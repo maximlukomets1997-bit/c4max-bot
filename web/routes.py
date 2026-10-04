@@ -572,12 +572,8 @@ def _run_quiz_action(actor_id: int, do: str, form, application) -> str:
     if do == "auto":
         on = actions.quiz_auto_toggle(actor_id)
         return f'🕛 Вопрос дня {"включён" if on else "выключен"}.'
-    if do == "gen":
-        return actions.quiz_generate(actor_id, application)
-    if do == "retry":
-        return actions.quiz_generate(actor_id, application, retry=True)
-    if do == "forget":
-        return f"🗑 Список неудачных очищен: {actions.quiz_forget_fails(actor_id)}."
+    # «gen», «retry» и «forget» (машинная сборка вопросов и список её неудач)
+    # удалены 04.10.2026 вместе со сборкой — вопросы пишет Claude.
     if do == "seed":
         result = actions.quiz_seed(actor_id)
         return (f'📥 Загружено в черновики: {result.get("added", 0)}, '

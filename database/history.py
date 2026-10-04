@@ -101,9 +101,7 @@ from .quiz import (add_quiz_attempt, get_user_stats, set_quiz_stats, _row_to_que
                    get_quiz_articles_covered, list_quiz_questions,
                    list_all_quiz_questions, get_quiz_question,
                    update_quiz_question_body, set_quiz_question_approved,
-                   delete_quiz_question, note_quiz_failure, clear_quiz_failure,
-                   list_quiz_failures, count_quiz_failures, clear_quiz_failures,
-                   delete_quiz_drafts, reset_all_quiz_stats,
+                   delete_quiz_question, delete_quiz_drafts, reset_all_quiz_stats,
                    delete_all_quiz_questions, get_all_quiz_stats)
 
 # ─── журнал наказаний и улики ───────────────────────────────────────

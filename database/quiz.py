@@ -4,13 +4,14 @@
 #  Последний, одиннадцатый шаг разреза history.py. После него сам history.py
 #  перестал быть файлом с кодом и стал ОГЛАВЛЕНИЕМ пакета.
 #
-#  Три таблицы:
+#  Две таблицы:
 #    quiz_bank   — сам банк: вопрос, варианты, верный ответ, разбор, статья,
-#                  из которой он собран, и статус «в игре / черновик»
-#    quiz_failed — статьи, на которых сборка вопросов сорвалась (чтобы не
-#                  долбиться в них снова и показывать список в панели)
+#                  по которой он написан, и статус «в игре / черновик»
 #    quiz_stats  — счёт игроков: сколько верных ответов, сколько попыток;
 #                  из него же считается ЗВАНИЕ (config.QUIZ_RANKS)
+#  Третья, quiz_failed (статьи, где не далась машинная сборка вопросов),
+#  удалена 04.10.2026 вместе с самой сборкой: вопросы пишет Claude по статьям
+#  и привозит файлом quiz/questions.json.
 #
 #  ⚠️ ВАРИАНТЫ ОТВЕТА ХРАНЯТСЯ СТРОКОЙ JSON — sqlite списков не умеет. Разбор
 #  и сборка спрятаны здесь (`_row_to_question`, `add_quiz_question`), наружу
@@ -28,7 +29,7 @@
 #
 #  Кто это читает:
 #    handlers/quiz.py        — сама игра, звания, /rank
-#    services/quiz_bank.py   — сборка вопросов моделью по статьям базы знаний
+#    services/quiz_bank.py   — файл вопросов: загрузка в банк и сверка с ним
 #    handlers/admin/panel_quiz.py, web/* — панель викторины и страница сайта
 #    services/group_digest.py — счёт за неделю для дайджеста
 # ───────────────────────────────────────────────
@@ -289,9 +290,10 @@ def get_quiz_bank_counts() -> dict:
 
 def get_quiz_articles_covered() -> set:
     """
-    Имена файлов статей, по которым вопросы уже собирали (в любом виде —
-    и одобренные, и черновики, и отклонённые остатки). Нужно кнопке сборки,
-    чтобы догонять ТОЛЬКО новые статьи, а не платить за базу заново.
+    Имена файлов статей, по которым вопросы уже есть (в любом виде — и
+    одобренные, и черновики). Отсюда экран «📋 Статьи без вопросов» и счётчик
+    в панели викторины (до 04.10.2026 — ещё и машинная сборка, догонявшая
+    только новые статьи).
     """
     with _lock:
         conn = _get_connection()
@@ -361,11 +363,32 @@ def update_quiz_question_body(qid: int, options: list, correct_idx: int,
 
 
 def set_quiz_question_approved(qid: int, approved: bool) -> None:
-    """Отправляет вопрос в игру (True) или возвращает в черновики (False)."""
+    """
+    Отправляет вопрос в игру (True) или возвращает в черновики (False).
+
+    ⚠️ ВОПРОС, ПОПАДАЮЩИЙ В ИГРУ, ВСТАЁТ В ОЧЕРЕДЬ ПЕРВЫМ — НО ОДИН РАЗ
+    (04.10.2026, решение Максима). Выбор идёт по «реже всего заданным»
+    (get_random_quiz_question), и новый вопрос с нулём показов против двух у
+    старых «догонял» их дважды: месяц новых, потом ещё месяц тех же новых.
+    Поэтому счётчик поднимается до «на единицу меньше самого малого среди
+    вопросов в игре»: новый звучит раньше всех, а после первого показа идёт
+    вперемешку со всеми. Поднимается, но НЕ опускается — вопрос, который
+    вернули в черновики и снова одобрили, не пойдёт по второму кругу раньше
+    других. Здесь, а не в кнопках: в игру ведут три пути (кнопка бота, сайт,
+    загрузка файла сразу в игру), и правило обязано быть одно на всех.
+    """
     with _lock:
         conn = _get_connection()
-        conn.execute("UPDATE quiz_bank SET approved=? WHERE id=?",
-                     (1 if approved else 0, qid))
+        if approved:
+            row = conn.execute(
+                "SELECT MIN(asked_count) FROM quiz_bank WHERE approved=1 AND id<>?",
+                (qid,),
+            ).fetchone()
+            floor = max(0, row[0] - 1) if row and row[0] is not None else 0
+            conn.execute("UPDATE quiz_bank SET approved=1, asked_count=MAX(asked_count, ?) "
+                         "WHERE id=?", (floor, qid))
+        else:
+            conn.execute("UPDATE quiz_bank SET approved=0 WHERE id=?", (qid,))
         conn.commit()
 
 
@@ -375,62 +398,6 @@ def delete_quiz_question(qid: int) -> None:
         conn = _get_connection()
         conn.execute("DELETE FROM quiz_bank WHERE id=?", (qid,))
         conn.commit()
-
-
-def note_quiz_failure(article: str, reason: str) -> None:
-    """
-    Отмечает, что по статье собрать вопросы не вышло. Повторная неудача не
-    заводит вторую строку, а растит счётчик попыток и обновляет причину:
-    список неудач — это очередь на повтор, а не журнал (для журнала есть лог).
-    """
-    with _lock:
-        conn = _get_connection()
-        conn.execute(
-            """INSERT INTO quiz_failed (article, ts, reason, attempts)
-               VALUES (?, ?, ?, 1)
-               ON CONFLICT(article)
-               DO UPDATE SET ts = excluded.ts,
-                             reason = excluded.reason,
-                             attempts = attempts + 1""",
-            (article, time.time(), reason),
-        )
-        conn.commit()
-
-
-def clear_quiz_failure(article: str) -> None:
-    """Снимает статью с учёта неудач (по ней наконец собрались вопросы)."""
-    with _lock:
-        conn = _get_connection()
-        conn.execute("DELETE FROM quiz_failed WHERE article=?", (article,))
-        conn.commit()
-
-
-def list_quiz_failures(limit: int = 50) -> list[dict]:
-    """Статьи, по которым сборка не далась: свежие сверху (для экрана панели)."""
-    with _lock:
-        conn = _get_connection()
-        rows = conn.execute(
-            "SELECT * FROM quiz_failed ORDER BY ts DESC LIMIT ?", (limit,)
-        ).fetchall()
-    return [{"article": r["article"], "ts": r["ts"], "reason": r["reason"] or "",
-             "attempts": r["attempts"]} for r in rows]
-
-
-def count_quiz_failures() -> int:
-    """Сколько статей ждёт повторной попытки (число на кнопке панели)."""
-    with _lock:
-        conn = _get_connection()
-        row = conn.execute("SELECT COUNT(*) AS n FROM quiz_failed").fetchone()
-    return row["n"] or 0
-
-
-def clear_quiz_failures() -> int:
-    """Забыть весь список неудач разом (кнопка «🗑 Забыть список»)."""
-    with _lock:
-        conn = _get_connection()
-        cur = conn.execute("DELETE FROM quiz_failed")
-        conn.commit()
-        return cur.rowcount or 0
 
 
 def delete_quiz_drafts() -> int:
@@ -471,16 +438,10 @@ def delete_all_quiz_questions() -> int:
     """
     Стирает ВЕСЬ банк вопросов — и черновики, и те, что уже в игре
     (кнопка «🗑 Стереть ВСЕ вопросы», 2026-08-05, решение Максима).
-
-    ⚠️ Заодно чистится очередь неудачных статей: после полной очистки банка
-    пуст и он, и разговор о том, по каким статьям «не вышло», начинается
-    заново — иначе в панели висело бы «⚠️ Не разобрались: N» про вопросы,
-    которых больше нет.
     """
     with _lock:
         conn = _get_connection()
         cur = conn.execute("DELETE FROM quiz_bank")
-        conn.execute("DELETE FROM quiz_failed")
         conn.commit()
         return cur.rowcount or 0
 

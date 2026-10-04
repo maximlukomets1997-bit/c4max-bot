@@ -1,14 +1,17 @@
 """
 handlers/admin/panel_quiz.py — 🎮 панель викторины (2026-08-05, решение Максима)
 
-Вопросы викторины больше НЕ лежат в коде: их собирает по статьям базы знаний
-кнопка «🧠 Собрать вопросы» (services/quiz_bank.py), хранит таблица quiz_bank,
-а в игру идут ТОЛЬКО одобренные здесь.
+Вопросы викторины НЕ лежат в коде: их пишет Claude по статьям базы знаний и
+привозит файлом quiz/questions.json, кнопка «📥 Мои вопросы в черновики»
+переносит их в таблицу quiz_bank, а в игру идут ТОЛЬКО одобренные здесь.
+Машинная сборка (кнопка «🧠 Собрать вопросы», повтор неудачных, экран «⚠️ Что
+не вышло») удалена 04.10.2026, решение Максима. Вместо неё — экран
+«📋 Статьи без вопросов»: по каким статьям ещё нечего спросить.
 
-⚠️ ОДОБРЕНИЕ РУЧНОЕ И ЭТО ГЛАВНОЕ В ПАНЕЛИ (решение Максима): собранный вопрос
+⚠️ ОДОБРЕНИЕ РУЧНОЕ И ЭТО ГЛАВНОЕ В ПАНЕЛИ (решение Максима): новый вопрос
 ложится ЧЕРНОВИКОМ и людям не показывается, пока владелец не нажмёт «✅ В игру».
-Модель регулярно ошибается в цифрах ТТХ, а вопрос с неверным ответом бьёт по
-доверию ко всему боту — тем более что бот же его и «объясняет».
+Вопрос с неверным ответом бьёт по доверию ко всему боту — тем более что бот же
+его и «объясняет».
 
 Панель открывается двумя путями (как /rag и /mod): командой /quizadm и кнопкой
 «🎮 Настройки Викторины» в /adm (⚠️ НЕ путать с публичной кнопкой «🎮 Викторина»
@@ -23,14 +26,12 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 from database.history import (
-    clear_quiz_failures,
     get_all_quiz_stats,
     delete_all_quiz_questions,
     delete_quiz_drafts,
     delete_quiz_question,
     get_quiz_bank_counts,
     get_quiz_question,
-    list_quiz_failures,
     list_quiz_questions,
     reset_all_quiz_stats,
     set_quiz_question_approved,
@@ -47,14 +48,10 @@ _ICON = "🎮"
 # Разделитель панелей — 27 символов, единый стандарт всех панелей бота.
 _LINE = "───────────────────────────"
 
-
-def _gen_running(context) -> bool:
-    """
-    Идёт ли сейчас сборка вопросов. Защёлка в bot_data (не в модуле): тот же
-    приём, что у пересборки базы знаний — второй запуск в параллель заплатил бы
-    за те же статьи дважды.
-    """
-    return bool(context.application.bot_data.get("quiz_gen_running"))
+# Сколько названий показывает экран «📋 Статьи без вопросов». Больше — строка
+# «…и ещё N»: 60 названий по ~40 знаков укладываются в лимит Telegram
+# (4096) с запасом, а длиннее список читать в чате всё равно никто не станет.
+_NOQ_SHOW = 60
 
 
 async def _popup(query, context, chat_id: int, text: str):
@@ -137,20 +134,11 @@ def _build_panel(context):
     kb = quiz_bank.stats()
     players = len(get_all_quiz_stats())
 
-    if _gen_running(context):
-        status = "⏳ Идёт сборка вопросов — итог придёт сообщением."
-    elif kb["articles_left"]:
-        status = f"📥 Статей без вопросов: <code>{kb['articles_left']}</code> — есть что собрать."
+    if kb["articles_left"]:
+        status = (f"📥 Статей без вопросов: <code>{kb['articles_left']}</code> — "
+                  f"попроси Claude написать по ним вопросы.")
     else:
-        status = "✅ По всем статьям базы знаний вопросы уже собраны."
-
-    # Статьи, на которых сборка споткнулась, держим на виду отдельной строкой:
-    # они входят и в «без вопросов», но там теряются среди ещё не тронутых, а
-    # человек ждёт именно их (просьба Максима 2026-08-05 — после захода, где
-    # 11 статей из 40 остались без результата).
-    failed_line = ""
-    if kb["failed"]:
-        failed_line = f"⚠️ Не разобрались: <code>{kb['failed']}</code>\n"
+        status = "✅ По всем статьям базы знаний вопросы уже есть."
 
     # 📄 Сверка эталонного файла с банком (2026-09-01, решение Максима).
     # ⚠️ Ради чего строка существует. Кнопка загрузки пропускает вопрос,
@@ -184,8 +172,9 @@ def _build_panel(context):
     text = (
         f"{_ICON} <b>ВИКТОРИНА</b>\n"
         f"{_LINE}\n"
-        f"Вопросы собираются по статьям базы знаний. В игру идут только "
-        f"одобренные — люди не увидят того, что ты не посмотрел.\n"
+        f"Вопросы пишет Claude по статьям базы знаний и привозит с "
+        f"обновлением. В игру идут только одобренные — люди не увидят того, "
+        f"что ты не посмотрел.\n"
         f"{_LINE}\n"
         f"✅ В игре: <code>{counts['approved']}</code>\n"
         f"📝 Черновиков: <code>{counts['drafts']}</code>\n"
@@ -193,7 +182,6 @@ def _build_panel(context):
         f"{seed_line}"
         f"🎖 Игроков со статистикой: <code>{players}</code>\n"
         f"{auto_line}"
-        f"{failed_line}"
         f"{_LINE}\n"
         f"{status}"
     )
@@ -204,16 +192,17 @@ def _build_panel(context):
         # врать — те же грабли, что с именем модели в логе.
         [InlineKeyboardButton(f"🕛 ВОПРОС ДНЯ {quiz_daily.hours_label()}: {_onoff(auto_on)}",
                               callback_data="quiz:auto")],
-        [InlineKeyboardButton("🧠 Собрать вопросы", callback_data="quiz:gen")],
         [
             InlineKeyboardButton(f"📝 Черновики ({counts['drafts']})", callback_data="quiz:list:draft"),
             InlineKeyboardButton(f"✅ В игре ({counts['approved']})", callback_data="quiz:list:live"),
         ],
     ]
-    if kb["failed"]:
-        rows.append([InlineKeyboardButton(f"🔁 Повторить неудачные ({kb['failed']})",
-                                          callback_data="quiz:retry")])
-        rows.append([InlineKeyboardButton("⚠️ Что не вышло", callback_data="quiz:fails")])
+    # 📋 Список статей без вопросов (04.10.2026, решение Максима) — вместо
+    # удалённой машинной сборки. Только когда такие статьи есть: кнопка с
+    # пустым списком за ней врала бы, что работа ждёт.
+    if kb["articles_left"]:
+        rows.append([InlineKeyboardButton(f"📋 Статьи без вопросов ({kb['articles_left']})",
+                                          callback_data="quiz:noq")])
     if counts["drafts"]:
         rows.append([InlineKeyboardButton("🗑 Очистить черновики", callback_data="quiz:wipe")])
 
@@ -257,7 +246,7 @@ async def cmd_quiz_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /quizadm — панель викторины (владелец).
 
-    ⚠️ Здесь только сборка и одобрение вопросов; саму игру в чате запускает
+    ⚠️ Здесь только загрузка и одобрение вопросов; саму игру в чате запускает
     кнопка «🎮 Викторина» (`quiz_start`). Прежняя оговорка «не путать с /quiz»
     снята 28.08.2026: той команды больше нет, она была написана, но никогда
     не регистрировалась. Как все панельные команды, работает лишь в личке —
@@ -280,8 +269,8 @@ async def _show_card(bot, chat_id: int, context, mode: str, qid: int | None):
     if not questions:
         text = (f"{_ICON} <b>{'ВОПРОСЫ В ИГРЕ' if mode == 'live' else 'ЧЕРНОВИКИ'}</b>\n"
                 f"{_LINE}\n"
-                + ("Пока пусто. Нажми «🧠 Собрать вопросы» — бот сделает их по "
-                   "статьям базы знаний." if mode == "draft"
+                + ("Пока пусто. Новые вопросы приезжают с обновлением — их "
+                   "приносит кнопка «📥 Мои вопросы в черновики»." if mode == "draft"
                    else "В игре пока нет ни одного вопроса. Одобри черновики — "
                         "и викторина оживёт."))
         await _send_panel_message(bot, chat_id, text,
@@ -295,40 +284,34 @@ async def _show_card(bot, chat_id: int, context, mode: str, qid: int | None):
                               _card_keyboard(target, ids, mode))
 
 
-async def _show_failures(bot, chat_id: int, context):
+def _build_noq_screen():
     """
-    Экран «⚠️ Что не вышло»: статьи, на которых сборка споткнулась, с причиной
-    и числом попыток. Нужен, чтобы отличать «модель молчала, стоит повторить»
-    от «статья такая, повторяй сколько угодно» — по одной цифре в шапке этого
-    не понять, а вслепую жать повтор значит платить за те же запросы.
+    Экран «📋 Статьи без вопросов» (04.10.2026, решение Максима): одобренные
+    статьи базы знаний, по которым в банке нет ни одного вопроса. Вопросы по
+    ним пишет Claude — экран говорит, когда и о чём его просить. Названия
+    берутся из шапок статей (knowledge_store.list_articles), а это чужой
+    текст: экранируем.
+
+    Возвращает (текст, клавиатура) — отдельно от отправки, чтобы preflight
+    собирал экран и мерил его по лимитам Telegram, как остальные панели.
     """
-    rows = list_quiz_failures()
-    if not rows:
-        text = (f"{_ICON} <b>ЧТО НЕ ВЫШЛО</b>\n{_LINE}\n"
-                f"Пусто — все статьи разобрались.")
-        await _send_panel_message(bot, chat_id, text, InlineKeyboardMarkup(
-            [[InlineKeyboardButton("⬅️ К викторине", callback_data="quiz:panel")]]))
-        return
-
-    lines = [f"{_ICON} <b>ЧТО НЕ ВЫШЛО</b>", _LINE,
-             f"Статей ждёт повтора: <code>{len(rows)}</code>", ""]
-    for row in rows[:30]:
-        again = f" · попыток {row['attempts']}" if row["attempts"] > 1 else ""
-        lines.append(f"• <code>{html.escape(row['article'])}</code>\n"
-                     f"  <i>{html.escape(row['reason'])}{again}</i>")
-    if len(rows) > 30:
-        lines.append(f"…и ещё {len(rows) - 30}")
-    lines += [_LINE,
-              "«🔁 Повторить неудачные» пройдёт ровно по этому списку. Статья, "
-              "не дающаяся третий раз, скорее всего не даётся из-за себя самой — "
-              "проще забыть её и не платить за новые попытки."]
-
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"🔁 Повторить неудачные ({len(rows)})", callback_data="quiz:retry")],
-        [InlineKeyboardButton("🗑 Забыть список", callback_data="quiz:forget_fails")],
-        [InlineKeyboardButton("⬅️ К викторине", callback_data="quiz:panel")],
-    ])
-    await _send_panel_message(bot, chat_id, "\n".join(lines), keyboard)
+    from services import quiz_bank
+    left = quiz_bank.articles_without_questions()
+    lines = [f"{_ICON} <b>СТАТЬИ БЕЗ ВОПРОСОВ</b>", _LINE]
+    if not left:
+        lines.append("По всем статьям базы знаний вопросы уже есть.")
+    else:
+        lines += [f"Статей: <code>{len(left)}</code>. Попроси Claude написать по ним "
+                  f"вопросы — они приедут с обновлением, а в черновики их принесёт "
+                  f"кнопка «📥 Мои вопросы в черновики».", ""]
+        for article in left[:_NOQ_SHOW]:
+            name = article.get("title") or article["fname"]
+            lines.append(f"• {html.escape(name)}")
+        if len(left) > _NOQ_SHOW:
+            lines.append(f"…и ещё {len(left) - _NOQ_SHOW}")
+    keyboard = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("⬅️ К викторине", callback_data="quiz:panel")]])
+    return "\n".join(lines), keyboard
 
 
 async def _handle_quiz_callback(query, context, data: str, chat_id: int, user_id: int):
@@ -339,10 +322,7 @@ async def _handle_quiz_callback(query, context, data: str, chat_id: int, user_id
 
       quiz:panel              — главный экран панели
       quiz:auto               — тумблер «🕛 Вопрос дня»
-      quiz:gen                — собрать вопросы по новым статьям (фоном)
-      quiz:retry              — повторить РОВНО те статьи, что не дались
-      quiz:fails              — список неудачных статей с причинами
-      quiz:forget_fails       — забыть этот список
+      quiz:noq                — список статей, по которым вопросов ещё нет
       quiz:list:<draft|live>  — открыть первый вопрос списка
       quiz:card:<режим>:<id>  — конкретный вопрос (листание)
       quiz:ok:<id>            — одобрить: вопрос уходит в игру
@@ -384,25 +364,10 @@ async def _handle_quiz_callback(query, context, data: str, chat_id: int, user_id
         await send_quiz_panel(context.bot, chat_id, context)
         return
 
-    if action == "gen":
-        await _start_generation(query, context, chat_id, user_id)
-        return
-
-    if action == "retry":
-        await _start_generation(query, context, chat_id, user_id, retry=True)
-        return
-
-    if action == "fails":
+    if action == "noq":
         await query.answer()
-        await _show_failures(context.bot, chat_id, context)
-        return
-
-    if action == "forget_fails":
-        removed = clear_quiz_failures()
-        _audit(user_id, "quiz_forget_fails", 0, f"забыто статей: {removed}")
-        logger.info("🎮 Админ %s очистил список неудачных статей (%d шт.)", user_id, removed)
-        await query.answer(f"🗑 Список очищен: {removed}")
-        await send_quiz_panel(context.bot, chat_id, context)
+        text, keyboard = _build_noq_screen()
+        await _send_panel_message(context.bot, chat_id, text, keyboard)
         return
 
     if action == "list":
@@ -563,82 +528,3 @@ async def _handle_quiz_callback(query, context, data: str, chat_id: int, user_id
         return
 
     await query.answer("⚠️ Неизвестная кнопка викторины.")
-
-
-async def _start_generation(query, context, chat_id: int, user_id: int, retry: bool = False):
-    """
-    Запуск сборки вопросов. Обе кнопки ходят сюда — отличает их только `retry`:
-      retry=False — «🧠 Собрать вопросы»: статьи, у которых вопросов ещё нет;
-      retry=True  — «🔁 Повторить неудачные»: РОВНО те, что записаны в
-                    `quiz_failed` (2026-08-05, просьба Максима).
-    Один запуск на двоих намеренно: у них общая защёлка, общий отчёт и общий
-    порядок действий, а две почти одинаковые копии разъехались бы при первой
-    же правке.
-
-    ⚠️ ФОНОВОЙ ЗАДАЧЕЙ, а не прямо в обработчике: на десяток статей уходят
-    минуты работы модели, а у ответа на нажатие кнопки лимит Telegram ~15 сек.
-    Тот же приём, что у пересборки базы знаний в /rag: защёлка в bot_data,
-    итог отдельным сообщением, панель перерисовывается в конце.
-    """
-    import asyncio
-    from services import quiz_bank
-
-    if _gen_running(context):
-        await _popup(query, context, chat_id, "⏳ Сборка уже идёт — дождитесь итога.")
-        return
-
-    kb = quiz_bank.stats()
-    todo = kb["failed"] if retry else kb["articles_left"]
-    if not todo:
-        await _popup(query, context, chat_id,
-                     "✅ Список неудачных пуст — повторять нечего."
-                     if retry else
-                     "✅ По всем статьям базы знаний вопросы уже собраны. "
-                     "Новые появятся, когда добавишь статьи.")
-        return
-
-    logger.info("🎮 Админ %s запустил %s викторины (статей в работе: %d)",
-                user_id, "ПОВТОР неудачных" if retry else "сборку вопросов", todo)
-    bot = context.bot
-
-    async def _generate_and_report():
-        result = None
-        try:
-            result = await asyncio.get_running_loop().run_in_executor(
-                None, quiz_bank.retry_failed if retry else quiz_bank.generate_batch)
-        except Exception as e:
-            logger.error("⚠️ Сборка вопросов викторины упала: %s", e)
-        finally:
-            context.application.bot_data["quiz_gen_running"] = False
-
-        if result is None:
-            text = "⚠️ Не удалось собрать вопросы — детали в логе."
-        elif not result["saved"]:
-            text = (f"⚠️ Из {result['articles']} статей не вышло ни одного вопроса. "
-                    f"Похоже, модель недоступна — попробуй позже.")
-        else:
-            _audit(user_id, "quiz_retry" if retry else "quiz_generate", 0,
-                   f"статей {result['articles']}, вопросов {result['saved']}")
-            text = (f"{'🔁 Повтор' if retry else '🧠 Сборка'}: вопросов собрано "
-                    f"{result['saved']} (статей обработано: {result['articles']}).\n"
-                    f"Они лежат в черновиках — посмотри и одобри те, что годятся.")
-            if result["failed"]:
-                text += (f"\n⚠️ Статей без результата: {result['failed']} — "
-                         f"они в списке «⚠️ Что не вышло», с причинами.")
-            if result["left"]:
-                text += f"\n📥 Осталось статей на следующее нажатие: {result['left']}."
-        if result and result.get("gone"):
-            text += f"\n🗑 Снято с учёта статей, которых больше нет в базе: {result['gone']}."
-        try:
-            msg = await bot.send_message(chat_id=chat_id, text=text)
-            if msg:
-                schedule_delete(bot, chat_id, msg.message_id, 120)
-        except Exception as e:
-            logger.warning("⚠️ Не удалось отправить итог сборки вопросов: %s", e)
-        await send_quiz_panel(bot, chat_id, context)
-
-    context.application.bot_data["quiz_gen_running"] = True
-    context.application.create_task(_generate_and_report())
-    await _popup(query, context, chat_id,
-                 ("🔁 Повтор запущен в фоне" if retry else "⏳ Сборка запущена в фоне") +
-                 " — итог придёт отдельным сообщением. Бот продолжает работать как обычно.")

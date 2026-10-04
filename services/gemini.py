@@ -313,38 +313,13 @@ def thinking_level(provider: str) -> str:
     return value if value in codes else default
 
 
-#  ⚠️ «ДУМАЙ В ПОЛНУЮ СИЛУ» МИМО КНОПКИ — это thinking_override=True
-#  (01.10.2026, решение Максима: сборка вопросов викторины всегда думает в
-#  полную силу, что бы ни стояло на кнопках). До этого дня True перебивал
-#  только «Выкл», а «Коротко» и «Средне» доходили до сборки — так решение
-#  от 05.08.2026 молча сломалось 29.08, вместе с появлением кнопок.
-#  Верх шкалы у всех, КРОМЕ DeepSeek: у неё «Высокая», а не «Максимум» (тоже
-#  решение Максима). «Максимум» думает втрое дольше, а у потоковых ответов
-#  общий предел GEMINI_STREAM_DEADLINE — статья, не уложившаяся в него,
-#  ушла бы к запасной модели. Сверяет selftest::check_quiz_thinking.
-_FULL_THINKING = {
-    "gemini": "high",     # «Полно»
-    "qwen": "high",       # «Полно» — без потолка: QWEN_THINKING_BUDGET его не знает
-    "deepseek": "high",   # «Высокая», НЕ «Максимум»
-    "xiaomi": "on",       # «Думает» — ступеней у MiMo нет
-}
+#  ⚠️ РЫЧАГА «МИМО КНОПКИ» БОЛЬШЕ НЕТ (04.10.2026). Параметр thinking_override
+#  и таблица _FULL_THINKING («думай в полную силу») жили ради одной машинной
+#  сборки вопросов викторины; её удалили (вопросы пишет Claude), и глубину
+#  раздумий у всех ответов теперь задаёт только кнопка — thinking_level выше.
 
 
-def _level_for(provider: str, override: bool | None) -> str:
-    """
-    Ступень раздумий для запроса к провайдеру — в кодах config.THINKING_LEVELS.
-    override=None — та, что на кнопке (thinking_level); False — «off»;
-    True — «в полную силу» из _FULL_THINKING, кнопка её не трогает.
-    Провайдера в _FULL_THINKING нет (новый, ещё не вписан) — слушаемся кнопки.
-    """
-    if override is False:
-        return "off"
-    if override is True and provider in _FULL_THINKING:
-        return _FULL_THINKING[provider]
-    return thinking_level(provider)
-
-
-def _gemini_answer_level(model_name: str, override: bool | None = None) -> str:
+def _gemini_answer_level(model_name: str) -> str:
     """
     Уровень мышления Gemini для ОТВЕТА бота — в терминах самого Google
     ("minimal" / "low" / "medium" / "high").
@@ -359,33 +334,24 @@ def _gemini_answer_level(model_name: str, override: bool | None = None) -> str:
     поднимается до ближайшего сверху. Кому подмена полагается, решает пометка
     `minimal_thinking` в config.AVAILABLE_MODELS — тот же механизм, что у
     разбора вложений (_media_level_for).
-
-    override — рычаг мимо кнопки: False — не думать, True — в полную силу
-    (_FULL_THINKING, см. _level_for).
     """
-    code = _level_for("gemini", override)
+    code = thinking_level("gemini")
     level = "minimal" if code == "off" else code
     if level == "minimal" and not _supports_minimal_thinking(model_name):
         return _MEDIA_FALLBACK_THINKING_LEVEL
     return level
 
 
-def _is_thinking(model_name: str, override: bool | None = None) -> bool:
+def _is_thinking(model_name: str) -> bool:
     """
-    True, если модель должна отдавать цепочку рассуждений.
+    True, если модель должна отдавать цепочку рассуждений: смотрим на модель
+    и на кнопку глубины её провайдера.
+    ⚠️ У моделей с native_thinking кнопка не помогает — они шлют <thought> сами.
 
-    override=None — смотрим на модель и на кнопку глубины её провайдера.
-    override=False — размышления ПРИНУДИТЕЛЬНО выключены (рычаг мимо кнопки).
-    override=True — включены в полную силу, ступень из _FULL_THINKING.
-    ⚠️ У моделей с native_thinking параметр не помогает — они шлют
-    <thought> сами.
-
-    ⚠️ С 29.08.2026 учитывает КНОПКУ: положение «Выкл» гасит размышления так
-    же, как это делал override=False. Модель, которая думать не умеет вовсе
-    (поля "thinking" нет), кнопкой не включается — сначала спрашиваем её.
+    ⚠️ С 29.08.2026 учитывает КНОПКУ: положение «Выкл» гасит размышления.
+    Модель, которая думать не умеет вовсе (поля "thinking" нет), кнопкой не
+    включается — сначала спрашиваем её.
     """
-    if override is not None:
-        return _level_for(_provider_of(model_name), override) != "off"
     if not AVAILABLE_MODELS.get(model_name, {}).get("thinking", False):
         return False
     return thinking_level(_provider_of(model_name)) != "off"
@@ -1297,7 +1263,7 @@ def _openai_stream_request(model_name: str, messages: list, api_url: str,
     return {"choices": [{"message": {"content": content}}], "usage": usage}
 
 
-def _qwen_chat_request(model_name: str, messages: list, thinking_override: bool | None = None):
+def _qwen_chat_request(model_name: str, messages: list):
     """Запрос к Qwen (Alibaba Cloud Model Studio).
     enable_thinking — нестандартный параметр Qwen: включает цепочку рассуждений.
 
@@ -1308,10 +1274,10 @@ def _qwen_chat_request(model_name: str, messages: list, thinking_override: bool 
     собраны из потолков (config.QWEN_THINKING_BUDGET), а верхняя ступень —
     это ОТСУТСТВИЕ потолка, а не большое число.
     """
-    on = _is_thinking(model_name, thinking_override)
+    on = _is_thinking(model_name)
     extra = {"enable_thinking": on}
     if on:
-        budget = QWEN_THINKING_BUDGET.get(_level_for("qwen", thinking_override))
+        budget = QWEN_THINKING_BUDGET.get(thinking_level("qwen"))
         if budget:
             extra["thinking_budget"] = budget
     return _openai_stream_request(
@@ -1319,7 +1285,7 @@ def _qwen_chat_request(model_name: str, messages: list, thinking_override: bool 
     )
 
 
-def _deepseek_chat_request(model_name: str, messages: list, thinking_override: bool | None = None):
+def _deepseek_chat_request(model_name: str, messages: list):
     """Запрос к DeepSeek. Рассуждения включаются параметром thinking
     ({"type": "enabled"/"disabled"}), глубина — ОТДЕЛЬНЫМ параметром верхнего
     уровня reasoning_effort (low / high / max, см. ниже).
@@ -1356,9 +1322,9 @@ def _deepseek_chat_request(model_name: str, messages: list, thinking_override: b
     числа, окна пика и будние дни — config.DEEPSEEK_PRICES,
     config.DEEPSEEK_PEAK_UTC и config.DEEPSEEK_PEAK_DAYS; сверять там.
     """
-    if _is_thinking(model_name, thinking_override):
+    if _is_thinking(model_name):
         extra = {"thinking": {"type": "enabled"}}
-        level = _level_for("deepseek", thinking_override)
+        level = thinking_level("deepseek")
         if level != "off":
             extra["reasoning_effort"] = level
     else:
@@ -1368,7 +1334,7 @@ def _deepseek_chat_request(model_name: str, messages: list, thinking_override: b
     )
 
 
-def _xiaomi_chat_request(model_name: str, messages: list, thinking_override: bool | None = None):
+def _xiaomi_chat_request(model_name: str, messages: list):
     """Запрос к Xiaomi MiMo (2026-07-25). Управление рассуждениями —
     {"thinking": {"type": "enabled"/"disabled"}}, и это ЕДИНСТВЕННЫЙ рычаг.
 
@@ -1387,7 +1353,7 @@ def _xiaomi_chat_request(model_name: str, messages: list, thinking_override: boo
     parameters». Пока оно лежало ВНУТРИ thinking, MiMo его молча выбрасывал —
     поэтому вреда и не было видно. Не возвращать ни в каком виде.
     """
-    on = _is_thinking(model_name, thinking_override)
+    on = _is_thinking(model_name)
     extra = {"thinking": {"type": "enabled" if on else "disabled"}}
     return _openai_stream_request(
         model_name, messages, XIAOMI_API_URL, XIAOMI_API_KEY, extra,
@@ -1634,7 +1600,6 @@ def _native_answer_with_thoughts(data: dict) -> str:
 
 
 def _gemini_chat_request(messages: list, kind: str = "текст", has_image: bool = False,
-                         thinking_override: bool | None = None,
                          chain_override: list[str] | None = None,
                          timing: dict | None = None):
     """
@@ -1644,20 +1609,12 @@ def _gemini_chat_request(messages: list, kind: str = "текст", has_image: bo
          другой провайдер / быстрая бесплатная Gemini-lite), а НЕ перебор всех.
     Активная модель пользователя при этом НЕ меняется (фолбэк временный, на запрос).
 
-    thinking_override (2026-07-20) — принудительно включить (в полную силу,
-    _FULL_THINKING) или выключить рассуждения у ВСЕХ моделей запроса.
-
     chain_override (2026-07-20) — своя цепочка моделей вместо расчёта от активной.
     При заданном chain_override уведомление админам «ответила запасная» НЕ
-    шлётся — активная модель тут ни при чём.
-
-    ⚠️ Оба параметра появились для судьи проактивного режима, а сам судья
-    удалён 2026-07-20.
-
-    thinking_override с 29.08.2026 передаёт services/quiz_bank.py
-    (generate_for_article) со значением True: сборка вопросов думает в полную
-    силу при любом положении кнопки (решения Максима 05.08 и 01.10.2026),
-    ступени — _FULL_THINKING; у DeepSeek это «Высокая», а не «Максимум».
+    шлётся — активная модель тут ни при чём. Появился для судьи проактивного
+    режима, а сам судья удалён 2026-07-20. Его брат thinking_override (рычаг
+    раздумий мимо кнопки) последним служил сборке вопросов викторины и удалён
+    вместе с ней 04.10.2026.
 
     chain_override не передаёт по-прежнему НИКТО — механизм живой, но спит
     (оставлен на будущее: пригодится любой служебной проверке без размышлений).
@@ -1698,17 +1655,17 @@ def _gemini_chat_request(messages: list, kind: str = "текст", has_image: bo
             attempt_started = time.perf_counter()
             try:
                 if provider == "qwen":
-                    data = _qwen_chat_request(model_name, messages, thinking_override)
+                    data = _qwen_chat_request(model_name, messages)
                     if data is None:
                         raise ValueError("пустой ответ Qwen")
                     return data
                 if provider == "deepseek":
-                    data = _deepseek_chat_request(model_name, messages, thinking_override)
+                    data = _deepseek_chat_request(model_name, messages)
                     if data is None:
                         raise ValueError("пустой ответ DeepSeek")
                     return data
                 if provider == "xiaomi":
-                    data = _xiaomi_chat_request(model_name, messages, thinking_override)
+                    data = _xiaomi_chat_request(model_name, messages)
                     if data is None:
                         raise ValueError("пустой ответ Xiaomi")
                     return data
@@ -1735,7 +1692,7 @@ def _gemini_chat_request(messages: list, kind: str = "текст", has_image: bo
                 # 0 / 404 / 654 / 864 токена на четырёх положениях кнопки.
                 info = AVAILABLE_MODELS.get(model_name, {})
                 if info.get("thinking") and not info.get("native_thinking"):
-                    level = _gemini_answer_level(model_name, thinking_override)
+                    level = _gemini_answer_level(model_name)
                     payload["extra_body"] = {
                         "google": {"thinking_config": {
                             "include_thoughts": level != "minimal",
@@ -2908,8 +2865,8 @@ def format_news_as_colonel(title: str, description: str, tag: str, article_text:
             # рассуждения модели прямо со служебными тегами. Тем же текстом
             # новость пишется в архив групп (jobs/news.py) — то есть мысли
             # попадали бы ещё и в стенограмму режима «Сам в разговор».
-            # ⚠️ Лечить это выключением размышлений (thinking_override=False)
-            # НЕЛЬЗЯ — думающая модель должна думать, устойчивым обязан быть разбор.
+            # ⚠️ Лечить это выключением размышлений НЕЛЬЗЯ — думающая модель
+            # должна думать, устойчивым обязан быть разбор.
             return compress_newlines(strip_thoughts(answer))
         except (KeyError, IndexError):
             logger.error("⚠️ Неожиданный формат ответа при форматировании новости")

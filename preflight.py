@@ -49,7 +49,7 @@ _SKIP_MODULES = {"preflight", "main", "reset_db", "watchdog_local"}
 # Папки проекта, по которым ходим в поисках модулей.
 # ⚠️ Пакет `data` УДАЛЁН 2026-08-05 вместе с последним своим файлом
 # (data/quiz_questions.py — 12 вопросов викторины, зашитых в код). Вопросы
-# теперь живут в базе, собираются по статьям базы знаний панелью /quizadm.
+# теперь живут в базе, а приезжают файлом quiz/questions.json.
 # ⚠️ Папку `web` (сайт-админка) сюда забыли добавить, когда её завели
 # 30.08.2026 — и `web/longjobs.py` не проверялся ВООБЩЕ: его импортируют
 # изнутри функций, то есть в момент нажатия кнопки на сайте. Список кормит
@@ -474,6 +474,7 @@ def check_panels():
     from handlers.admin.panel_prompts import (_build_proactive_stats_panel,
                                               _build_prompt_panel_text_and_keyboard)
     from handlers.admin.panel_quiz import _build_panel as _build_quiz_panel
+    from handlers.admin.panel_quiz import _build_noq_screen
     from handlers.admin.panel_rag import _build_rag_panel
     from handlers.admin.panel_updates import _build_updates_panel
     from handlers.admin.panel_users import _build_staff_log_panel, _build_users_panel
@@ -523,6 +524,9 @@ def check_panels():
         "база знаний: раздел": lambda: _build_rag_panel(kb_ctx("ground"), owner),
         "база знаний: настройки": lambda: _build_rag_panel(kb_ctx("settings"), owner),
         "викторина": lambda: _build_quiz_panel(ctx),
+        # ⬇️ Статьи без вопросов (04.10.2026): длина зависит от числа таких
+        # статей. На чистой машине их нет — экран короче, но собраться обязан.
+        "викторина: статьи без вопросов": _build_noq_screen,
     }
 
     problems = []

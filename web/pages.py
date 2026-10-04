@@ -1127,12 +1127,15 @@ def page_kb(application, csrf: str = "", section: str = "",
 
 def page_quiz(application, csrf: str = "", mode: str = "draft",
               confirm: str = "", message: str = "") -> str:
-    """Викторина: сводка, сборка вопросов, разбор черновиков, очистка."""
+    """
+    Викторина: сводка, статьи без вопросов, разбор черновиков, очистка.
+
+    ⚠️ Машинной сборки вопросов здесь больше нет (04.10.2026, как и в боте):
+    вопросы пишет Claude, а страница показывает, по каким статьям их ещё нет.
+    """
     from database.history import (get_quiz_bank_counts, list_quiz_questions,
-                                  list_quiz_failures, get_all_quiz_stats,
-                                  get_setting)
+                                  get_all_quiz_stats, get_setting)
     from services import quiz_bank, quiz_daily
-    from . import actions as web_actions
 
     counts = get_quiz_bank_counts()
     kb = quiz_bank.stats()
@@ -1168,15 +1171,21 @@ def page_quiz(application, csrf: str = "", mode: str = "draft",
         f'<div class="card"><div class="k">Статьи без вопросов</div>'
         f'<div class="v">{esc(kb["articles_left"])}</div>'
         f'<div class="sub">всего статей в базе: {esc(kb["articles_total"])}</div></div>'
-        f'<div class="card"><div class="k">Не вышло</div>'
-        f'<div class="v">{esc(kb["failed"])}</div>'
-        f'<div class="sub">статей, где сборка сорвалась</div></div>'
         + seed_tile
         + '</div>'
     )
 
-    job_html, job_running = _job_box(application, web_actions.QUIZ_GEN_LATCH,
-                                     "Сборка вопросов")
+    # 📋 Статьи без вопросов (04.10.2026) — тот же список, что экран бота
+    # «📋 Статьи без вопросов», и той же функцией. Названия — чужой текст.
+    noq_html = ""
+    if kb["articles_left"]:
+        left = quiz_bank.articles_without_questions()
+        rows = "".join(
+            f'<div class="row"><div class="name">{esc(a.get("title") or a["fname"])}</div></div>'
+            for a in left)
+        noq_html = ('<h2>Статьи без вопросов</h2><div class="note">Попроси Claude '
+                    'написать по ним вопросы — они приедут с обновлением.</div>'
+                    f'<div class="rows">{rows}</div>')
 
     auto_state = "on" if auto_on else "off"
     auto = _kbform(csrf, {"do": "auto"},
@@ -1186,17 +1195,6 @@ def page_quiz(application, csrf: str = "", mode: str = "draft",
                    "ctl sw", action="/quiz")
     controls = [(f'🕛 Вопрос дня {quiz_daily.hours_label()}',
                  "бот сам задаёт вопрос в группе по расписанию", auto)]
-    controls.append(("🧠 Собрать вопросы",
-                     "по статьям, у которых вопросов ещё нет; идёт минутами",
-                     _kbform(csrf, {"do": "gen"}, _btn("Собрать", "primary"),
-                             "ctl", action="/quiz")))
-    if kb["failed"]:
-        controls.append(("🔁 Повторить неудачные",
-                         f'статей в очереди: {kb["failed"]}',
-                         _kbform(csrf, {"do": "retry"}, _btn("Повторить"),
-                                 "ctl", action="/quiz")
-                         + _kbform(csrf, {"do": "forget"}, _btn("Забыть список"),
-                                   "ctl", action="/quiz")))
     if seed["questions"]:
         controls.append(("📥 Мои вопросы в черновики",
                          f'написаны вручную, в файле их {seed["questions"]}',
@@ -1262,27 +1260,17 @@ def page_quiz(application, csrf: str = "", mode: str = "draft",
     list_html = ("".join(cards) if cards
                  else '<div class="rows"><div class="empty">здесь пусто</div></div>')
 
-    fails = list_quiz_failures(20)
-    fails_html = ""
-    if fails:
-        rows = "".join(
-            f'<div class="row"><div class="name">{esc(f["article"])}'
-            f'<div class="note">{esc(f.get("reason", ""))}</div></div></div>'
-            for f in fails)
-        fails_html = f'<h2>Что не вышло</h2><div class="rows">{rows}</div>'
-
     note = f'<div class="ok-box">{esc(message)}</div>' if message else ""
     head = ('<header><h1>Викторина</h1>'
             '<div class="ver"><a href="/">← к сводке</a></div></header>')
-    refresh = ('<meta http-equiv="refresh" content="10">' if job_running else "")
 
-    body = ("<div class=\"wrap\">" + head + _topbar(csrf, "/quiz") + note + job_html + tiles
+    body = ("<div class=\"wrap\">" + head + _topbar(csrf, "/quiz") + note + tiles
             + "<h2>Управление</h2>" + _rows(controls)
+            + noq_html
             + f'<h2>Вопросы</h2><div class="chips">{tabs}</div>' + list_html
-            + fails_html
             + ("<h2>Очистка</h2>" + _rows(danger) if danger else "")
             + '<footer><span><a href="/">← к сводке</a></span></footer></div>')
-    return _shell("Викторина — C4_Max", body).replace("</head>", refresh + "</head>")
+    return _shell("Викторина — C4_Max", body)
 
 
 # ─── люди: список и карточка (этап 3) ───────────────────────────────

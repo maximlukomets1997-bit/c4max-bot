@@ -156,19 +156,20 @@
 во временную папку через `config.DB_PATH`; со снимком они молча писали бы в
 боевую `history.db`.
 
-Схема создаётся в `_schema.py::_create_schema`; на 2026-10-03 — **25 таблиц**
-(список сверен с кодом в этот день, имя в имя; 25-я — `pending_deletes`,
-заметки самоудаления, v5.50):
+Схема создаётся в `_schema.py::_create_schema`; на 2026-10-04 — **24 таблицы**
+(список сверен с кодом в этот день, имя в имя; `pending_deletes`, заметки
+самоудаления, добавлена в v5.50, а `quiz_failed`, неудачи машинной сборки
+вопросов, удалена в v5.52 вместе со сборкой):
 
 ```
 api_calls, bot_sent_messages, group_messages, join_log, knowledge_log,
 known_chats, messages, moderation_log, mute_evidence, news_subscriptions,
-pending_deletes, proactive_log, quiz_bank, quiz_failed, quiz_stats,
-sent_news, settings, staff, staff_log, stats_snapshots, user_context,
-user_dossier, user_image_calls, user_settings, user_token_usage
+pending_deletes, proactive_log, quiz_bank, quiz_stats, sent_news,
+settings, staff, staff_log, stats_snapshots, user_context, user_dossier,
+user_image_calls, user_settings, user_token_usage
 ```
 
-`reset_db.py::USER_TABLES` перечисляет **24** из них — без `settings`
+`reset_db.py::USER_TABLES` перечисляет **23** из них — без `settings`
 (она добавляется отдельно, когда `KEEP_SETTINGS = False`).
 `preflight.py::check_tables` сверяет эти два списка.
 
@@ -305,12 +306,11 @@ WEB_HOST, WEB_PORT, IS_DOCKER
   ⚠️ Мут, кик и бан требуют живого бота — без него страница честно отвечает
   «нет доступа к боту», а не делает вид, что сработало.
 - **База знаний и викторина (этап 4, `/kb` и `/quiz`).** Статьи, загрузка
-  файлов, пересборка указателя, проверка поиска; сборка вопросов, разбор
-  черновиков, очистка.
-  ⚠️ Пересборка указателя и сборка вопросов идут МИНУТАМИ и уходят в фон под
-  ТЕМИ ЖЕ защёлками, что кнопки в боте (`kb_rebuild_running`,
-  `quiz_gen_running` в `bot_data`). Своя защёлка у сайта означала бы два
-  прогона разом: половина указателя и вопросы-дубли.
+  файлов, пересборка указателя, проверка поиска; статьи без вопросов, разбор
+  черновиков, очистка (машинная сборка вопросов удалена 04.10.2026).
+  ⚠️ Пересборка указателя идёт МИНУТАМИ и уходит в фон под ТОЙ ЖЕ защёлкой,
+  что кнопка в боте (`kb_rebuild_running` в `bot_data`). Своя защёлка у
+  сайта означала бы два прогона разом и половину указателя.
   ⚠️ Загруженная вручную статья ложится СРАЗУ В ОДОБРЕННЫЕ (так же, как
   кнопка «➕ Добавить RAG»): в очереди ждут только новости, принесённые ботом.
   Чтобы статья заработала в поиске, указатель надо пересобрать.
