@@ -1195,9 +1195,12 @@ def page_quiz(application, csrf: str = "", mode: str = "draft",
                    "ctl sw", action="/quiz")
     controls = [(f'🕛 Вопрос дня {quiz_daily.hours_label()}',
                  "бот сам задаёт вопрос в группе по расписанию", auto)]
-    if seed["questions"]:
-        controls.append(("📥 Мои вопросы в черновики",
-                         f'написаны вручную, в файле их {seed["questions"]}',
+    # 📥 Только когда в файле есть вопросы, которых в банке ещё нет, и с ИХ
+    # числом (04.10.2026) — как кнопка в боте. Раньше строка висела всегда с
+    # общим числом вопросов в файле.
+    if diff and diff["file_ok"] and diff["missing"]:
+        controls.append(("📥 Новые вопросы в черновики",
+                         f'в файле есть, в боте ещё нет: {diff["missing"]}',
                          _kbform(csrf, {"do": "seed"}, _btn("Загрузить"),
                                  "ctl", action="/quiz")))
     # ♻️ Показывается ТОЛЬКО когда есть расхождения: кнопка без работы врала бы
