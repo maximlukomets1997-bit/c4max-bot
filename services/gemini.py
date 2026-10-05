@@ -47,6 +47,7 @@ from config import (
     QWEN_API_URL,
     QWEN_API_KEY,
     QWEN_CHARS_PER_TOKEN,
+    QWEN_IMAGE_TOKENS,
     QWEN_QUOTA_WARN_TOKENS,
     DEEPSEEK_API_URL,
     DEEPSEEK_API_KEY,
@@ -1122,6 +1123,35 @@ def _spend_qwen_quota(model_name: str, tokens: int) -> None:
         logger.warning("⚠️ Не удалось написать владельцу о квоте %s: %s", model_name, e)
 
 
+def _sent_size(messages: list) -> tuple[int, int]:
+    """
+    Сколько отправлено модели: (знаков текста, картинок) — для оценки
+    оборванного ответа (05.10.2026).
+
+    Содержимое сообщения бывает строкой или списком частей OpenAI-формата:
+    {"type": "text", "text": …} и {"type": "image_url", …}. Текстовые части
+    меряются знаками, любая другая часть — это файл, и он считается штукой.
+
+    ⚠️ ЗНАКИ КАРТИНКИ НЕ СЧИТАТЬ. Раньше всё содержимое шло через str(), и base64
+    фото попадал в знаки: 04.10.2026 одно фото дало 190 тысяч знаков и списало
+    66 тысяч токенов вместо примерно 15. Цена картинки — config.QWEN_IMAGE_TOKENS.
+    """
+    chars = images = 0
+    for m in messages or []:
+        if not isinstance(m, dict):
+            continue
+        content = m.get("content") or ""
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    chars += len(str(part.get("text") or ""))
+                else:
+                    images += 1
+        else:
+            chars += len(str(content))
+    return chars, images
+
+
 def _charge_broken_stream(model_name: str, messages: list,
                           reasoning_parts: list, answer_parts: list) -> int:
     """
@@ -1144,10 +1174,9 @@ def _charge_broken_stream(model_name: str, messages: list,
     """
     if _provider_of(model_name) != "qwen":
         return 0
-    sent = sum(len(str(m.get("content") or "")) for m in (messages or [])
-               if isinstance(m, dict))
+    sent, images = _sent_size(messages)
     got = sum(len(p) for p in (reasoning_parts or [])) + sum(len(p) for p in (answer_parts or []))
-    tokens = int((sent + got) / QWEN_CHARS_PER_TOKEN)
+    tokens = int((sent + got) / QWEN_CHARS_PER_TOKEN) + images * QWEN_IMAGE_TOKENS
     if tokens <= 0:
         return 0
     try:
@@ -1155,8 +1184,9 @@ def _charge_broken_stream(model_name: str, messages: list,
     except Exception as e:
         logger.warning("⚠️ Не удалось списать оценку токенов %s: %s", model_name, e)
         return 0
+    pics = f" и картинок {images}" if images else ""
     logger.warning("⚠️ Ответ %s оборван — из квоты списано ОЦЕНОЧНО %d токенов "
-                   "(отправлено %d знаков, получено %d)", model_name, tokens, sent, got)
+                   "(отправлено %d знаков%s, получено %d)", model_name, tokens, sent, pics, got)
     return tokens
 
 
@@ -1245,7 +1275,8 @@ def _openai_stream_request(model_name: str, messages: list, api_url: str,
     except Exception:
         # Поток оборвался (потолок ожидания, разрыв связи) — отчёта о токенах
         # не будет, а провайдер их уже списал. У Qwen это съедает бесплатную
-        # квоту молча, поэтому списываем оценку по знакам (_charge_broken_stream).
+        # квоту молча, поэтому списываем оценку по знакам и картинкам
+        # (_charge_broken_stream).
         # Если отчёт УЖЕ пришёл (usage не пуст), оценка не нужна — расход
         # посчитает обычный путь.
         if not usage:

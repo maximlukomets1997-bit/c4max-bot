@@ -400,6 +400,26 @@ def check_qwen_quota():
                spent == int(len(SENT) / c.QWEN_CHARS_PER_TOKEN))
         expect("обрыв без текста вообще: списывать нечего",
                g._charge_broken_stream(QWEN, [], [], []) == 0)
+
+        # ⚠️ ФОТО — НЕ ТЕКСТ (05.10.2026). Картинка едет строкой base64, и
+        # прежняя оценка мерила её знаками: 04.10 одно фото списало 66 тысяч
+        # токенов вместо ~15. Знаки картинки не считаются, за каждую — твёрдая
+        # цена config.QWEN_IMAGE_TOKENS. Строка base64 нарочно длинная: вернись
+        # счёт знаками — разница выйдет в десятки тысяч, а не в единицы.
+        PIC = {"type": "image_url",
+               "image_url": {"url": "data:image/jpeg;base64," + "A" * 150_000}}
+        for pics, title in ((1, "обрыв с фото"), (2, "обрыв с альбомом из двух фото")):
+            hist.set_setting(f"qwen_tokens_{QWEN}", "100000")
+            content = [{"type": "text", "text": SENT}] + [PIC] * pics
+            spent = g._charge_broken_stream(QWEN, [{"role": "user", "content": content}],
+                                            [], [ANSWER])
+            want = int((len(SENT) + len(ANSWER)) / c.QWEN_CHARS_PER_TOKEN) + pics * c.QWEN_IMAGE_TOKENS
+            why = ("картинку посчитали знаками?" if spent > want
+                   else "картинку не посчитали вовсе?")
+            expect(f"{title}: списано {spent}, а ждали {want} — {why}", spent == want)
+            left = int(hist.get_setting(f"qwen_tokens_{QWEN}", "0") or 0)
+            expect(f"{title}: функция вернула {spent}, а из квоты ушло {100000 - left}",
+                   100000 - left == spent)
     finally:
         g.time, g._http = saved_time, saved_http
 
@@ -545,7 +565,8 @@ def check_qwen_quota():
             hist.delete_setting("active_model")
         hist.delete_setting(key)
 
-    return problems, (f"{done} проверок: оценка на обрыве, отчёт не списывается дважды, "
+    return problems, (f"{done} проверок: оценка на обрыве (фото — твёрдой ценой, не знаками), "
+                      f"отчёт не списывается дважды, "
                       f"чужие провайдеры не задеты, разбор срока и показ на экране, "
                       f"письма «на исходе» и «кончилась» — по одному на переход через черту")
 
