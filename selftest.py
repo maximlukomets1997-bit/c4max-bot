@@ -420,6 +420,56 @@ def check_qwen_quota():
             left = int(hist.get_setting(f"qwen_tokens_{QWEN}", "0") or 0)
             expect(f"{title}: функция вернула {spent}, а из квоты ушло {100000 - left}",
                    100000 - left == spent)
+
+        # ⚠️ ПОТОК КОНЧИЛСЯ БЕЗ ОТЧЁТА О ТОКЕНАХ — ЭТО ОБРЫВ (05.10.2026).
+        # 04.10 Qwen прислал мысли и замолчал без ошибки и без отчёта, а бот
+        # отдал человеку одни свёрнутые «Мысли». Поток здесь доходит до конца
+        # БЕЗ потолка ожидания — ловится именно отсутствие отчёта. Ошибка
+        # провайдера в потоке (кусок без choices) обязана попасть в причину.
+        cut = [sse({"choices": [{"delta": {"reasoning_content": THINK}}]}),
+               sse({"error": {"code": "data_inspection_failed"}})]
+        full = [sse({"choices": [{"delta": {"reasoning_content": THINK}}]}),
+                sse({"choices": [{"delta": {"content": ANSWER}, "finish_reason": "stop"}]}),
+                sse({"usage": {"prompt_tokens": 10, "completion_tokens": 20,
+                               "total_tokens": 30}, "choices": []}),
+                b"data: [DONE]"]
+
+        class ListResponse:
+            """Поток из готовых строк, без зависания: часы не трогает."""
+            def __init__(self, lines): self.lines = lines
+            def raise_for_status(self): pass
+            def close(self): pass
+            def iter_lines(self): yield from self.lines
+
+        for model, lines, title in ((QWEN, cut, "Qwen, поток без отчёта"),
+                                    (OTHER, cut, "DeepSeek, поток без отчёта"),
+                                    (QWEN, full, "Qwen, обычный ответ с отчётом")):
+            hist.set_setting(f"qwen_tokens_{QWEN}", "100000")
+            g._http = lambda ls=lines: type("H", (), {
+                "post": lambda self, *a, **kw: ListResponse(ls)})()
+            clock.t = 1000.0
+            try:
+                got = g._openai_stream_request(model, [{"role": "user", "content": SENT}],
+                                               "http://example", "key", {})
+                err = None
+            except Exception as e:
+                got, err = None, e
+            spent = 100000 - int(hist.get_setting(f"qwen_tokens_{QWEN}", "0") or 0)
+            if lines is cut:
+                expect(f"{title}: ответ из одних мыслей принят как готовый — человек "
+                       f"получит «Мысли» без ответа", err is not None)
+                expect(f"{title}: обрыв выдан таймаутом — повтора той же модели не будет",
+                       not isinstance(err, requests.exceptions.Timeout))
+                expect(f"{title}: в причине отказа не видно, что прислал провайдер: {err}",
+                       err is not None and "data_inspection_failed" in str(err))
+                want = int((len(SENT) + len(THINK)) / c.QWEN_CHARS_PER_TOKEN) if model == QWEN else 0
+                expect(f"{title}: из квоты списано {spent}, а ждали {want}", spent == want)
+            else:
+                expect(f"{title}: нормальный ответ принят за обрыв: {err}",
+                       err is None and got is not None
+                       and ANSWER in got["choices"][0]["message"]["content"])
+                expect(f"{title}: поток сам списал {spent} — расход посчитается дважды",
+                       spent == 0)
     finally:
         g.time, g._http = saved_time, saved_http
 
@@ -557,6 +607,25 @@ def check_qwen_quota():
                len(letters) == 1)
         expect("письмо об активной модели: нет строки «Это активная модель»",
                bool(letters) and "Это активная модель" in letters[0])
+
+        # Обрыв без отчёта — через ВСЮ очередь (05.10.2026): первая попытка
+        # Qwen кончается одними мыслями, вторая отвечает полностью. Человек
+        # обязан получить ответ второй, а не «Мысли» первой.
+        g._qwen_chat_request = saved_request
+        replies = [cut, full]
+        g._http = lambda: type("H", (), {
+            "post": lambda self, *a, **kw: ListResponse(replies.pop(0))})()
+        g.time = clock
+        hist.set_setting(key, "100000")
+        try:
+            data, used = g._gemini_chat_request([{"role": "user", "content": "вопрос"}])
+        finally:
+            g.time, g._http = saved_time, saved_http
+        text_got = (data or {}).get("choices", [{}])[0].get("message", {}).get("content", "")
+        expect(f"обрыв без отчёта в очереди: человек получил «{text_got[:60]}» вместо ответа "
+               f"второй попытки", ANSWER in text_got and used == QWEN)
+        expect(f"обрыв без отчёта в очереди: попыток ушло {2 - len(replies)}, а ждали две",
+               not replies)
     finally:
         g._notify_admins, g._qwen_chat_request = saved_notify, saved_request
         if saved_active:
@@ -566,6 +635,7 @@ def check_qwen_quota():
         hist.delete_setting(key)
 
     return problems, (f"{done} проверок: оценка на обрыве (фото — твёрдой ценой, не знаками), "
+                      f"поток без отчёта о токенах — обрыв, а не ответ из одних мыслей, "
                       f"отчёт не списывается дважды, "
                       f"чужие провайдеры не задеты, разбор срока и показ на экране, "
                       f"письма «на исходе» и «кончилась» — по одному на переход через черту")
@@ -7543,6 +7613,505 @@ def check_quiz_queue():
                       f"загрузки — только с новыми и с их числом, в боте и на сайте")
 
 
+# ───────────────────────────────────────────────
+#  НОЧНАЯ КОПИЯ БАЗЫ И АРХИВ СТАТЕЙ
+# ───────────────────────────────────────────────
+
+def _setting_snapshot(hist, keys):
+    """Как ключи settings лежат сейчас: {ключ: значение или None, если ключа нет}.
+    get_setting на отсутствующий ключ отдаёт умолчание, и «не было» от «было
+    пусто» им не отличить, поэтому читаем таблицу напрямую."""
+    with hist._lock:
+        conn = hist._get_connection()
+        return {k: (lambda r: r[0] if r else None)(
+            conn.execute("SELECT value FROM settings WHERE key = ?", (k,)).fetchone())
+            for k in keys}
+
+
+def _setting_restore(hist, saved):
+    """Возвращает ключи settings ровно к снимку _setting_snapshot."""
+    for k, v in saved.items():
+        if v is None:
+            hist.delete_setting(k)
+        else:
+            hist.set_setting(k, v)
+
+
+def check_nightly_backup():
+    """
+    НОЧНАЯ КОПИЯ БАЗЫ И АРХИВ СТАТЕЙ (05.10.2026).
+
+    ⚠️ РАДИ ЧЕГО. Копия нужна в тот единственный день, когда пропал сервер, —
+    и ровно тогда выясняется, что она пустая, не открывается или давно
+    перестала уходить. Бот при такой поломке работает как ни в чём не бывало,
+    поэтому увидеть её можно только проверкой.
+
+    Гоняются НАСТОЯЩИЕ services/backup.py::make_backup и make_kb_backup и сам
+    ночной шаг jobs/reports.py::nightly_backup с поддельным Telegram. Папка
+    копий и папки статей подменены временными: боевые копии не трогаются, а
+    база — временная базы проверок (main увёл DB_PATH).
+
+    ⚠️ ГЛАВНЫЕ СВОЙСТВА: копия ОТКРЫВАЕТСЯ как база и в ней те же записи; два
+    ряда копий (база и статьи) ротируются каждый своим счётом и друг друга не
+    вытесняют; метка «за сегодня сделано» ставится только после доставки —
+    иначе сорванная отправка не повторится до завтра.
+    """
+    import asyncio
+    import gzip
+    import shutil as _shutil
+    import sqlite3
+    import tarfile
+    import time as _time
+    import config as c
+    from database import history as hist
+    from services import backup
+    from services import knowledge_store as _ks
+    from jobs import reports
+
+    problems = []
+    done = 0
+
+    def expect(title, ok):
+        nonlocal done
+        done += 1
+        if not ok:
+            problems.append(title)
+
+    def series(prefix):
+        return sorted(n for n in os.listdir(copies) if n.startswith(prefix))
+
+    tmp = tempfile.mkdtemp(prefix="c4max-selftest-backup-")
+    copies = os.path.join(tmp, "backups")
+    folders = {"approved": os.path.join(tmp, "approved"),
+               "pending": os.path.join(tmp, "pending")}
+    MARK = "selftest_backup_marker"
+    saved_settings = _setting_snapshot(hist, [MARK, backup._DONE_KEY])
+    saved_dir, saved_kb = backup.backup_dir, backup.make_kb_backup
+    saved_folders = dict(_ks._FOLDERS)
+    saved_admins = c.ADMIN_IDS
+    try:
+        backup.backup_dir = lambda: copies
+        _ks._FOLDERS.update(folders)
+        for path in folders.values():
+            os.makedirs(path)
+        for kind, name in (("approved", "Т-80УД.md"), ("approved", "Leopard_2A5.md"),
+                           ("approved", "knowledge_base_vectors.json"),
+                           ("pending", "2026-10-05_1402.md"), ("pending", "заметка.txt")):
+            with open(os.path.join(folders[kind], name), "w", encoding="utf-8") as f:
+                f.write("текст")
+        # По девять старых копий в каждом ряду: больше BACKUP_KEEP, есть что
+        # ротировать, и видно, что ротация одного ряда не трогает другой.
+        os.makedirs(copies)
+        for day in range(1, 10):
+            for prefix, suffix in (("history-", ".db.gz"), ("knowledge-", ".tar.gz")):
+                open(os.path.join(copies, f"{prefix}2026-01-{day:02d}_00-00{suffix}"), "wb").close()
+        KEEP = c.BACKUP_KEEP
+
+        # ── Копия базы: настоящая база с теми же записями ──
+        marker = f"живая строка {_time.time()}"
+        hist.set_setting(MARK, marker)
+        path, size = backup.make_backup()
+        plain = os.path.join(tmp, "restored.db")
+        with gzip.open(path, "rb") as src, open(plain, "wb") as dst:
+            _shutil.copyfileobj(src, dst)
+        # Копия, снятая мимо SQLite (простым копированием файла), теряет всё,
+        # что лежит в журнале WAL, — вплоть до таблиц. Поэтому ошибку чтения
+        # не роняем, а называем: это и есть та поломка, ради которой проверка.
+        got, copy_tables, broken = None, set(), ""
+        con = sqlite3.connect(plain)
+        try:
+            copy_tables = {r[0] for r in con.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'")}
+            got = con.execute("SELECT value FROM settings WHERE key = ?", (MARK,)).fetchone()
+        except sqlite3.Error as e:
+            broken = f" (копия не читается: {e})"
+        finally:
+            con.close()
+        with hist._lock:
+            live_tables = {r[0] for r in hist._get_connection().execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'")}
+        expect(f"копия базы не содержит свежей записи — в ней {got}, а ждали «{marker}»{broken}",
+               got is not None and got[0] == marker)
+        expect(f"в копии нет таблиц: {sorted(live_tables - copy_tables)}",
+               live_tables <= copy_tables)
+        expect("несжатый промежуточный снимок остался в папке копий",
+               backup._TMP_NAME not in os.listdir(copies))
+        expect(f"размер копии {size}, а файл весит {os.path.getsize(path)}",
+               size == os.path.getsize(path))
+        base = series("history-")
+        expect(f"копий базы осталось {len(base)}, а ждали {KEEP}", len(base) == KEEP)
+        expect("свежая копия базы вытеснена ротацией", os.path.basename(path) in base)
+        expect("самая старая копия базы пережила ротацию", "history-2026-01-01_00-00.db.gz" not in base)
+        expect(f"ротация базы задела архивы статей: их {len(series('knowledge-'))}, а было 9",
+               len(series("knowledge-")) == 9)
+
+        # ── Архив статей: только статьи, свой ряд ротации ──
+        kb_path, kb_size, n_ok, n_wait = backup.make_kb_backup()
+        with tarfile.open(kb_path, "r:gz") as tar:
+            members = sorted(tar.getnames())
+        want = sorted(["approved/Т-80УД.md", "approved/Leopard_2A5.md", "pending/2026-10-05_1402.md"])
+        expect(f"в архиве статей {members}, а ждали {want}", members == want)
+        expect(f"в подписи архива статей «в базе {n_ok}, ждут {n_wait}», а ждали 2 и 1",
+               (n_ok, n_wait) == (2, 1))
+        kb_series = series("knowledge-")
+        expect(f"архивов статей осталось {len(kb_series)}, а ждали {KEEP}",
+               len(kb_series) == KEEP and os.path.basename(kb_path) in kb_series)
+        expect(f"ротация статей задела копии базы: их {len(series('history-'))}, а ждали {KEEP}",
+               len(series("history-")) == KEEP)
+
+        # ── Ночной шаг целиком, с поддельным Telegram ──
+        class FakeBot:
+            def __init__(self):
+                self.sent, self.fail = [], False
+
+            async def send_document(self, chat_id, document, filename, caption, parse_mode):
+                if self.fail:
+                    raise RuntimeError("нет сети")
+                self.sent.append((chat_id, filename))
+
+        bot = FakeBot()
+        app = type("App", (), {"bot": bot})()
+        c.ADMIN_IDS = [111, 222]
+        today = backup._today_kyiv()
+
+        def night():
+            bot.sent.clear()
+            return asyncio.run(reports.nightly_backup(app))
+
+        hist.delete_setting(backup._DONE_KEY)
+        ran = night()
+        db_sent = [s for s in bot.sent if s[1].startswith("history-")]
+        kb_sent = [s for s in bot.sent if s[1].startswith("knowledge-")]
+        expect("ночной шаг не сделал копию, хотя за сегодня её не было", ran is True)
+        expect(f"копия базы ушла {len(db_sent)} владельцам, а ждали двоим", len(db_sent) == 2)
+        expect(f"архив статей ушёл {len(kb_sent)} владельцам, а ждали двоим", len(kb_sent) == 2)
+        expect(f"метка дня «{hist.get_setting(backup._DONE_KEY, '')}», а ждали «{today}»",
+               hist.get_setting(backup._DONE_KEY, "") == today)
+
+        ran = night()
+        expect(f"второй круг в тот же день снова слал копию: ушло {len(bot.sent)} файлов",
+               ran is False and not bot.sent)
+
+        hist.delete_setting(backup._DONE_KEY)
+        bot.fail = True
+        ran = night()
+        bot.fail = False
+        expect("доставка сорвалась, а копия не сделана вовсе", ran is True)
+        expect("доставка сорвалась, а метка дня стоит — повтора через час не будет",
+               backup.due_today())
+
+        def broken_kb(*a, **kw):
+            raise OSError("диск полон")
+
+        backup.make_kb_backup = broken_kb
+        try:
+            ran = night()
+        except Exception as e:
+            ran = f"упал: {e}"
+        db_sent = [s for s in bot.sent if s[1].startswith("history-")]
+        expect(f"архив статей не собрался — ночной шаг {ran}, а ждали, что копия базы засчитана",
+               ran is True)
+        expect(f"архив статей не собрался — копия базы ушла {len(db_sent)} владельцам, а ждали двоим",
+               len(db_sent) == 2)
+        expect("архив статей не собрался — метка дня не поставлена, база уйдёт повторно",
+               hist.get_setting(backup._DONE_KEY, "") == today)
+    finally:
+        backup.backup_dir, backup.make_kb_backup = saved_dir, saved_kb
+        _ks._FOLDERS.clear()
+        _ks._FOLDERS.update(saved_folders)
+        c.ADMIN_IDS = saved_admins
+        _setting_restore(hist, saved_settings)
+        _shutil.rmtree(tmp, ignore_errors=True)
+
+    return problems, (f"{done} проверок: копия открывается как база и в ней свежая запись; "
+                      f"ряды копий базы и статей ротируются каждый своим счётом; в архиве "
+                      f"только статьи; метка дня — только после доставки, сбой архива "
+                      f"статей не отменяет копию базы")
+
+
+# ───────────────────────────────────────────────
+#  СУТОЧНАЯ ЧИСТКА ЖУРНАЛОВ И МЕСЯЧНЫЙ СБРОС
+# ───────────────────────────────────────────────
+
+def check_cleanup():
+    """
+    СУТОЧНАЯ ЧИСТКА ЖУРНАЛОВ И МЕСЯЧНЫЙ СБРОС (05.10.2026).
+
+    ⚠️ РАДИ ЧЕГО. Неверное условие в чистке удаляет лишнее, и заметить это
+    можно только по пропаже данных — когда их уже не вернуть. Проверки этого
+    места до 05.10.2026 не было вовсе (risks.md, «места без страховки»).
+
+    ⚠️ ГОНЯЕТСЯ НАСТОЯЩИЙ jobs/cleanup.py::cleanup_loop — один круг, сон
+    подменён. Проверять функции чистки поодиночке значило бы не заметить,
+    что одну из них перестали звать из цикла.
+
+    ⚠️ В КАЖДОМ ЖУРНАЛЕ ДВЕ ЗАПИСИ: на сутки старше срока и на сутки моложе.
+    Граница близко нарочно — перепутанные единицы (часы вместо суток) или
+    знак сравнения краснеют сразу. Время пишется В ТОМ ЖЕ ВИДЕ, что у самого
+    журнала: у одних число секунд, у других строка даты. Перепутай — и
+    сравнение «число меньше строки» в SQLite истинно ВСЕГДА: журнал стирался
+    бы целиком.
+
+    Месячный сброс: месячные копилки обнуляются, вечные (DeepSeek, Xiaomi),
+    остатки счетов и квота Qwen — нет; обмены «вопрос-ответ» обнуляются, но
+    строки остаются; итоги уходят каждому владельцу; в тот же месяц второй
+    круг ничего не сбрасывает.
+    """
+    import asyncio
+    import time as _time
+    import config as c
+    from database import history as hist
+    from jobs import cleanup
+    from services.antispam import MOD_STATS_DAYS
+
+    problems = []
+    done = 0
+
+    def expect(title, ok):
+        nonlocal done
+        done += 1
+        if not ok:
+            problems.append(title)
+
+    CHAT = -999_000_555      # метка «наших» строк: чужие проверки их не пишут
+    UID = 999_000_555
+    QWEN_KEY = "qwen_tokens_selftest-model"
+    UNTIL_KEY = "qwen_quota_until_selftest-model"
+    money = {"qwen_cost_usd": "1.5", "image_cost_usd": "2.5", "deepseek_cost_usd": "3.5",
+             "xiaomi_cost_usd": "4.5", "deepseek_balance_usd": "9.25",
+             "xiaomi_balance_usd": "7.75", QWEN_KEY: "123456", UNTIL_KEY: "24.11.2026"}
+    saved_settings = _setting_snapshot(hist, list(money) + ["stats_reset_month"])
+    saved_admins, saved_asyncio = c.ADMIN_IDS, cleanup.asyncio
+    now = _time.time()
+
+    # Журналы с временем-ЧИСЛОМ: (таблица, срок, вставка строки с ts).
+    epoch_logs = (
+        ("moderation_log", MOD_STATS_DAYS,
+         "INSERT INTO moderation_log (ts, action, chat_id, user_id, name) VALUES (?, 'mute', ?, ?, 'проверка')"),
+        ("knowledge_log", c.KB_LOG_DAYS,
+         "INSERT INTO knowledge_log (ts, action, article, user_id) VALUES (?, 'approve', ?, ?)"),
+        ("staff_log", c.STAFF_LOG_DAYS,
+         "INSERT INTO staff_log (ts, actor_id, action, target_id) VALUES (?, ?, 'проверка', ?)"),
+        ("join_log", c.JOIN_LOG_DAYS,
+         "INSERT INTO join_log (ts, chat_id, user_id, name, outcome) VALUES (?, ?, ?, 'проверка', 'join')"),
+    )
+    # Журналы с временем-СТРОКОЙ (UTC, как CURRENT_TIMESTAMP). Срок архива
+    # групп зашит в самом цикле (days=10) — так и проверяем.
+    text_logs = (
+        ("group_messages", 10,
+         "INSERT INTO group_messages (created_at, chat_id, user_id, text) "
+         "VALUES (datetime('now', ?), ?, ?, 'проверка')"),
+        ("proactive_log", c.PROACTIVE_LOG_DAYS,
+         "INSERT INTO proactive_log (ts, chat_id, outcome, model) "
+         "VALUES (datetime('now', ?), ?, 'silent', ?)"),
+    )
+    # Чьи строки наши: у каждого журнала своя графа с меткой.
+    mine = {"moderation_log": "chat_id = ?", "knowledge_log": "user_id = ?",
+            "staff_log": "actor_id = ?", "join_log": "chat_id = ?",
+            "group_messages": "chat_id = ?", "proactive_log": "chat_id = ?"}
+    marks = {"moderation_log": CHAT, "knowledge_log": UID, "staff_log": UID,
+             "join_log": CHAT, "group_messages": CHAT, "proactive_log": CHAT}
+    cleaned = set(mine) | {"mute_evidence", "stats_snapshots", "api_calls", "sqlite_sequence"}
+
+    def ages(table):
+        """Сколько наших строк осталось: (старых, свежих) — по графе-метке возраста."""
+        with hist._lock:
+            conn = hist._get_connection()
+            rows = conn.execute(f"SELECT note FROM (SELECT *, CASE WHEN {age_sql[table]} "
+                                f"THEN 'old' ELSE 'fresh' END AS note FROM {table}) "
+                                f"WHERE {mine[table]}", (marks[table],)).fetchall()
+        notes = [r[0] for r in rows]
+        return notes.count("old"), notes.count("fresh")
+
+    # Признак «старая» — по самой записи: для числа — меньше чем «сейчас минус
+    # срок», для строки — то же строкой. Считается ОДИН раз при вставке, и
+    # сравнивается с тем, что сделала чистка.
+    age_sql = {}
+
+    def wipe():
+        with hist._lock:
+            conn = hist._get_connection()
+            for table in mine:
+                conn.execute(f"DELETE FROM {table} WHERE {mine[table]}", (marks[table],))
+            conn.execute("DELETE FROM mute_evidence WHERE text = 'улика проверки'")
+            conn.execute("DELETE FROM api_calls WHERE model_name = 'selftest-model'")
+            conn.execute("DELETE FROM user_token_usage WHERE user_id = ?", (UID,))
+            conn.execute("DELETE FROM quiz_stats WHERE user_id = ?", (UID,))
+            conn.execute("DELETE FROM user_dossier WHERE user_id = ?", (UID,))
+            conn.commit()
+
+    letters = []
+
+    class FakeBot:
+        async def send_message(self, chat_id, text, parse_mode=None):
+            letters.append((chat_id, text))
+
+    app = type("App", (), {"bot": FakeBot()})()
+
+    class _Stop(Exception):
+        pass
+
+    async def one_circle(seconds):
+        raise _Stop
+
+    def run_circle():
+        letters.clear()
+        try:
+            asyncio.run(cleanup.cleanup_loop(app))
+        except _Stop:
+            pass
+
+    def counts(skip):
+        with hist._lock:
+            conn = hist._get_connection()
+            tables = [r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'")]
+            return {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+                    for t in tables if t not in skip}
+
+    try:
+        wipe()
+        c.ADMIN_IDS = [111, 222]
+        cleanup.asyncio = type("A", (), {"sleep": staticmethod(one_circle)})()
+
+        with hist._lock:
+            conn = hist._get_connection()
+            # Две графы после ts у каждого журнала свои (см. вставки выше).
+            rest = {"moderation_log": (CHAT, UID), "knowledge_log": ("статья", UID),
+                    "staff_log": (UID, UID), "join_log": (CHAT, UID)}
+            for table, days, sql in epoch_logs:
+                age_sql[table] = f"ts < {now - days * 86400}"
+                for shift in (days + 1, days - 1):
+                    conn.execute(sql, (now - shift * 86400, *rest[table]))
+            for table, days, sql in text_logs:
+                age_sql[table] = f"{'created_at' if table == 'group_messages' else 'ts'} " \
+                                 f"< datetime('now', '-{days} days')"
+                for shift in (days + 1, days - 1):
+                    extra = UID if table == "group_messages" else "selftest-model"
+                    conn.execute(sql, (f"-{shift} days", CHAT, extra))
+            # Улики — к каждой из двух записей модерации.
+            for log_id, in conn.execute("SELECT id FROM moderation_log WHERE chat_id = ?", (CHAT,)):
+                conn.execute("INSERT INTO mute_evidence (log_id, text) VALUES (?, 'улика проверки')",
+                             (log_id,))
+            # Вечные записи с давним временем: чистка обязана их не заметить.
+            conn.execute("INSERT INTO user_dossier (user_id, first_seen, msg_count) VALUES (?, ?, 5)",
+                         (UID, now - 900 * 86400))
+            conn.execute("INSERT INTO quiz_stats (user_id, username, correct_answers, total_attempts) "
+                         "VALUES (?, 'проверка', 3, 4)", (UID,))
+            # Месячные счётчики: вызовы моделей и обмены «вопрос-ответ».
+            conn.executemany("INSERT INTO api_calls (model_name) VALUES (?)",
+                             [("selftest-model",), ("selftest-model",)])
+            conn.execute("INSERT INTO user_token_usage (user_id, total_tokens, total_requests) "
+                         "VALUES (?, 500, 3)", (UID,))
+            conn.commit()
+
+        old_ids = []
+        with hist._lock:
+            conn = hist._get_connection()
+            old_ids = [r[0] for r in conn.execute(
+                f"SELECT id FROM moderation_log WHERE chat_id = ? AND {age_sql['moderation_log']}",
+                (CHAT,))]
+        for key, value in money.items():
+            hist.set_setting(key, value)
+        month = cleanup._current_month_kyiv()
+        year, mon = (int(x) for x in month.split("-"))
+        prev = f"{year - 1}-12" if mon == 1 else f"{year}-{mon - 1:02d}"
+        hist.set_setting("stats_reset_month", prev)
+        before = counts(cleaned | {"settings", "user_token_usage"})
+
+        run_circle()
+
+        for table in mine:
+            old, fresh = ages(table)
+            expect(f"{table}: старая запись (срок + сутки) не удалена", old == 0)
+            expect(f"{table}: свежая запись (срок − сутки) удалена — чистка стирает лишнее",
+                   fresh == 1)
+        with hist._lock:
+            conn = hist._get_connection()
+            ev = conn.execute("SELECT log_id FROM mute_evidence WHERE text = 'улика проверки'").fetchall()
+            api_left = conn.execute("SELECT COUNT(*) FROM api_calls").fetchone()[0]
+            usage = conn.execute("SELECT total_tokens, total_requests FROM user_token_usage "
+                                 "WHERE user_id = ?", (UID,)).fetchone()
+        expect(f"улик осталось {len(ev)}, а ждали одну — у свежей записи модерации", len(ev) == 1)
+        expect("улика старой записи модерации пережила её саму",
+               not any(r[0] in old_ids for r in ev))
+        after = counts(cleaned | {"settings", "user_token_usage"})
+        changed = {t: (before[t], after.get(t)) for t in before if before[t] != after.get(t)}
+        expect(f"чистка задела таблицы, которых не должна касаться: {changed}", not changed)
+
+        # ── Месячный сброс ──
+        expect(f"вызовов моделей после сброса {api_left}, а ждали ноль", api_left == 0)
+        expect(f"обмены «вопрос-ответ» после сброса {tuple(usage) if usage else 'строка удалена'}, "
+               f"а ждали (0, 0) и строку на месте", usage is not None and tuple(usage) == (0, 0))
+        for key in ("qwen_cost_usd", "image_cost_usd"):
+            got = hist.get_setting(key, "")
+            expect(f"месячная копилка {key} после сброса «{got}», а ждали 0",
+                   float(got or -1) == 0)
+        for key in ("deepseek_cost_usd", "xiaomi_cost_usd", "deepseek_balance_usd",
+                    "xiaomi_balance_usd", QWEN_KEY, UNTIL_KEY):
+            got = hist.get_setting(key, "")
+            expect(f"месячный сброс тронул {key}: «{got}», а было «{money[key]}»",
+                   got == money[key])
+        expect(f"метка месяца «{hist.get_setting('stats_reset_month', '')}», а ждали «{month}»",
+               hist.get_setting("stats_reset_month", "") == month)
+        expect(f"итоги месяца ушли {len(letters)} владельцам, а ждали двоим",
+               sorted(chat for chat, _ in letters) == [111, 222]
+               and all("Итоги месяца" in text for _, text in letters))
+
+        # ── Второй круг в том же месяце ничего не сбрасывает ──
+        hist.set_setting("qwen_cost_usd", "1.5")
+        run_circle()
+        expect(f"второй круг в том же месяце снова обнулил копилку: «{hist.get_setting('qwen_cost_usd', '')}»",
+               hist.get_setting("qwen_cost_usd", "") == "1.5")
+        expect(f"второй круг в том же месяце снова слал итоги: {len(letters)} писем", not letters)
+
+        # ── Снимки суточного отчёта: последний не удаляется никогда ──
+        with hist._lock:
+            conn = hist._get_connection()
+            saved_snaps = conn.execute("SELECT taken_at_utc, kyiv_label, data FROM stats_snapshots").fetchall()
+            conn.execute("DELETE FROM stats_snapshots")
+            for shift, label in ((500, "давний"), (450, "старый последний")):
+                conn.execute("INSERT INTO stats_snapshots (taken_at_utc, kyiv_label, data) "
+                             "VALUES (datetime('now', ?), ?, '{}')", (f"-{shift} days", label))
+            conn.commit()
+        try:
+            run_circle()
+            with hist._lock:
+                left = [r[0] for r in hist._get_connection().execute(
+                    "SELECT kyiv_label FROM stats_snapshots")]
+            expect(f"снимки отчёта: остались {left}, а ждали один — последний, хоть и старый",
+                   left == ["старый последний"])
+            with hist._lock:
+                conn = hist._get_connection()
+                conn.execute("INSERT INTO stats_snapshots (taken_at_utc, kyiv_label, data) "
+                             "VALUES (datetime('now', '-1 days'), 'свежий', '{}')")
+                conn.commit()
+            run_circle()
+            with hist._lock:
+                left = [r[0] for r in hist._get_connection().execute(
+                    "SELECT kyiv_label FROM stats_snapshots")]
+            expect(f"снимки отчёта: при свежем остались {left}, а ждали только его",
+                   left == ["свежий"])
+        finally:
+            with hist._lock:
+                conn = hist._get_connection()
+                conn.execute("DELETE FROM stats_snapshots")
+                conn.executemany("INSERT INTO stats_snapshots (taken_at_utc, kyiv_label, data) "
+                                 "VALUES (?, ?, ?)", [tuple(r) for r in saved_snaps])
+                conn.commit()
+    finally:
+        cleanup.asyncio = saved_asyncio
+        c.ADMIN_IDS = saved_admins
+        wipe()
+        _setting_restore(hist, saved_settings)
+
+    return problems, (f"{done} проверок: в каждом журнале старая запись уходит, свежая "
+                      f"остаётся; улики — вместе с записью модерации; вечные таблицы не "
+                      f"тронуты; последний снимок отчёта живёт всегда; месячный сброс "
+                      f"обнуляет только месячное, квоту и вечные счёта не трогает, в тот "
+                      f"же месяц не повторяется")
+
+
 CHECKS = (
     ("деньги — расчёт стоимости запросов", check_money),
     ("квота Qwen — оборванный ответ, срок и письма", check_qwen_quota),
@@ -7591,6 +8160,8 @@ CHECKS = (
     ("разбор вложения остаётся в памяти бота", check_media_memory),
     ("самоудаление переживает перезапуск бота", check_pending_deletes),
     ("новые вопросы викторины: загрузка, очередь, статьи без вопросов", check_quiz_queue),
+    ("ночная копия базы и архив статей", check_nightly_backup),
+    ("суточная чистка журналов и месячный сброс", check_cleanup),
 )
 
 

@@ -1210,6 +1210,8 @@ def _openai_stream_request(model_name: str, messages: list, api_url: str,
     у каждого называется по-своему, см. _qwen_chat_request/_deepseek_chat_request).
 
     Возвращает dict (как у Gemini) или None при пустом/неуспешном ответе.
+    Обрыв потока — превышен потолок ожидания или поток кончился без отчёта
+    о токенах — бросает исключение: для цепочки подстраховки это отказ модели.
     """
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -1225,6 +1227,10 @@ def _openai_stream_request(model_name: str, messages: list, api_url: str,
 
     reasoning_parts, answer_parts = [], []
     usage = {}
+    # Причины остановки и всё необычное, что прислал провайдер (куски без
+    # choices и usage, строки не «data:») — только для строки отказа ниже,
+    # когда поток кончается без отчёта о токенах. В обычном ответе не нужны.
+    finish_reasons, oddities = [], []
 
     # Момент старта — для общего предела на весь ответ (GEMINI_STREAM_DEADLINE).
     start = time.monotonic()
@@ -1247,6 +1253,7 @@ def _openai_stream_request(model_name: str, messages: list, api_url: str,
                 continue
             line = raw.decode("utf-8", "ignore").strip()
             if not line.startswith("data:"):
+                oddities.append(line[:200])
                 continue
             chunk = line[len("data:"):].strip()
             if chunk == "[DONE]":
@@ -1254,10 +1261,15 @@ def _openai_stream_request(model_name: str, messages: list, api_url: str,
             try:
                 obj = json.loads(chunk)
             except Exception:
+                oddities.append(chunk[:200])
                 continue
             if obj.get("usage"):
                 usage = obj["usage"]
+            if not obj.get("choices") and not obj.get("usage"):
+                oddities.append(json.dumps(obj, ensure_ascii=False)[:200])
             for choice in (obj.get("choices") or []):
+                if choice.get("finish_reason"):
+                    finish_reasons.append(str(choice["finish_reason"]))
                 delta = choice.get("delta") or {}
                 # Мысли называются по-разному: Qwen, DeepSeek и Xiaomi шлют их
                 # в reasoning_content. Второе поле, reasoning, оставлено
@@ -1272,9 +1284,27 @@ def _openai_stream_request(model_name: str, messages: list, api_url: str,
                 c = delta.get("content")
                 if c:
                     answer_parts.append(c)
+        # ⚠️ ПОТОК КОНЧИЛСЯ БЕЗ ОТЧЁТА О ТОКЕНАХ — ЭТО ОБРЫВ, А НЕ ОТВЕТ
+        # (05.10.2026). Отчёт (usage) провайдер шлёт последним куском, и все
+        # трое шлют его в КАЖДОМ нормальном ответе — сверено живыми запросами
+        # 05.10.2026 к qwen3.8-flash, deepseek-flash и mimo-v2.6-flash. Нет
+        # отчёта — значит, связь оборвали посреди ответа, хоть и без ошибки.
+        # 04.10.2026 так Qwen прислал 8 секунд мыслей и замолчал: бот отдал
+        # человеку одни свёрнутые «Мысли» без ответа, расход не учёл, а в
+        # память записал пустую реплику. Теперь это отказ, как на потолке
+        # ожидания: квота Qwen списывается оценкой (ветка ниже), _try_model
+        # повторяет запрос и уходит к запасной. В строку отказа идёт то, что
+        # провайдер прислал напоследок, — по ней видно, почему он замолчал.
+        if not usage:
+            tail = "; ".join(oddities[-3:]) or "ничего необычного"
+            raise ValueError(
+                f"поток {model_name} закончился без отчёта о токенах "
+                f"(причина остановки: {', '.join(finish_reasons) or 'не названа'}; "
+                f"напоследок пришло: {tail})"
+            )
     except Exception:
-        # Поток оборвался (потолок ожидания, разрыв связи) — отчёта о токенах
-        # не будет, а провайдер их уже списал. У Qwen это съедает бесплатную
+        # Поток оборвался (потолок ожидания, разрыв связи, конец без отчёта —
+        # см. выше) — отчёта о токенах не будет, а провайдер их уже списал. У Qwen это съедает бесплатную
         # квоту молча, поэтому списываем оценку по знакам и картинкам
         # (_charge_broken_stream).
         # Если отчёт УЖЕ пришёл (usage не пуст), оценка не нужна — расход
