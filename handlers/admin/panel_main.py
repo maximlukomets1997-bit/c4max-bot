@@ -196,10 +196,18 @@ def _build_api_keyboard(user_id):
     thoughts_row = [InlineKeyboardButton(
         f"🧠 МЫСЛИ ПОД КАПОТОМ: {_onoff(thoughts_enabled())}",
         callback_data="toggle_thoughts")]
+    # Тумблер «ответа на глазах» (2026-10-08, просьба Максима — рядом с
+    # мыслями: оба про то, КАК показывается ответ). Тот же выключатель, что
+    # на странице настроек сайта (services/live_answer.SETTING_KEY).
+    from services.live_answer import live_answer_enabled
+    live_row = [InlineKeyboardButton(
+        f"✍️ ОТВЕТ НА ГЛАЗАХ: {_onoff(live_answer_enabled())}",
+        callback_data="toggle_live_answer")]
     # inline_keyboard у собранной клавиатуры — кортеж (tuple), складывать его
     # со списком нельзя — приводим всё к спискам.
     rows = list(model_markup.inline_keyboard) + _thinking_rows() + [
         thoughts_row,
+        live_row,
         list(_REPORT_BUTTON_ROW),
         [InlineKeyboardButton("💰 СЧЕТА И КВОТЫ", callback_data="bal:panel")],
         _adm_back_row(),

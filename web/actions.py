@@ -46,6 +46,7 @@ _AUDIT_CODES = {
     "greet_kick":         ("greet", "кик не прошедших проверку"),
     "greet_timeout_sec":  ("greet", "срок проверки"),
     "thoughts_enabled":   ("thoughts", "мысли под капотом"),
+    "live_answer_enabled": ("live_answer", "ответ на глазах"),
     "proactive_hands":    ("proactive_hands", "руки «Сам в разговор»"),
 }
 

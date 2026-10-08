@@ -8478,6 +8478,29 @@ def check_live_answer():
         else:
             hist.set_setting(la.SETTING_KEY, saved_toggle)
 
+    # ─── кнопка в боте: та же настройка, нажимает только владелец ───
+    from services.roles import perm_for_callback
+    from handlers.admin.panel_main import _build_api_keyboard
+    expect("кнопку «ответ на глазах» может нажать не только владелец",
+           perm_for_callback("toggle_live_answer") == "owner")
+    try:
+        labels = {}
+        for raw in ("1", "0"):
+            hist.set_setting(la.SETTING_KEY, raw)
+            kb = _build_api_keyboard(next(iter(c.ADMIN_IDS), 1))
+            labels[raw] = [b.text for row in kb.inline_keyboard for b in row
+                           if b.callback_data == "toggle_live_answer"]
+        expect("в панели «Настройки API» нет кнопки «ответ на глазах»",
+               bool(labels["1"]) and bool(labels["0"]))
+        expect("надпись кнопки не следует за настройкой (бот и сайт разошлись бы)",
+               bool(labels["1"]) and bool(labels["0"]) and labels["1"] != labels["0"]
+               and "ОТВЕТ НА ГЛАЗАХ" in labels["1"][0])
+    finally:
+        if saved_toggle == "":
+            hist.delete_setting(la.SETTING_KEY)
+        else:
+            hist.set_setting(la.SETTING_KEY, saved_toggle)
+
     return problems, (f"{done} проверок: показ «Думаю», текста, сбоя и длинного ответа; "
                       f"мысли в черновик не текут; повтор стирает текст сбившейся; отказ "
                       f"Telegram не роняет ответ; черновик снимается с потока; в личке он "
