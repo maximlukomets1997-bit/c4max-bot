@@ -380,7 +380,7 @@ async def check_and_mute(bot, chat_id: int, user, user_text: str = "",
         # Чистим спам (всегда включено). Работает только если бот — админ с правом удалять.
         await _delete_messages(bot, chat_id, burst_ids)
 
-        # Уведомление в чат с кнопкой «Размутить» (для админов) + .txt-лог.
+        # Уведомление в чат с кнопкой «Размутить» (для админов).
         minutes = max(1, mute_sec // 60)
         unmute_kb = InlineKeyboardMarkup([[
             InlineKeyboardButton("🔓 Размутить", callback_data=f"mod:unmute:{chat_id}:{user_id}")

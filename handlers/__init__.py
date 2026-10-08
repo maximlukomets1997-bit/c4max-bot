@@ -56,8 +56,8 @@ def setup_handlers(application):
     application.add_handler(CommandHandler('rag', cmd_rag))
     application.add_handler(CommandHandler('unmute', cmd_unmute))
     application.add_handler(CommandHandler('users', cmd_users))
-    # 🎮 Панель викторины (2026-08-05): сборка вопросов по статьям базы знаний
-    # и их одобрение. ⚠️ НЕ путать с публичной кнопкой запуска игры
+    # 🎮 Панель викторины (2026-08-05): загрузка вопросов из файла
+    # quiz/questions.json и их одобрение. ⚠️ НЕ путать с публичной кнопкой запуска игры
     # (callback quiz_start) — здесь только управление банком вопросов.
     application.add_handler(CommandHandler('quizadm', cmd_quiz_admin))
     # block=False: генерация картинки — долгая операция (до ~90 сек), обработчик
@@ -101,7 +101,7 @@ def setup_handlers(application):
     # молча перестанет срабатывать, без единой ошибки в логе.
     application.add_handler(ChatMemberHandler(on_chat_member, ChatMemberHandler.CHAT_MEMBER))
 
-    # Handler group=1: runs independently from group=0, captures group text/photo/voice/audio/video for context archiving
+    # Handler group=1: работает независимо от group=0 — собирает текст, фото, голосовые, аудио и видео групп в архив для контекста
     group_filter = (filters.TEXT | filters.PHOTO | filters.VOICE | filters.AUDIO | filters.VIDEO) & (filters.ChatType.GROUP | filters.ChatType.SUPERGROUP)
     application.add_handler(MessageHandler(group_filter, collect_group_message), group=1)
 

@@ -278,7 +278,8 @@ async def _warn_owners(bot, chat) -> None:
 async def _forget(bot, chat_id: int, user_id: int) -> None:
     """
     Снимает ожидание нажатия и убирает приветствие: человек либо прошёл
-    проверку, либо вышел из группы. Возвращает True, если ожидание было.
+    проверку, либо вышел из группы. Ничего не возвращает: не было ожидания —
+    просто нечего убирать.
     """
     msg_id = _pending.pop((chat_id, user_id), None)
     if msg_id:

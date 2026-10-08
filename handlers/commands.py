@@ -416,9 +416,3 @@ async def handle_unknown_command(update: Update, context: ContextTypes.DEFAULT_T
 
     await delete_user_message_safe(update.message)
 
-
-
-# ───────────────────────────────────────────────
-#  Запуск
-# ───────────────────────────────────────────────
-

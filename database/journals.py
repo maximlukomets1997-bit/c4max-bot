@@ -21,9 +21,11 @@
 #  config.py (STAFF_LOG_DAYS, KB_LOG_DAYS, PROACTIVE_LOG_DAYS, JOIN_LOG_DAYS) —
 #  чтобы менялись в одном месте.
 #
-#  ⚠️ ВРЕМЯ — time.time() (unix, дробное), как в moderation_log. Не путать с
-#  архивом групп и вызовами API: там время строкой UTC «ГГГГ-ММ-ДД ЧЧ:ММ:СС».
-#  Оба вида в базе живут одновременно, и сравнивать их между собой нельзя.
+#  ⚠️ ВРЕМЯ У ТРЁХ ЖУРНАЛОВ (staff_log, knowledge_log, join_log) —
+#  time.time() (unix, дробное), как в moderation_log. А у proactive_log, как у
+#  архива групп и вызовов API, — строка UTC «ГГГГ-ММ-ДД ЧЧ:ММ:СС»
+#  (CURRENT_TIMESTAMP). Оба вида в базе живут одновременно, и сравнивать их
+#  между собой нельзя: «число меньше строки» в SQLite истинно всегда.
 #
 #  Кто это читает:
 #    handlers/admin/panel_users.py — экран журнала персонала

@@ -459,8 +459,8 @@ def _adm_rows():
         [InlineKeyboardButton("🛠Управление DDoS-Guard", callback_data="adm_open_mod")],
         [InlineKeyboardButton("👥 Пользователи", callback_data="adm_open_users")],
         [InlineKeyboardButton("📚 База знаний (RAG)", callback_data="adm_open_rag")],
-        # Викторина (2026-08-05): вопросы собираются по статьям базы знаний и
-        # ждут одобрения. Стоит СРАЗУ ЗА базой знаний намеренно — это её
+        # Викторина (2026-08-05): вопросы пишутся по статьям базы знаний,
+        # приезжают файлом и ждут одобрения. Стоит СРАЗУ ЗА базой знаний намеренно — это её
         # продолжение: сначала статьи, потом вопросы по ним.
         [InlineKeyboardButton("🎮 Настройки Викторины", callback_data="quiz:panel")],
         # Логи бота — владельческая кнопка (в _CALLBACK_RULES её нет), поэтому
