@@ -220,9 +220,12 @@ def _create_schema(conn):
             total_requests INTEGER DEFAULT 0
         );
 
-        -- Журнал действий модерации (мут/размут) — статистика /mod за N дней.
-        -- ts — unix-время (локальное, time.time()), как и счётчики антиспама.
-        -- admin_name — кто выполнил размут (кнопка/команда); у автоматики пусто.
+        -- Журнал наказаний — статистика /mod за N дней и улики (mute_evidence).
+        -- action: mute (антифлуд и фильтр ссылок), linkdel, mute_adm, mute_ai
+        -- (мут от бота в «Сам в разговор»), unmute, kick, ban, unban.
+        -- ts — unix-время, time.time().
+        -- admin_name — кто выполнил ручное действие (кнопка/команда/сайт);
+        -- у антифлуда и фильтра ссылок пусто, у мута от бота — «бот (сам)».
         CREATE TABLE IF NOT EXISTS moderation_log (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
             ts         REAL    NOT NULL,

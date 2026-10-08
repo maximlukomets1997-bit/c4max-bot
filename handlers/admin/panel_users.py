@@ -1359,7 +1359,10 @@ async def _handle_users_callback(query, context, data: str, chat_id: int, admin_
             return
         chats = get_known_chats()
         if not chats:
-            await query.answer("Бот пока не знает ни одной группы — напиши в неё что-нибудь.",
+            # Своей группа становится только с ведома владельца (services/group_guard.py,
+            # с 15.09.2026): сообщения в чужой группе её в список не внесут.
+            await query.answer("У бота пока нет ни одной своей группы — добавь его в группу сам "
+                               "или нажми «✅ Остаться» в вопросе о новой группе.",
                                show_alert=True)
             return
         if len(chats) == 1:

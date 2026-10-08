@@ -70,9 +70,18 @@ echo "$OUT" | sed -n 's/^MSG=/  Сервер: /p'
 echo "$OUT" | sed -n 's/^ERR=/  Ошибка: /p'
 
 if echo "$OUT" | grep -q '^STATUS=UPDATED'; then
+    # Записка боту «перезапуск плановый» (2026-10-08): без неё хук остановки
+    # считает перезапуск снаружи ручной остановкой — будит сторожа тревогой и
+    # шлёт «🛑 Бот остановлен вручную». Бот читает и удаляет её сам
+    # (services/deploy.py::consume_planned_restart). От имени c4bot — это его
+    # домашняя папка, и удалять записку будет он.
+    sudo -u c4bot touch /home/c4bot/.c4max-restart-planned 2>/dev/null || true
     if systemctl restart c4max-bot; then
         echo "  Сервер: бот перезапущен на новой версии."
     else
+        # Перезапуск не вышел — записку убрать, чтобы она не заглушила
+        # настоящую остановку.
+        rm -f /home/c4bot/.c4max-restart-planned
         echo "  Сервер: НЕ УДАЛОСЬ перезапустить бота, смотри логи."
         exit 1
     fi

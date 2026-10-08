@@ -55,7 +55,8 @@ def _build_mod_panel_text_and_keyboard(viewer_id: int = 0):
     бы в одном означает, что кнопка пропадёт у владельца после первого же
     нажатия ➖/➕.
     """
-    from services.antispam import is_enabled, is_linkfilter_enabled, get_thresholds, get_mute_stats, get_recent_actions, MOD_STATS_DAYS
+    from services.antispam import (is_enabled, is_linkfilter_enabled, get_thresholds, get_mute_stats,
+                                   get_recent_actions, linkfilter_window_text, MOD_STATS_DAYS)
     from services import greeter
     from database.history import get_join_counts
     from config import LINKFILTER_WHITELIST, LINKFILTER_MUTE_COUNT
@@ -89,7 +90,7 @@ def _build_mod_panel_text_and_keyboard(viewer_id: int = 0):
         "───────────────────────────\n"
         f"🔗 Фильтр ссылок: <b>{lf_status}</b>\n"
         f"• Разрешены: {', '.join(LINKFILTER_WHITELIST)}\n"
-        f"• {LINKFILTER_MUTE_COUNT} удалённые ссылки за час = мут\n"
+        f"• {LINKFILTER_MUTE_COUNT} удалённые ссылки за {linkfilter_window_text()} = мут\n"
         "───────────────────────────\n"
         f"👋 Приветствие новичков: <b>{'🟢 ВКЛЮЧЕНО' if greet_on else '🔴 ВЫКЛЮЧЕНО'}</b>\n"
         f"• Проверка «я не бот»: <b>{'🟢 ВКЛЮЧЕНА' if greet_captcha else '🔴 ВЫКЛЮЧЕНА'}</b>"

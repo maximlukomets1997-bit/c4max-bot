@@ -41,6 +41,39 @@ def quiet_for() -> float:
         return float("inf")
     return time.monotonic() - _last_activity
 
+
+# ── Записка «перезапуск плановый» от отправки с ПК (2026-10-08) ───────────
+# Кнопка перезапуска, сайт и самообновление ставят пометку shutdown_reason в
+# памяти бота — и хук остановки (main.post_stop) молчит. Отправка с ПК
+# перезапускает службу СНАРУЖИ (deploy-restart.sh → systemctl restart), до
+# памяти бота ей не достать, и каждая такая отправка будила сторожа тревогой
+# и слала «🛑 Бот остановлен вручную». Поэтому deploy-restart.sh прямо перед
+# перезапуском кладёт файл-записку, а хук его читает и удаляет.
+# ⚠️ В домашней папке c4bot, а не в /tmp и не в папке бота: в /tmp файл от
+# одного пользователя другой не перепишет (fs.protected_regular), а в папке
+# бота он светился бы в git как чужой.
+# ⚠️ Записка СТАРЕЕТ: не случился перезапуск (служба не поднялась, сбой
+# systemctl) — настоящая остановка через пару минут всё равно поднимет тревогу.
+RESTART_MARK = os.path.join(os.path.expanduser("~"), ".c4max-restart-planned")
+RESTART_MARK_TTL_SEC = 120
+
+
+def consume_planned_restart() -> bool:
+    """
+    True — остановка плановая: записка от отправки с ПК есть и свежая.
+    Записку удаляет при любом исходе, чтобы она не заглушила следующую,
+    уже настоящую остановку. Ошибок наружу не бросает.
+    """
+    try:
+        age = time.time() - os.path.getmtime(RESTART_MARK)
+    except OSError:
+        return False
+    try:
+        os.remove(RESTART_MARK)
+    except OSError:
+        pass
+    return age <= RESTART_MARK_TTL_SEC
+
 # Папка проекта = на уровень выше этого файла.
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(PROJECT_DIR, "deploy.sh")

@@ -755,6 +755,21 @@ async def unban_user(bot, chat_id: int, user_id: int,
 # антиспамом, ключ antispam_mute_sec). Счётчик повторов живёт в памяти и
 # сбрасывается при рестарте — как детектор флуда, это нормально.
 
+
+def linkfilter_window_text() -> str:
+    """
+    Окно счёта повторов фильтра ссылок словами: «час», «2 ч», «30 мин».
+    Для панели /mod и письма модераторам о муте — берётся из
+    LINKFILTER_WINDOW_SEC, чтобы тексты не разъехались с самим окном.
+    """
+    sec = LINKFILTER_WINDOW_SEC
+    if sec == 3600:
+        return "час"
+    if sec % 3600 == 0:
+        return f"{sec // 3600} ч"
+    return f"{max(1, sec // 60)} мин"
+
+
 # (chat_id, user_id) -> deque[monotonic_ts] удалений ссылок (мут за повторы)
 _link_strikes: dict[tuple[int, int], deque] = defaultdict(deque)
 
@@ -892,7 +907,7 @@ async def check_and_delete_links(bot, chat_id: int, user, message) -> bool:
                 logger.info("🛡 Фильтр ссылок: %s получил мут на %d мин за повторные ссылки (чат %s)",
                             name, minutes, chat_id)
                 await _notify_moderators_mute(bot, chat_id, user_id, name, minutes,
-                                              f"{LINKFILTER_MUTE_COUNT} ссылки за час",
+                                              f"{LINKFILTER_MUTE_COUNT} ссылки за {linkfilter_window_text()}",
                                               evidence)
         return True
 

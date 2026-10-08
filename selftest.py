@@ -8112,6 +8112,96 @@ def check_cleanup():
                       f"же месяц не повторяется")
 
 
+def check_planned_restart():
+    """
+    Перезапуск отправкой с ПК не будит сторожа (08.10.2026, вопрос Максима
+    «почему сторож пишет, что бот не отвечает»).
+
+    Отправка с ПК (deploy-restart.sh) перезапускает службу снаружи и кладёт
+    боту записку, а хук остановки main.post_stop её читает и молчит. Сломаться
+    тихо это может так: записку перестали читать или удалять (тогда она
+    заглушит следующую НАСТОЯЩУЮ остановку); устаревшая записка всё ещё
+    глушит; хук зовёт сторожа РАНЬШЕ, чем смотрит на записку; сценарий и бот
+    разошлись в имени файла. Хук целиком без Telegram не запустить (main.py
+    при загрузке заводит логи), поэтому порядок в нём сверяется по тексту
+    исходника — тем же приёмом, что get_moderation_counts.
+    """
+    import ast
+    import time
+    from services import deploy
+
+    problems = []
+    done = 0
+
+    def expect(text, ok):
+        nonlocal done
+        done += 1
+        if not ok:
+            problems.append(text)
+
+    saved_mark = deploy.RESTART_MARK
+    tmp = tempfile.mkdtemp(prefix="c4max-mark-")
+    deploy.RESTART_MARK = os.path.join(tmp, ".c4max-restart-planned")
+    try:
+        expect("без записки остановка сочтена плановой", deploy.consume_planned_restart() is False)
+
+        pathlib.Path(deploy.RESTART_MARK).touch()
+        expect("свежая записка не признана — сторож проснётся при отправке с ПК",
+               deploy.consume_planned_restart() is True)
+        expect("записка не удалена после чтения — заглушит следующую настоящую остановку",
+               not os.path.exists(deploy.RESTART_MARK))
+        expect("одна записка заглушила две остановки", deploy.consume_planned_restart() is False)
+
+        pathlib.Path(deploy.RESTART_MARK).touch()
+        old = time.time() - deploy.RESTART_MARK_TTL_SEC - 60
+        os.utime(deploy.RESTART_MARK, (old, old))
+        expect("устаревшая записка всё ещё глушит тревогу", deploy.consume_planned_restart() is False)
+        expect("устаревшая записка не удалена", not os.path.exists(deploy.RESTART_MARK))
+    finally:
+        deploy.RESTART_MARK = saved_mark
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    # Хук остановки: записку смотрит ДО крика сторожу и письма «остановлен».
+    tree = ast.parse(pathlib.Path(ROOT, "main.py").read_text(encoding="utf-8"))
+    hook = next((n for n in tree.body if isinstance(n, ast.AsyncFunctionDef)
+                 and n.name == "post_stop"), None)
+    expect("в main.py нет хука post_stop", hook is not None)
+    if hook is not None:
+        def call_line(name):
+            return min((c.lineno for c in ast.walk(hook) if isinstance(c, ast.Call)
+                        and getattr(c.func, "id", getattr(c.func, "attr", "")) == name),
+                       default=None)
+        # Условие — РОВНО вызов записки: «if False and …» или «if … and x»
+        # выглядели бы так же, а молчать бы перестали.
+        guard = next((n for n in ast.walk(hook) if isinstance(n, ast.If)
+                      and isinstance(n.test, ast.Call)
+                      and getattr(n.test.func, "id", "") == "consume_planned_restart"
+                      and any(isinstance(b, ast.Return) for b in n.body)), None)
+        cry, notify = call_line("_cry_for_help"), call_line("_notify_admins")
+        expect("post_stop не выходит молча по записке от отправки с ПК", guard is not None)
+        expect("post_stop зовёт сторожа раньше, чем смотрит на записку",
+               guard is not None and cry is not None and guard.lineno < cry)
+        expect("post_stop пишет «остановлен» раньше, чем смотрит на записку",
+               guard is not None and notify is not None and guard.lineno < notify)
+
+    # Сценарий отправки с ПК кладёт записку под тем же именем и ДО перезапуска.
+    sh = pathlib.Path(ROOT, "deploy-restart.sh").read_text(encoding="utf-8")
+    name = os.path.basename(deploy.RESTART_MARK)
+    touch_at = next((i for i, ln in enumerate(sh.splitlines())
+                     if "touch" in ln and name in ln and not ln.lstrip().startswith("#")), None)
+    restart_at = next((i for i, ln in enumerate(sh.splitlines())
+                       if "systemctl restart c4max-bot" in ln and not ln.lstrip().startswith("#")), None)
+    expect(f"deploy-restart.sh не кладёт записку {name} (или имя разошлось с ботом)",
+           touch_at is not None)
+    expect("deploy-restart.sh кладёт записку ПОСЛЕ перезапуска — бот её не увидит",
+           touch_at is not None and restart_at is not None and touch_at < restart_at)
+
+    return problems, (f"{done} проверок: свежая записка глушит тревогу один раз и "
+                      f"удаляется, устаревшая не глушит; хук смотрит на неё до сторожа "
+                      f"и письма; сценарий кладёт её под тем же именем до перезапуска")
+
+
 CHECKS = (
     ("деньги — расчёт стоимости запросов", check_money),
     ("квота Qwen — оборванный ответ, срок и письма", check_qwen_quota),
@@ -8162,6 +8252,7 @@ CHECKS = (
     ("новые вопросы викторины: загрузка, очередь, статьи без вопросов", check_quiz_queue),
     ("ночная копия базы и архив статей", check_nightly_backup),
     ("суточная чистка журналов и месячный сброс", check_cleanup),
+    ("перезапуск отправкой с ПК не будит сторожа", check_planned_restart),
 )
 
 

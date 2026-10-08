@@ -44,8 +44,6 @@ from ._core import _lock, _get_connection
 
 logger = logging.getLogger(__name__)
 
-logger = logging.getLogger(__name__)
-
 
 def add_quiz_attempt(user_id: int, username: str, is_correct: bool):
     """Обновляет статистику ответов пользователя в викторине."""

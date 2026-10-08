@@ -40,6 +40,7 @@ from config import (ANTISPAM_ENABLED_DEFAULT, ANTISPAM_MSG_COUNT,
                     PROACTIVE_HANDS_DEFAULT, PROACTIVE_MIN_MSGS,
                     RAG_MIN_SIMILARITY, RAG_PEAK_MARGIN, RAG_TOP_K)
 from database.history import get_setting, set_setting
+from utils_format import THOUGHTS_AT_TOP
 
 logger = logging.getLogger(__name__)
 
@@ -68,13 +69,18 @@ SPEC = {
     "ai_replies_enabled": {
         "section": "answers", "kind": "toggle", "default": "1",
         "title": "Ответы ИИ",
-        "hint": "выключено — бот молчит на обычные сообщения",
+        # Глушит ТОЛЬКО личку владельцев (handlers/messages.py::
+        # _ai_replies_muted_for_admin) — подсказка обязана это говорить.
+        "hint": "выключено — бот молчит только в личке владельцев; "
+                "группы и остальные люди — как обычно",
     },
     "thoughts_enabled": {
         "section": "answers", "kind": "toggle", "default": "1",
         "title": "Показывать мысли модели",
         # ⚠️ Тумблер про ПОКАЗ, а не про расход: модели думают в любом случае.
-        "hint": "свёрнутая цитата рассуждений под ответом",
+        # Где встаёт цитата — решает utils_format.THOUGHTS_AT_TOP; подсказка
+        # берёт место оттуда же, чтобы не разъехаться с ним.
+        "hint": f"свёрнутая цитата рассуждений {'над' if THOUGHTS_AT_TOP else 'под'} ответом",
     },
 
     # ─── 🛡 Антиспам ───

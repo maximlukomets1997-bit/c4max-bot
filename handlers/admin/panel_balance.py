@@ -469,6 +469,10 @@ async def handle_balance_input(update: Update, context: ContextTypes.DEFAULT_TYP
 
     raw = (text or "").strip()
     was_str = _value_str(info["key"], info["kind"], info["absent"])
+    # То же «было», но без разметки — для журнала бота (в лог HTML не пишем).
+    was_value, was_set = _read_number(info["key"], info["kind"])
+    was_plain = ((_tokens_str(was_value) if info["kind"] == "tokens" else _money_str(was_value))
+                 if was_set else info["absent"])
 
     # У квоты Qwen вторым словом можно прислать СРОК её действия: «66614
     # 19.10.2026». Дата необязательна: без неё меняется только число, а ранее
@@ -482,7 +486,7 @@ async def handle_balance_input(update: Update, context: ContextTypes.DEFAULT_TYP
         delete_setting(info["key"])
         context.user_data.pop("balance_edit", None)
         logger.info("🔧 Владелец %s убрал значение %s (было %s)",
-                    update.effective_user.id, info["key"], raw)
+                    update.effective_user.id, info["key"], was_plain)
         _audit(update.effective_user.id, "balance", 0, f"{info['short']}: убрано")
         await send_balance_panel(context.bot, chat_id, update.effective_user.id,
                                 f"✅ <b>{html.escape(info['short'])}</b>: было {was_str} → "
@@ -512,8 +516,9 @@ async def handle_balance_input(update: Update, context: ContextTypes.DEFAULT_TYP
                else f"<b>{_money_str(value)}</b>")
     if quota_date:
         new_str += f" (квота до {quota_date})"
-    logger.info("🔧 Владелец %s изменил %s: %s → %s",
-                update.effective_user.id, info["key"], raw, value)
+    logger.info("🔧 Владелец %s изменил %s: было %s → стало %s",
+                update.effective_user.id, info["key"], was_plain,
+                _tokens_str(value) if info["kind"] == "tokens" else _money_str(value))
     _audit(update.effective_user.id, "balance", 0,
            f"{info['short']}: стало {_tokens_str(value) if info['kind'] == 'tokens' else _money_str(value)}")
     await send_balance_panel(context.bot, chat_id, update.effective_user.id,
