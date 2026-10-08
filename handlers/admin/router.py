@@ -754,9 +754,10 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     if data == "toggle_live_answer":
-        # Тумблер «✍️ ОТВЕТ НА ГЛАЗАХ» (2026-10-08, просьба Максима): в личке
-        # ответ дописывается черновиком по ходу (services/live_answer.py).
-        # Тот же выключатель, что на странице настроек сайта, и тот же код
+        # Тумблер «✍️ ОТВЕТ НА ГЛАЗАХ» (2026-10-08, просьба Максима): ответ
+        # дописывается по ходу — в личке черновиком, в группе правкой
+        # сообщения (services/live_answer.py). Один на личку и группы. Тот же
+        # выключатель, что на странице настроек сайта, и тот же код
         # журнала — правка называется одинаково, где бы её ни сделали.
         from services.live_answer import SETTING_KEY, live_answer_enabled
         new_val = "0" if live_answer_enabled() else "1"
@@ -765,9 +766,9 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         logger.info("🔧 Админ %s: ответ на глазах %s", user_id, state)
         _audit(user_id, "live_answer", 0, f"ответ на глазах {state}")
         await query.answer(
-            "✍️ Ответ на глазах включён: в личке ответ дописывается по ходу."
+            "✍️ Ответ на глазах включён: в личке и в группах ответ дописывается по ходу."
             if new_val == "1" else
-            "✍️ Ответ на глазах выключен: в личке снова «печатает…» и готовый ответ.",
+            "✍️ Ответ на глазах выключен: везде снова «печатает…» и готовый ответ.",
             show_alert=True,
         )
         try:

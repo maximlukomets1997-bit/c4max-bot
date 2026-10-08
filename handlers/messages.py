@@ -393,15 +393,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info("👤 Сообщение пропущено (пользователь %s): ответы ИИ выключены", user.id)
         return
 
-    # 💬 Ответ «на глазах» (08.10.2026): в личке при включённом тумблере ответ
-    # идёт черновиком по ходу (services/live_answer.py). В группах черновиков
-    # у Telegram нет — там всё по-старому.
+    # 💬 Ответ «на глазах» (08.10.2026, services/live_answer.py), выключатель
+    # один на личку и группы. В личке — черновик Telegram, в группе черновиков
+    # нет: там сообщение «💭 Думаю…», которое бот правит по ходу.
+    from services.live_answer import LiveDraft, LiveGroupMessage, live_answer_enabled
     draft = pump = None
-    if not is_group:
-        from services.live_answer import LiveDraft, live_answer_enabled
-        if live_answer_enabled():
-            draft = LiveDraft(chat_id, message.message_id)
-            pump = asyncio.create_task(draft.run(context.bot))
+    if live_answer_enabled():
+        draft = (LiveGroupMessage(chat_id, message.message_id) if is_group
+                 else LiveDraft(chat_id, message.message_id))
+        pump = asyncio.create_task(draft.run(context.bot))
 
     # Статус «печатает…» висит всё время, пока модель думает
     # (общая поддерживалка utils.keep_chat_action).
@@ -417,18 +417,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                               _reply_context_block(message, context.bot), progress=draft)
             )
         finally:
-            # Насос гасим ДО отправки готового ответа: запоздалый черновик
-            # после него снова показал бы недописанный текст.
+            # Насос гасим ДО отправки готового ответа: запоздалое обновление
+            # после него снова показало бы недописанный текст. Мягко — начатая
+            # отправка доходит до конца (см. LiveDraft.run); повисла — отменяем.
             if pump is not None:
                 draft.stop()
-                pump.cancel()
-                await asyncio.gather(pump, return_exceptions=True)
-                logger.debug("💬 Черновик ответа: обновлений %d (чат %s)", draft.sent, chat_id)
+                try:
+                    await asyncio.wait_for(pump, timeout=10)
+                except Exception:
+                    pump.cancel()
+                logger.debug("💬 Ответ на глазах: обновлений %d (чат %s)", draft.sent, chat_id)
 
     # Единая отправка: форматирование (telegramify) + сворачиваемые мысли +
     # безопасная нарезка длинных ответов по границам entity.
     # Текст ответа в лог не пишем — см. handle_photo.
-    await send_formatted(context.bot, chat_id, answer, reply_to=message.message_id)
+    # В группе с ответом «на глазах» готовый ответ — последней правкой того же
+    # сообщения (LiveGroupMessage.finish); его не было — finish шлёт как обычно.
+    if isinstance(draft, LiveGroupMessage):
+        await draft.finish(context.bot, answer)
+    else:
+        await send_formatted(context.bot, chat_id, answer, reply_to=message.message_id)
 
     # Свой ответ — в архив групп (стенограмма проактивного режима)
     if is_group:

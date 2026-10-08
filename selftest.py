@@ -8391,23 +8391,118 @@ def check_live_answer():
         g._gemini_chat_request, g.RAG_ENABLED = saved_chat, saved_rag
         g._live.progress = None
 
-    # ─── обработчик: личка, группа, тумблер; черновик строго до ответа ───
-    class Bot:
-        username = "c4max_test_bot"
+    # ─── группа: одно сообщение, которое правится по ходу ───
+    from telegram.error import BadRequest, RetryAfter
 
-        def __init__(self):
-            self.events = []
+    class GroupBot:
+        """Поддельный Telegram группы: пишет каждое действие по порядку."""
+        def __init__(self, edit_fail=None, edit_fail_times=1):
+            self.events, self.next_id = [], 500
+            self.edit_fail, self.edit_fail_times = edit_fail, edit_fail_times
 
-        async def send_message_draft(self, chat_id, draft_id, text, entities=None):
-            self.events.append(("draft", text))
+        async def send_message(self, chat_id=None, text=None, entities=None,
+                               reply_to_message_id=None, **kw):
+            self.next_id += 1
+            self.events.append(("send", text, reply_to_message_id, self.next_id, entities))
+            return types.SimpleNamespace(message_id=self.next_id)
+
+        async def edit_message_text(self, chat_id=None, message_id=None, text=None,
+                                    entities=None, **kw):
+            if self.edit_fail is not None and self.edit_fail_times > 0:
+                self.edit_fail_times -= 1
+                raise self.edit_fail
+            self.events.append(("edit", text, message_id, entities))
+            return True
+
+        async def delete_message(self, chat_id=None, message_id=None):
+            self.events.append(("delete", message_id))
             return True
 
         async def send_chat_action(self, *a, **kw):
             return True
 
-        async def send_message(self, chat_id=None, text=None, **kw):
-            self.events.append(("answer", text))
-            return types.SimpleNamespace(message_id=999)
+    g_msg = la.LiveGroupMessage(-100, 77)
+    expect("в группе «Думаю» тикает секундами — правки тратились бы впустую",
+           g_msg.view() == la.GROUP_THINK_TEXT)
+
+    async def group_sending():
+        bot, m = GroupBot(), la.LiveGroupMessage(-100, 77)
+        await m.send_once(bot)
+        m.feed("Т-90М")
+        await m.send_once(bot)
+        await m.send_once(bot)
+        kinds = [e[0] for e in bot.events]
+        expect("в группе первым не ушло сообщение ответом на вопрос",
+               bool(bot.events) and bot.events[0][0] == "send" and bot.events[0][2] == 77)
+        expect("в группе по ходу шлются новые сообщения вместо правки одного",
+               kinds == ["send", "edit"] and bot.events[1][2] == bot.events[0][3])
+        # «Не изменилось» — не сбой: правки по ходу продолжаются.
+        bot2 = GroupBot(edit_fail=BadRequest("Message is not modified"))
+        m = la.LiveGroupMessage(-100, 77)
+        await m.send_once(bot2)
+        m.feed("а")
+        await m.send_once(bot2)
+        m.feed("б")
+        await m.send_once(bot2)
+        expect("«Message is not modified» остановило правки по ходу",
+               [e[0] for e in bot2.events] == ["send", "edit"])
+        # Попросил подождать — правки по ходу прекращаются.
+        bot3, m = GroupBot(edit_fail=RetryAfter(5)), la.LiveGroupMessage(-100, 77)
+        await m.send_once(bot3)
+        m.feed("а")
+        await m.send_once(bot3)
+        m.feed("б")
+        await m.send_once(bot3)
+        expect("после «подожди» от Telegram правки по ходу продолжаются",
+               [e[0] for e in bot3.events] == ["send"])
+
+    async def group_finish():
+        # Обычный конец: последняя правка того же сообщения, с разметкой.
+        bot, m = GroupBot(), la.LiveGroupMessage(-100, 77)
+        await m.send_once(bot)
+        await m.finish(bot, "**Готовый** ответ")
+        kinds = [e[0] for e in bot.events]
+        expect("готовый ответ в группе пришёл новым сообщением, а не правкой",
+               kinds == ["send", "edit"])
+        expect("в последней правке нет разметки ответа",
+               len(bot.events) > 1 and "**" not in bot.events[1][1] and bool(bot.events[1][3]))
+        # Длинный ответ: первая часть — правкой, продолжение — новым сообщением.
+        bot, m = GroupBot(), la.LiveGroupMessage(-100, 77)
+        await m.send_once(bot)
+        await m.finish(bot, "слово " * 1500)
+        kinds = [e[0] for e in bot.events]
+        expect("длинный ответ в группе: нет правки первой части и продолжения следом",
+               kinds[:2] == ["send", "edit"] and kinds.count("send") >= 2)
+        # Сообщение удалили — убираем недописанное и шлём ответ новым.
+        bot = GroupBot(edit_fail=BadRequest("Message to edit not found"), edit_fail_times=9)
+        m = la.LiveGroupMessage(-100, 77)
+        await m.send_once(bot)
+        await m.finish(bot, "Готовый ответ")
+        kinds = [e[0] for e in bot.events]
+        expect("правка не вышла — готовый ответ не пришёл новым сообщением ответом на вопрос",
+               kinds == ["send", "delete", "send"] and bot.events[-1][2] == 77)
+        # Короткое «подожди» на последней правке — ждём и правим.
+        bot, m = GroupBot(edit_fail=RetryAfter(0)), la.LiveGroupMessage(-100, 77)
+        await m.send_once(bot)
+        await m.finish(bot, "Готовый ответ")
+        expect("короткое «подожди» на последней правке — ответ ушёл не правкой",
+               [e[0] for e in bot.events] == ["send", "edit"])
+        # Сообщения по ходу не было — обычная отправка.
+        bot, m = GroupBot(), la.LiveGroupMessage(-100, 77)
+        await m.finish(bot, "Готовый ответ")
+        expect("без сообщения по ходу ответ в группе не пришёл обычным путём",
+               [e[0] for e in bot.events] == ["send"] and bot.events[0][2] == 77)
+
+    asyncio.run(group_sending())
+    asyncio.run(group_finish())
+
+    # ─── обработчик: личка, группа, тумблер; обновления строго до ответа ───
+    class Bot(GroupBot):
+        username = "c4max_test_bot"
+
+        async def send_message_draft(self, chat_id, draft_id, text, entities=None):
+            self.events.append(("draft", text))
+            return True
 
     def fake_ask(chat_id, user_id, text, image, reply_ctx, media_kind="", progress=None):
         if progress is not None:
@@ -8427,7 +8522,7 @@ def check_live_answer():
         context = types.SimpleNamespace(bot=bot, user_data={})
         hist.set_setting(la.SETTING_KEY, "1" if enabled else "0")
         saved_h = (hm.ask_gemini, hm.should_respond_in_group, hm.clean_mention,
-                   hm._archive_bot_group_reply, la.TICK_SEC)
+                   hm._archive_bot_group_reply, la.TICK_SEC, la.GROUP_TICK_SEC)
         try:
             hm.ask_gemini = fake_ask
             hm.should_respond_in_group = lambda *a, **kw: True
@@ -8436,7 +8531,7 @@ def check_live_answer():
             async def _no_archive(*a, **kw):
                 return None
             hm._archive_bot_group_reply = _no_archive
-            la.TICK_SEC = 0.02
+            la.TICK_SEC = la.GROUP_TICK_SEC = 0.02
 
             async def go():
                 await hm.handle_message(update, context)
@@ -8450,28 +8545,39 @@ def check_live_answer():
                    not leftovers)
         finally:
             (hm.ask_gemini, hm.should_respond_in_group, hm.clean_mention,
-             hm._archive_bot_group_reply, la.TICK_SEC) = saved_h
+             hm._archive_bot_group_reply, la.TICK_SEC, la.GROUP_TICK_SEC) = saved_h
         return bot.events
 
     saved_toggle = hist.get_setting(la.SETTING_KEY, "")
     try:
         ev = run_handler("private", True)
-        drafts = [t for k, t in ev if k == "draft"]
-        answers = [i for i, (k, _) in enumerate(ev) if k == "answer"]
+        drafts = [e[1] for e in ev if e[0] == "draft"]
+        answers = [i for i, e in enumerate(ev) if e[0] == "send"]
         expect("в личке при включённом тумблере черновика нет", bool(drafts))
         expect("черновик не дописывался по ходу (нет текста ответа)", "Ответ по ходу" in drafts)
         expect("готовый ответ не пришёл", len(answers) == 1)
         expect("черновик пришёл ПОСЛЕ готового ответа — недописанный текст вернулся бы",
-               bool(answers) and all(k != "draft" for k, _ in ev[answers[0]:]))
+               bool(answers) and all(e[0] != "draft" for e in ev[answers[0]:]))
+
         ev = run_handler("supergroup", True)
-        expect("в группе появился черновик — у Telegram их там нет",
-               not [1 for k, _ in ev if k == "draft"])
-        expect("в группе пропал готовый ответ", [k for k, _ in ev].count("answer") == 1)
+        kinds = [e[0] for e in ev]
+        expect("в группе появился черновик — у Telegram их там нет", "draft" not in kinds)
+        expect("в группе вместо одного сообщения ушло несколько (или ни одного)",
+               kinds.count("send") == 1 and ev[0][0] == "send" and ev[0][2] == 77)
+        expect("в группе сообщение не дописывалось по ходу",
+               any(e[0] == "edit" and e[1] == "Ответ по ходу" for e in ev))
+        expect("в группе готовый ответ не стал последней правкой того же сообщения",
+               bool(ev) and ev[-1][0] == "edit" and ev[-1][1] == "Готовый ответ"
+               and ev[0][0] == "send" and ev[-1][2] == ev[0][3])
+
         ev = run_handler("private", False)
         expect("тумблер «Ответ на глазах» выключен, а черновик есть",
-               not [1 for k, _ in ev if k == "draft"])
+               not [1 for e in ev if e[0] == "draft"])
         expect("при выключенном тумблере пропал готовый ответ",
-               [k for k, _ in ev].count("answer") == 1)
+               [e[0] for e in ev].count("send") == 1)
+        ev = run_handler("supergroup", False)
+        expect("тумблер выключен, а в группе сообщение правится по ходу",
+               [e[0] for e in ev] == ["send"] and ev[0][1] == "Готовый ответ")
     finally:
         if saved_toggle == "":
             hist.delete_setting(la.SETTING_KEY)
@@ -8504,7 +8610,9 @@ def check_live_answer():
     return problems, (f"{done} проверок: показ «Думаю», текста, сбоя и длинного ответа; "
                       f"мысли в черновик не текут; повтор стирает текст сбившейся; отказ "
                       f"Telegram не роняет ответ; черновик снимается с потока; в личке он "
-                      f"есть и кончается до ответа, в группе и при выключенном тумблере — нет")
+                      f"есть и кончается до ответа; в группе одно сообщение правится по ходу "
+                      f"и становится ответом, отказы Telegram ведут к ответу новым; "
+                      f"при выключенном тумблере — по-старому")
 
 
 CHECKS = (
