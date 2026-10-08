@@ -30,6 +30,7 @@
 
 import logging
 import re
+import threading
 import time
 import json
 import base64
@@ -1191,6 +1192,30 @@ def _charge_broken_stream(model_name: str, messages: list,
     return tokens
 
 
+# ── Черновик «ответ на глазах» (08.10.2026) ──────────────────────────────
+# Куда отдавать текст ответа ПО ХОДУ: объект services/live_answer.LiveDraft
+# или None. Ставит его ask_gemini — ТОЛЬКО вокруг основного запроса к модели
+# (разбор фото и поиск идут мимо, их текст в черновик попасть не должен), а
+# читают поток (_openai_stream_request — кусок ответа) и перебор цепочки
+# (_try_model — началась новая попытка, прежний текст недействителен).
+# ⚠️ Хранится по потоку, а не параметром: запрос идёт в потоке исполнителя,
+# у каждого ответа свой, а сквозной параметр пришлось бы тянуть через пять
+# функций и все их подмены в selftest. Черновик — только показ: любая его
+# ошибка глушится здесь и до ответа не доходит.
+_live = threading.local()
+
+
+def _live_call(method: str, *args) -> None:
+    """Сообщить черновику текущего ответа (если он есть), ошибки — глушим."""
+    progress = getattr(_live, "progress", None)
+    if progress is None:
+        return
+    try:
+        getattr(progress, method)(*args)
+    except Exception:
+        pass
+
+
 def _openai_stream_request(model_name: str, messages: list, api_url: str,
                            api_key: str, extra_payload: dict):
     """
@@ -1285,6 +1310,7 @@ def _openai_stream_request(model_name: str, messages: list, api_url: str,
                 c = delta.get("content")
                 if c:
                     answer_parts.append(c)
+                    _live_call("feed", c)   # черновик «ответ на глазах»; мысли туда не идут
         # ⚠️ ПОТОК КОНЧИЛСЯ БЕЗ ОТЧЁТА О ТОКЕНАХ — ЭТО ОБРЫВ, А НЕ ОТВЕТ
         # (05.10.2026). Отчёт (usage) провайдер шлёт последним куском, и все
         # трое шлют его в КАЖДОМ нормальном ответе — сверено живыми запросами
@@ -1715,6 +1741,8 @@ def _gemini_chat_request(messages: list, kind: str = "текст", has_image: bo
         last_error = None
         for attempt in range(attempts):
             attempt_started = time.perf_counter()
+            # Новая попытка — текст прошлой в черновике больше не годится.
+            _live_call("attempt")
             try:
                 if provider == "qwen":
                     data = _qwen_chat_request(model_name, messages)
@@ -2681,7 +2709,7 @@ def _dialog_native_prompt_text(system_prompt: str, contents: list) -> str:
 # ───────────────────────────────────────────────
 
 def ask_gemini(chat_id: int, user_id: int, user_text: str, image_base64: str = None,
-               reply_context: str = "", media_kind: str = "") -> str:
+               reply_context: str = "", media_kind: str = "", progress=None) -> str:
     """
     Отправляет сообщение пользователя активной модели вместе с объединённым
     контекстным окном (личка + группы одного пользователя).
@@ -2702,6 +2730,10 @@ def ask_gemini(chat_id: int, user_id: int, user_text: str, image_base64: str = N
         его НЕ понимает»). Меняет две вещи и больше ничего: тип в записи
         обращений и запрет класть такой запрос в кэш векторов — он уникален
         почти всегда и вымыл бы оттуда настоящие вопросы людей.
+    :param progress: черновик «ответ на глазах» (services/live_answer.LiveDraft)
+        или None. Получает текст ответа по ходу — только от потоковых моделей
+        (Qwen, DeepSeek, Xiaomi) и только из основного запроса. На то, что
+        функция вернёт и запишет, не влияет никак.
     """
     # ── Фото, а активная модель слепая: спрашиваем не её глаза, а разбор ──
     # (21.09.2026). Раньше здесь срабатывал vision-reroute: фото уходило
@@ -2823,12 +2855,18 @@ def ask_gemini(chat_id: int, user_id: int, user_text: str, image_base64: str = N
     # ⚠️ ВРЕМЯ ОТДАЁТ САМА ЦЕПОЧКА (timing), секундомер вокруг вызова ставить
     # нельзя — выйдет время всей очереди под именем последней модели (_took).
     timing = {"own": 0.0, "total": 0.0}
-    data, used_model = _gemini_chat_request(
-        messages,
-        kind="фото на анализ" if image_base64 else "текст",
-        has_image=bool(image_base64),
-        timing=timing,
-    )
+    # Черновик слушает ТОЛЬКО этот запрос (см. _live) и снимается в любом
+    # исходе: поток исполнителя потом обслужит чужой ответ.
+    _live.progress = progress
+    try:
+        data, used_model = _gemini_chat_request(
+            messages,
+            kind="фото на анализ" if image_base64 else "текст",
+            has_image=bool(image_base64),
+            timing=timing,
+        )
+    finally:
+        _live.progress = None
 
     # Пишем ПОСЛЕ запроса: имя ответившей модели известно только теперь —
     # цепочка подстраховки могла увести запрос на запасную.

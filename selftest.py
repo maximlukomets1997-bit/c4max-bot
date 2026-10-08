@@ -3744,6 +3744,7 @@ def check_settings_spec():
     from services.antispam import is_enabled, is_linkfilter_enabled
     from services import greeter
     from utils_format import thoughts_enabled
+    from services.live_answer import live_answer_enabled
 
     readers = {
         "antispam_enabled":   is_enabled,
@@ -3752,6 +3753,7 @@ def check_settings_spec():
         "greet_captcha":      greeter.captcha_enabled,
         "greet_kick":         greeter.kick_enabled,
         "thoughts_enabled":   thoughts_enabled,
+        "live_answer_enabled": live_answer_enabled,
     }
     for key, reader in readers.items():
         # Начальное значение: список и читалка обязаны сойтись на чистой базе.
@@ -8202,6 +8204,286 @@ def check_planned_restart():
                       f"и письма; сценарий кладёт её под тем же именем до перезапуска")
 
 
+def check_live_answer():
+    """
+    Ответ «на глазах» в личке (08.10.2026, решение Максима): ответ модели
+    показывается черновиком Telegram по ходу, а готовый уходит как раньше.
+
+    ⚠️ Ради чего проверка существует. Черновик стоит на пути КАЖДОГО ответа
+    в личке, и тихо сломаться он может так: в черновик утекают мысли модели;
+    после сбоя модели в нём остаётся текст сбившейся; отказ Telegram роняет
+    сам ответ; черновик висит на потоке исполнителя и ловит чужой ответ;
+    насос шлёт черновик ПОСЛЕ готового сообщения; черновики появляются в
+    группе или при выключенном тумблере. Обработчик гоняется настоящий
+    (handlers/messages.py::handle_message) с поддельным Telegram, модель —
+    подставная; поток модели — настоящий _openai_stream_request на
+    поддельной сети.
+    """
+    import asyncio
+    import json as _json
+    import time as _time
+    import types
+    import config as c
+    from services import gemini as g
+    from services import live_answer as la
+    from database import history as hist
+    import handlers.messages as hm
+
+    problems = []
+    done = 0
+
+    def expect(title, ok):
+        nonlocal done
+        done += 1
+        if not ok:
+            problems.append(title)
+
+    # ─── показ ───
+    d = la.LiveDraft(1, 0)
+    expect("номер черновика 0 не заменён — Telegram такой не примет", d.draft_id != 0)
+    expect("до первых слов ответа в черновике не «Думаю…»", d.view().startswith("💭 Думаю…"))
+    d.feed("Т-90М")
+    d.feed(" получил защиту")
+    expect("черновик не показывает присланный текст", d.view() == "Т-90М получил защиту")
+    d.attempt()
+    expect("после сбоя модели в черновике остался текст сбившейся", d.view() == la.RETRY_TEXT)
+    d.feed("Новый ответ")
+    expect("новая попытка смешалась со старой", d.view() == "Новый ответ")
+    d = la.LiveDraft(1, 5)
+    d.attempt()
+    d.attempt()
+    expect("повтор ДО первых слов пугает «модель сбилась»", d.view().startswith("💭 Думаю…"))
+    d = la.LiveDraft(1, 5)
+    d.feed("я" * (la.DRAFT_MAX_CHARS + 500))
+    v = d.view()
+    expect("длинный ответ не обрезан под предел черновика",
+           len(v) <= la.DRAFT_MAX_CHARS + 2 and v.endswith("…"))
+
+    # ─── отправка черновика ───
+    class DraftBot:
+        def __init__(self, fail=False):
+            self.drafts, self.fail = [], fail
+
+        async def send_message_draft(self, chat_id, draft_id, text, entities=None):
+            if self.fail:
+                raise RuntimeError("Telegram отказал")
+            self.drafts.append((chat_id, draft_id, text, entities))
+            return True
+
+    async def sending():
+        bot, d = DraftBot(), la.LiveDraft(42, 7)
+        d.feed("**Жирный** текст")
+        await d.send_once(bot)
+        await d.send_once(bot)
+        expect("один и тот же черновик ушёл дважды", len(bot.drafts) == 1)
+        expect("черновик ушёл не в тот чат или не под тем номером",
+               bool(bot.drafts) and bot.drafts[0][:2] == (42, 7))
+        expect("разметка ответа в черновике не стала выделением",
+               bool(bot.drafts) and "**" not in bot.drafts[0][2] and bool(bot.drafts[0][3]))
+        bad, d = DraftBot(fail=True), la.LiveDraft(42, 7)
+        try:
+            await d.send_once(bad)
+            d.feed("текст")
+            await d.send_once(bad)
+            ok = True
+        except Exception:
+            ok = False
+        expect("отказ Telegram вылетел наружу — человек остался бы без ответа", ok)
+        good = DraftBot()
+        d.feed(" ещё")
+        await d.send_once(good)
+        expect("после отказа Telegram черновик продолжает слать", not good.drafts)
+
+    asyncio.run(sending())
+
+    # ─── поток модели: в черновик идёт ответ, а не мысли ───
+    def sse(obj):
+        return ("data: " + _json.dumps(obj, ensure_ascii=False)).encode()
+
+    lines = [sse({"choices": [{"delta": {"reasoning_content": "СЕКРЕТНЫЕ МЫСЛИ"}}]}),
+             sse({"choices": [{"delta": {"content": "Ответ "}}]}),
+             sse({"choices": [{"delta": {"content": "по делу"}, "finish_reason": "stop"}]}),
+             sse({"usage": {"prompt_tokens": 1, "completion_tokens": 2,
+                            "total_tokens": 3}, "choices": []}),
+             b"data: [DONE]"]
+
+    class ListResponse:
+        def raise_for_status(self): pass
+        def close(self): pass
+        def iter_lines(self): yield from lines
+
+    saved_http = g._http
+    d = la.LiveDraft(1, 1)
+    g._http = lambda: type("H", (), {"post": lambda self, *a, **kw: ListResponse()})()
+    g._live.progress = d
+    try:
+        got = g._openai_stream_request("m", [{"role": "user", "content": "q"}],
+                                       "http://example", "key", {})
+    finally:
+        g._live.progress = None
+        g._http = saved_http
+    expect("в черновик не попал ответ потоковой модели", d.view() == "Ответ по делу")
+    expect("в черновик утекли мысли модели", "СЕКРЕТНЫЕ" not in d.view())
+    expect("черновик изменил то, что вернула модель",
+           bool(got) and got["choices"][0]["message"]["content"].endswith("Ответ по делу"))
+
+    # ─── цепочка: новая попытка обнуляет черновик ───
+    QWEN = next((m for m, meta in c.AVAILABLE_MODELS.items()
+                 if meta.get("provider") == "qwen"), None)
+    if QWEN:
+        calls = []
+
+        def fake_provider(model, messages):
+            calls.append(model)
+            if len(calls) == 1:
+                g._live_call("feed", "текст сбившейся модели")
+                raise ValueError("обрыв посреди ответа")
+            g._live_call("feed", "текст новой попытки")
+            return {"choices": [{"message": {"content": "текст новой попытки"}}], "usage": {}}
+
+        saved = (g._qwen_chat_request, g._deepseek_chat_request, g._xiaomi_chat_request,
+                 g._notify_models_failed, g.time)
+        saved_active = hist.get_setting("active_model", "")
+        d = la.LiveDraft(1, 1)
+        try:
+            g._qwen_chat_request = g._deepseek_chat_request = g._xiaomi_chat_request = fake_provider
+            g._notify_models_failed = lambda *a, **kw: None
+            g.time = types.SimpleNamespace(sleep=lambda *_: None, perf_counter=_time.perf_counter,
+                                           monotonic=_time.monotonic, time=_time.time)
+            hist.set_setting("active_model", QWEN)
+            g._live.progress = d
+            g._gemini_chat_request([{"role": "user", "content": "q"}], kind="проверка")
+        finally:
+            g._live.progress = None
+            (g._qwen_chat_request, g._deepseek_chat_request, g._xiaomi_chat_request,
+             g._notify_models_failed, g.time) = saved
+            hist.set_setting("active_model", saved_active)
+        expect("повтор запроса не стёр в черновике текст сбившейся попытки",
+               d.view() == "текст новой попытки")
+
+    # ─── ask_gemini: черновик слушает только основной запрос и снимается ───
+    seen = {}
+
+    def fake_chat(messages, **kw):
+        seen["progress"] = getattr(g._live, "progress", None)
+        return None, None
+
+    def boom(messages, **kw):
+        raise RuntimeError("сбой запроса")
+
+    saved_chat, saved_rag = g._gemini_chat_request, g.RAG_ENABLED
+    d = la.LiveDraft(1, 1)
+    try:
+        g.RAG_ENABLED = False
+        g._gemini_chat_request = fake_chat
+        g.ask_gemini(1, 1, "вопрос", progress=d)
+        expect("основной запрос к модели не видит черновика", seen.get("progress") is d)
+        expect("черновик остался на потоке после ответа — туда ушёл бы чужой ответ",
+               getattr(g._live, "progress", None) is None)
+        g._gemini_chat_request = boom
+        try:
+            g.ask_gemini(1, 1, "вопрос", progress=d)
+        except Exception:
+            pass
+        expect("после сбоя запроса черновик остался на потоке",
+               getattr(g._live, "progress", None) is None)
+    finally:
+        g._gemini_chat_request, g.RAG_ENABLED = saved_chat, saved_rag
+        g._live.progress = None
+
+    # ─── обработчик: личка, группа, тумблер; черновик строго до ответа ───
+    class Bot:
+        username = "c4max_test_bot"
+
+        def __init__(self):
+            self.events = []
+
+        async def send_message_draft(self, chat_id, draft_id, text, entities=None):
+            self.events.append(("draft", text))
+            return True
+
+        async def send_chat_action(self, *a, **kw):
+            return True
+
+        async def send_message(self, chat_id=None, text=None, **kw):
+            self.events.append(("answer", text))
+            return types.SimpleNamespace(message_id=999)
+
+    def fake_ask(chat_id, user_id, text, image, reply_ctx, media_kind="", progress=None):
+        if progress is not None:
+            progress.feed("Ответ по ")
+            _time.sleep(0.12)
+            progress.feed("ходу")
+            _time.sleep(0.12)
+        return "Готовый ответ"
+
+    def run_handler(chat_type, enabled):
+        bot = Bot()
+        chat = types.SimpleNamespace(id=-100_555 if chat_type != "private" else 555, type=chat_type)
+        user = types.SimpleNamespace(id=555, full_name="Проверка", username=None)
+        msg = types.SimpleNamespace(text="вопрос", message_id=77, reply_to_message=None,
+                                    chat=chat, from_user=user)
+        update = types.SimpleNamespace(message=msg, effective_chat=chat, effective_user=user)
+        context = types.SimpleNamespace(bot=bot, user_data={})
+        hist.set_setting(la.SETTING_KEY, "1" if enabled else "0")
+        saved_h = (hm.ask_gemini, hm.should_respond_in_group, hm.clean_mention,
+                   hm._archive_bot_group_reply, la.TICK_SEC)
+        try:
+            hm.ask_gemini = fake_ask
+            hm.should_respond_in_group = lambda *a, **kw: True
+            hm.clean_mention = lambda text, *a, **kw: text
+
+            async def _no_archive(*a, **kw):
+                return None
+            hm._archive_bot_group_reply = _no_archive
+            la.TICK_SEC = 0.02
+
+            async def go():
+                await hm.handle_message(update, context)
+                await asyncio.sleep(0.05)
+                # Насос, не погашенный после ответа, лишнего не шлёт (показ не
+                # меняется), зато крутится вечно — по задаче на каждое сообщение.
+                return [t for t in asyncio.all_tasks()
+                        if t is not asyncio.current_task() and not t.done()]
+            leftovers = asyncio.run(go())
+            expect(f"после ответа ({chat_type}) остались крутиться задачи: {len(leftovers)}",
+                   not leftovers)
+        finally:
+            (hm.ask_gemini, hm.should_respond_in_group, hm.clean_mention,
+             hm._archive_bot_group_reply, la.TICK_SEC) = saved_h
+        return bot.events
+
+    saved_toggle = hist.get_setting(la.SETTING_KEY, "")
+    try:
+        ev = run_handler("private", True)
+        drafts = [t for k, t in ev if k == "draft"]
+        answers = [i for i, (k, _) in enumerate(ev) if k == "answer"]
+        expect("в личке при включённом тумблере черновика нет", bool(drafts))
+        expect("черновик не дописывался по ходу (нет текста ответа)", "Ответ по ходу" in drafts)
+        expect("готовый ответ не пришёл", len(answers) == 1)
+        expect("черновик пришёл ПОСЛЕ готового ответа — недописанный текст вернулся бы",
+               bool(answers) and all(k != "draft" for k, _ in ev[answers[0]:]))
+        ev = run_handler("supergroup", True)
+        expect("в группе появился черновик — у Telegram их там нет",
+               not [1 for k, _ in ev if k == "draft"])
+        expect("в группе пропал готовый ответ", [k for k, _ in ev].count("answer") == 1)
+        ev = run_handler("private", False)
+        expect("тумблер «Ответ на глазах» выключен, а черновик есть",
+               not [1 for k, _ in ev if k == "draft"])
+        expect("при выключенном тумблере пропал готовый ответ",
+               [k for k, _ in ev].count("answer") == 1)
+    finally:
+        if saved_toggle == "":
+            hist.delete_setting(la.SETTING_KEY)
+        else:
+            hist.set_setting(la.SETTING_KEY, saved_toggle)
+
+    return problems, (f"{done} проверок: показ «Думаю», текста, сбоя и длинного ответа; "
+                      f"мысли в черновик не текут; повтор стирает текст сбившейся; отказ "
+                      f"Telegram не роняет ответ; черновик снимается с потока; в личке он "
+                      f"есть и кончается до ответа, в группе и при выключенном тумблере — нет")
+
+
 CHECKS = (
     ("деньги — расчёт стоимости запросов", check_money),
     ("квота Qwen — оборванный ответ, срок и письма", check_qwen_quota),
@@ -8253,6 +8535,7 @@ CHECKS = (
     ("ночная копия базы и архив статей", check_nightly_backup),
     ("суточная чистка журналов и месячный сброс", check_cleanup),
     ("перезапуск отправкой с ПК не будит сторожа", check_planned_restart),
+    ("ответ «на глазах»: черновик в личке", check_live_answer),
 )
 
 

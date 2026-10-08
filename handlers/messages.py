@@ -393,6 +393,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info("👤 Сообщение пропущено (пользователь %s): ответы ИИ выключены", user.id)
         return
 
+    # 💬 Ответ «на глазах» (08.10.2026): в личке при включённом тумблере ответ
+    # идёт черновиком по ходу (services/live_answer.py). В группах черновиков
+    # у Telegram нет — там всё по-старому.
+    draft = pump = None
+    if not is_group:
+        from services.live_answer import LiveDraft, live_answer_enabled
+        if live_answer_enabled():
+            draft = LiveDraft(chat_id, message.message_id)
+            pump = asyncio.create_task(draft.run(context.bot))
+
     # Статус «печатает…» висит всё время, пока модель думает
     # (общая поддерживалка utils.keep_chat_action).
     async with keep_chat_action(context.bot, chat_id, "typing"):
@@ -400,10 +410,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         loop   = asyncio.get_running_loop()
         # Четвёртым аргументом картинки нет (None), пятым — на какое сообщение
         # отвечают: без него бот получал голое «а это точно?» без предмета.
-        answer = await loop.run_in_executor(
-            None, ask_gemini, chat_id, user.id, user_text, None,
-            _reply_context_block(message, context.bot)
-        )
+        from functools import partial
+        try:
+            answer = await loop.run_in_executor(
+                None, partial(ask_gemini, chat_id, user.id, user_text, None,
+                              _reply_context_block(message, context.bot), progress=draft)
+            )
+        finally:
+            # Насос гасим ДО отправки готового ответа: запоздалый черновик
+            # после него снова показал бы недописанный текст.
+            if pump is not None:
+                draft.stop()
+                pump.cancel()
+                await asyncio.gather(pump, return_exceptions=True)
+                logger.debug("💬 Черновик ответа: обновлений %d (чат %s)", draft.sent, chat_id)
 
     # Единая отправка: форматирование (telegramify) + сворачиваемые мысли +
     # безопасная нарезка длинных ответов по границам entity.
