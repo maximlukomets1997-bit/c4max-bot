@@ -8512,12 +8512,31 @@ def check_live_answer():
             _time.sleep(0.12)
         return "Готовый ответ"
 
-    def run_handler(chat_type, enabled):
+    def run_handler(chat_type, enabled, kind="text"):
+        """kind: text — текст; photo — фото; photo_fail — фото не скачалось
+        (после паузы: «Думаю…» в группе успевает появиться)."""
         bot = Bot()
         chat = types.SimpleNamespace(id=-100_555 if chat_type != "private" else 555, type=chat_type)
         user = types.SimpleNamespace(id=555, full_name="Проверка", username=None)
-        msg = types.SimpleNamespace(text="вопрос", message_id=77, reply_to_message=None,
-                                    chat=chat, from_user=user)
+
+        class _File:
+            async def download_as_bytearray(self):
+                if kind == "photo_fail":
+                    await asyncio.sleep(0.1)
+                    raise RuntimeError("фото не скачалось")
+                return bytearray(b"QQ")
+
+        class _Photo:
+            async def get_file(self):
+                return _File()
+
+        async def _reply_text(text, **kw):
+            bot.events.append(("reply_text", text))
+        msg = types.SimpleNamespace(text=None if kind != "text" else "вопрос",
+                                    caption="что на фото?" if kind != "text" else None,
+                                    photo=[_Photo()] if kind != "text" else None,
+                                    message_id=77, reply_to_message=None,
+                                    chat=chat, from_user=user, reply_text=_reply_text)
         update = types.SimpleNamespace(message=msg, effective_chat=chat, effective_user=user)
         context = types.SimpleNamespace(bot=bot, user_data={})
         hist.set_setting(la.SETTING_KEY, "1" if enabled else "0")
@@ -8534,14 +8553,14 @@ def check_live_answer():
             la.TICK_SEC = la.GROUP_TICK_SEC = 0.02
 
             async def go():
-                await hm.handle_message(update, context)
+                await (hm.handle_message if kind == "text" else hm.handle_photo)(update, context)
                 await asyncio.sleep(0.05)
                 # Насос, не погашенный после ответа, лишнего не шлёт (показ не
                 # меняется), зато крутится вечно — по задаче на каждое сообщение.
                 return [t for t in asyncio.all_tasks()
                         if t is not asyncio.current_task() and not t.done()]
             leftovers = asyncio.run(go())
-            expect(f"после ответа ({chat_type}) остались крутиться задачи: {len(leftovers)}",
+            expect(f"после ответа ({chat_type}, {kind}) остались крутиться задачи: {len(leftovers)}",
                    not leftovers)
         finally:
             (hm.ask_gemini, hm.should_respond_in_group, hm.clean_mention,
@@ -8578,6 +8597,36 @@ def check_live_answer():
         ev = run_handler("supergroup", False)
         expect("тумблер выключен, а в группе сообщение правится по ходу",
                [e[0] for e in ev] == ["send"] and ev[0][1] == "Готовый ответ")
+
+        # ─── фото (handlers/messages.py::handle_photo) — тот же показ по ходу ───
+        ev = run_handler("private", True, "photo")
+        drafts = [e[1] for e in ev if e[0] == "draft"]
+        answers = [i for i, e in enumerate(ev) if e[0] == "send"]
+        expect("фото в личке: черновик не дописывался по ходу", "Ответ по ходу" in drafts)
+        expect("фото в личке: готовый ответ не пришёл одним сообщением ответом на фото",
+               len(answers) == 1 and ev[answers[0]][2] == 77)
+        expect("фото в личке: черновик пришёл после готового ответа",
+               bool(answers) and all(e[0] != "draft" for e in ev[answers[0]:]))
+        ev = run_handler("supergroup", True, "photo")
+        kinds = [e[0] for e in ev]
+        expect("фото в группе: вместо одного сообщения несколько (или черновик)",
+               kinds.count("send") == 1 and "draft" not in kinds and ev[0][2] == 77)
+        expect("фото в группе: готовый ответ не стал правкой того же сообщения",
+               any(e[0] == "edit" and e[1] == "Ответ по ходу" for e in ev)
+               and ev[-1][0] == "edit" and ev[-1][1] == "Готовый ответ"
+               and ev[0][0] == "send" and ev[-1][2] == ev[0][3])
+        ev = run_handler("supergroup", True, "photo_fail")
+        kinds = [e[0] for e in ev]
+        expect("фото в группе не скачалось: «Думаю…» не превратилось в ошибку, "
+               "или рядом легло второе сообщение",
+               kinds == ["send", "edit"] and ev[0][1] == la.GROUP_THINK_TEXT
+               and "ошибка" in (ev[1][1] or ""))
+        ev = run_handler("private", True, "photo_fail")
+        expect("фото в личке не скачалось: нет сообщения об ошибке",
+               [e[0] for e in ev if e[0] != "draft"] == ["reply_text"])
+        ev = run_handler("supergroup", False, "photo")
+        expect("тумблер выключен, а фото в группе правится по ходу",
+               [e[0] for e in ev] == ["send"] and ev[0][1] == "Готовый ответ")
     finally:
         if saved_toggle == "":
             hist.delete_setting(la.SETTING_KEY)
@@ -8612,7 +8661,8 @@ def check_live_answer():
                       f"Telegram не роняет ответ; черновик снимается с потока; в личке он "
                       f"есть и кончается до ответа; в группе одно сообщение правится по ходу "
                       f"и становится ответом, отказы Telegram ведут к ответу новым; "
-                      f"при выключенном тумблере — по-старому")
+                      f"фото — так же, сбой скачивания в группе превращает «Думаю…» в "
+                      f"ошибку; при выключенном тумблере — по-старому")
 
 
 CHECKS = (
