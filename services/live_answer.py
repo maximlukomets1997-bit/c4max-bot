@@ -29,9 +29,12 @@
 # подождать (RetryAfter) — правки по ходу прекращаются.
 # ⚠️ «Сам в разговор» сюда не ходит: там бот может решить промолчать, и
 # «Думаю…» выдало бы его заранее (решение Максима 08.10.2026 — без него).
-# Только прямые вопросы: текст и фото (handlers/messages.py: handle_message,
-# handle_photo через _start_live/_stop_live/_deliver). Голосовые и видео —
-# по-старому: у них сначала идёт расшифровка другой моделью.
+# Только прямые вопросы: текст, фото, голосовое и видео (handlers/messages.py
+# через _start_live/_stop_live/_deliver/_reply_error). У голосового и видео
+# (09.10.2026) первая стадия — label («🎧 Слушаю голосовое…» / «🎬 Смотрю
+# видео…»), пока вспомогательная модель расшифровывает файл; потом «Думаю»
+# и текст ответа активной модели. Запасной путь «файл слышащей/зрячей
+# цепочке» отвечает одним куском — показ до конца стоит на первой стадии.
 # ⚠️ Модели Gemini у нас отвечают одним куском (без потока) — с ними показ
 # так и стоит на «Думаю…» до готового ответа.
 # ─────────────────────────────────────────────────────────────
@@ -87,16 +90,24 @@ class LiveDraft:
     """
     Черновик одного ответа в личке.
 
-    feed() и attempt() зовёт поток исполнителя (запрос к модели), run() —
-    цикл событий. Общего у них — список кусков и два флага; присваивания и
-    добавление в список в Python атомарны, замок не нужен.
+    feed(), attempt() и thinking() зовёт поток исполнителя (запрос к модели),
+    run() — цикл событий. Общего у них — список кусков и флаги; присваивания
+    и добавление в список в Python атомарны, замок не нужен.
+
+    label (09.10.2026) — первая стадия для голосового и видео: «🎧 Слушаю
+    голосовое…» / «🎬 Смотрю видео…», пока вспомогательная модель
+    расшифровывает файл. Как только основной запрос начался (thinking() из
+    gemini.ask_gemini), стадия сменяется на «💭 Думаю…». Без label — сразу
+    «Думаю».
     """
 
-    def __init__(self, chat_id: int, draft_id: int):
+    def __init__(self, chat_id: int, draft_id: int, label: str | None = None):
         self.chat_id = chat_id
         self.draft_id = draft_id or 1        # Telegram требует ненулевой номер
         self._parts: list[str] = []          # куски ответа ТЕКУЩЕЙ попытки
         self._restarted = False              # прошлая попытка успела показать текст
+        self._label = label                  # стадия до «Думаю» (голосовое, видео)
+        self._thinking = label is None       # основной запрос к модели уже идёт
         self._started = time.monotonic()
         self._stopped = False
         self._dead = False                   # Telegram отказал — больше не шлём
@@ -104,6 +115,10 @@ class LiveDraft:
         self.sent = 0                        # сколько черновиков ушло (для лога и проверки)
 
     # ── зовёт поток модели ───────────────────────────────────
+    def thinking(self) -> None:
+        """Начался основной запрос к модели: стадия «Слушаю/Смотрю» позади."""
+        self._thinking = True
+
     def attempt(self) -> None:
         """Началась новая попытка цепочки: прежний текст недействителен."""
         if self._parts:
@@ -115,8 +130,8 @@ class LiveDraft:
         self._parts.append(piece)
 
     # ── показ ────────────────────────────────────────────────
-    def view(self) -> str:
-        """Что сейчас должно стоять в черновике (сырой Markdown)."""
+    def _view(self, seconds: bool) -> str:
+        """Показ по ходу (сырой Markdown); seconds — тикающий счётчик ожидания."""
         text = "".join(self._parts).strip()
         if text:
             if len(text) > DRAFT_MAX_CHARS:
@@ -124,7 +139,14 @@ class LiveDraft:
             return text
         if self._restarted:
             return RETRY_TEXT
-        return THINK_TEXT.format(sec=int(time.monotonic() - self._started))
+        sec = int(time.monotonic() - self._started)
+        if not self._thinking and self._label:
+            return f"{self._label} {sec} с" if seconds else self._label
+        return THINK_TEXT.format(sec=sec) if seconds else GROUP_THINK_TEXT
+
+    def view(self) -> str:
+        """Что сейчас должно стоять в черновике лички (со счётчиком секунд)."""
+        return self._view(seconds=True)
 
     async def send_once(self, bot) -> None:
         """Отправить черновик, если показ изменился. Отказ — черновик умолкает."""
@@ -203,8 +225,8 @@ class LiveGroupMessage(LiveDraft):
     Максимом 08.10.2026.
     """
 
-    def __init__(self, chat_id: int, reply_to: int):
-        super().__init__(chat_id, 1)
+    def __init__(self, chat_id: int, reply_to: int, label: str | None = None):
+        super().__init__(chat_id, 1, label)
         self.reply_to = reply_to
         self.message_id = None               # сообщение, которое правим
 
@@ -212,9 +234,8 @@ class LiveGroupMessage(LiveDraft):
         return GROUP_TICK_SEC
 
     def view(self) -> str:
-        shown = super().view()
         # Без счётчика секунд — см. GROUP_TICK_SEC.
-        return GROUP_THINK_TEXT if shown.startswith("💭") else shown
+        return self._view(seconds=False)
 
     async def send_once(self, bot) -> None:
         """Первый раз — отправить, дальше — править, если показ изменился."""

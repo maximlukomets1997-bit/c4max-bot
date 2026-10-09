@@ -8387,9 +8387,41 @@ def check_live_answer():
             pass
         expect("после сбоя запроса черновик остался на потоке",
                getattr(g._live, "progress", None) is None)
+        g._gemini_chat_request = fake_chat
+        d = la.LiveDraft(1, 1, "🎧 Слушаю голосовое…")
+        g.ask_gemini(1, 1, "вопрос", progress=d)
+        expect("основной запрос начался, а стадия «Слушаю» не сменилась на «Думаю»",
+               d.view().startswith("💭 Думаю…"))
     finally:
         g._gemini_chat_request, g.RAG_ENABLED = saved_chat, saved_rag
         g._live.progress = None
+
+    # Голосовое и видео: активная модель файл не понимает — ответ по
+    # расшифровке идёт через ask_gemini, и показ обязан доехать туда.
+    passed = {}
+
+    def fake_answer(chat_id, user_id, text, *a, progress=None, **kw):
+        passed["progress"] = progress
+        return "ответ"
+
+    saved_m = (g.ask_gemini, g._describe_for_answer, g._supports_video)
+    saved_active = hist.get_setting("active_model", "")
+    try:
+        g.ask_gemini = fake_answer
+        g._describe_for_answer = lambda *a, **kw: "расшифровка"
+        g._supports_video = lambda *a, **kw: False
+        if QWEN:
+            hist.set_setting("active_model", QWEN)
+        d = la.LiveDraft(1, 1, "🎧 Слушаю голосовое…")
+        g.ask_gemini_audio(1, 1, "QQ", progress=d)
+        expect("голосовое: показ не доехал до ответа по расшифровке", passed.get("progress") is d)
+        passed.clear()
+        d = la.LiveDraft(1, 1, "🎬 Смотрю видео…")
+        g.ask_gemini_video(1, 1, "QQ", "подпись", "video/mp4", progress=d)
+        expect("видео: показ не доехал до ответа по описанию", passed.get("progress") is d)
+    finally:
+        g.ask_gemini, g._describe_for_answer, g._supports_video = saved_m
+        hist.set_setting("active_model", saved_active)
 
     # ─── группа: одно сообщение, которое правится по ходу ───
     from telegram.error import BadRequest, RetryAfter
@@ -8423,6 +8455,22 @@ def check_live_answer():
 
     g_msg = la.LiveGroupMessage(-100, 77)
     expect("в группе «Думаю» тикает секундами — правки тратились бы впустую",
+           g_msg.view() == la.GROUP_THINK_TEXT)
+
+    # ─── стадии голосового и видео: «Слушаю/Смотрю» → «Думаю» → текст ───
+    d = la.LiveDraft(1, 1, "🎧 Слушаю голосовое…")
+    expect("голосовое в личке: первая стадия не «Слушаю голосовое… N с»",
+           d.view().startswith("🎧 Слушаю голосовое…") and d.view().endswith(" с"))
+    d.thinking()
+    expect("голосовое: после начала ответа модели стадия не сменилась на «Думаю»",
+           d.view().startswith("💭 Думаю…"))
+    d.feed("текст")
+    expect("голосовое: текст ответа не вытеснил стадию", d.view() == "текст")
+    g_msg = la.LiveGroupMessage(-100, 77, "🎬 Смотрю видео…")
+    expect("видео в группе: первая стадия не «Смотрю видео…» без счётчика",
+           g_msg.view() == "🎬 Смотрю видео…")
+    g_msg.thinking()
+    expect("видео в группе: после начала ответа не «Думаю…»",
            g_msg.view() == la.GROUP_THINK_TEXT)
 
     async def group_sending():
@@ -8512,16 +8560,28 @@ def check_live_answer():
             _time.sleep(0.12)
         return "Готовый ответ"
 
+    def fake_media(chat_id, user_id, b64, *rest, progress=None, **kw):
+        if progress is not None:
+            _time.sleep(0.08)          # расшифровка — стадия «Слушаю/Смотрю»
+            progress.thinking()
+            _time.sleep(0.08)          # модель думает
+            progress.feed("Ответ по ")
+            _time.sleep(0.12)
+            progress.feed("ходу")
+            _time.sleep(0.12)
+        return "Готовый ответ"
+
     def run_handler(chat_type, enabled, kind="text"):
         """kind: text — текст; photo — фото; photo_fail — фото не скачалось
-        (после паузы: «Думаю…» в группе успевает появиться)."""
+        (после паузы: «Думаю…» в группе успевает появиться); voice, voice_fail,
+        video — голосовое и видео."""
         bot = Bot()
         chat = types.SimpleNamespace(id=-100_555 if chat_type != "private" else 555, type=chat_type)
         user = types.SimpleNamespace(id=555, full_name="Проверка", username=None)
 
         class _File:
             async def download_as_bytearray(self):
-                if kind == "photo_fail":
+                if kind in ("photo_fail", "voice_fail"):
                     await asyncio.sleep(0.1)
                     raise RuntimeError("фото не скачалось")
                 return bytearray(b"QQ")
@@ -8532,18 +8592,27 @@ def check_live_answer():
 
         async def _reply_text(text, **kw):
             bot.events.append(("reply_text", text))
-        msg = types.SimpleNamespace(text=None if kind != "text" else "вопрос",
-                                    caption="что на фото?" if kind != "text" else None,
-                                    photo=[_Photo()] if kind != "text" else None,
+            bot.next_id += 1
+            return types.SimpleNamespace(message_id=bot.next_id)
+        is_photo, is_voice = kind.startswith("photo"), kind.startswith("voice")
+        media = types.SimpleNamespace(get_file=_Photo().get_file, file_size=1000,
+                                      mime_type="video/mp4")
+        msg = types.SimpleNamespace(text="вопрос" if kind == "text" else None,
+                                    caption=None if kind == "text" or is_voice else "что тут?",
+                                    photo=[_Photo()] if is_photo else None,
+                                    voice=media if is_voice else None, audio=None,
+                                    video=media if kind == "video" else None,
                                     message_id=77, reply_to_message=None,
                                     chat=chat, from_user=user, reply_text=_reply_text)
         update = types.SimpleNamespace(message=msg, effective_chat=chat, effective_user=user)
         context = types.SimpleNamespace(bot=bot, user_data={})
         hist.set_setting(la.SETTING_KEY, "1" if enabled else "0")
         saved_h = (hm.ask_gemini, hm.should_respond_in_group, hm.clean_mention,
-                   hm._archive_bot_group_reply, la.TICK_SEC, la.GROUP_TICK_SEC)
+                   hm._archive_bot_group_reply, la.TICK_SEC, la.GROUP_TICK_SEC,
+                   hm.ask_gemini_audio, hm.ask_gemini_video)
         try:
             hm.ask_gemini = fake_ask
+            hm.ask_gemini_audio = hm.ask_gemini_video = fake_media
             hm.should_respond_in_group = lambda *a, **kw: True
             hm.clean_mention = lambda text, *a, **kw: text
 
@@ -8552,8 +8621,12 @@ def check_live_answer():
             hm._archive_bot_group_reply = _no_archive
             la.TICK_SEC = la.GROUP_TICK_SEC = 0.02
 
+            handler = (hm.handle_message if kind == "text" else
+                       hm.handle_photo if is_photo else
+                       hm.handle_voice if is_voice else hm.handle_video)
+
             async def go():
-                await (hm.handle_message if kind == "text" else hm.handle_photo)(update, context)
+                await handler(update, context)
                 await asyncio.sleep(0.05)
                 # Насос, не погашенный после ответа, лишнего не шлёт (показ не
                 # меняется), зато крутится вечно — по задаче на каждое сообщение.
@@ -8564,7 +8637,8 @@ def check_live_answer():
                    not leftovers)
         finally:
             (hm.ask_gemini, hm.should_respond_in_group, hm.clean_mention,
-             hm._archive_bot_group_reply, la.TICK_SEC, la.GROUP_TICK_SEC) = saved_h
+             hm._archive_bot_group_reply, la.TICK_SEC, la.GROUP_TICK_SEC,
+             hm.ask_gemini_audio, hm.ask_gemini_video) = saved_h
         return bot.events
 
     saved_toggle = hist.get_setting(la.SETTING_KEY, "")
@@ -8627,6 +8701,46 @@ def check_live_answer():
         ev = run_handler("supergroup", False, "photo")
         expect("тумблер выключен, а фото в группе правится по ходу",
                [e[0] for e in ev] == ["send"] and ev[0][1] == "Готовый ответ")
+
+        # ─── голосовое и видео (handle_voice, handle_video) ───
+        ev = run_handler("private", True, "voice")
+        drafts = [e[1] for e in ev if e[0] == "draft"]
+        others = [e[0] for e in ev if e[0] != "draft"]
+        expect("голосовое в личке: черновик не начался со «Слушаю голосовое…»",
+               bool(drafts) and drafts[0].startswith("🎧 Слушаю голосовое…"))
+        expect("голосовое в личке: стадии «Думаю» и текста нет в черновике",
+               any(t.startswith("💭 Думаю…") for t in drafts) and "Ответ по ходу" in drafts)
+        expect("голосовое в личке: при черновике ушёл старый статус или ответов не один",
+               others == ["send"])
+        ev = run_handler("supergroup", True, "voice")
+        kinds = [e[0] for e in ev]
+        expect("голосовое в группе: первым не «Слушаю голосовое…» ответом на голосовое",
+               bool(ev) and ev[0][0] == "send" and ev[0][1] == "🎧 Слушаю голосовое…"
+               and ev[0][2] == 77)
+        expect("голосовое в группе: сообщение не прошло «Думаю» и текст",
+               any(e[0] == "edit" and e[1] == la.GROUP_THINK_TEXT for e in ev)
+               and any(e[0] == "edit" and e[1] == "Ответ по ходу" for e in ev))
+        expect("голосовое в группе: статус удалялся или ответ пришёл не правкой того же сообщения",
+               kinds.count("send") == 1 and "delete" not in kinds and "reply_text" not in kinds
+               and ev[-1][0] == "edit" and ev[-1][1] == "Готовый ответ" and ev[-1][2] == ev[0][3])
+        ev = run_handler("supergroup", False, "voice")
+        expect("выключатель выключен — голосовое не по-старому (статус, удаление, ответ)",
+               [e[0] for e in ev] == ["reply_text", "delete", "send"]
+               and ev[-1][1] == "Готовый ответ")
+        ev = run_handler("supergroup", True, "voice_fail")
+        kinds = [e[0] for e in ev]
+        expect("голосовое в группе не скачалось: «Слушаю…» не стало ошибкой или легло "
+               "второе сообщение",
+               kinds == ["send", "edit"] and "ошибка" in (ev[1][1] or ""))
+        ev = run_handler("private", True, "video")
+        drafts = [e[1] for e in ev if e[0] == "draft"]
+        expect("видео в личке: черновик не начался со «Смотрю видео…» или нет текста",
+               bool(drafts) and drafts[0].startswith("🎬 Смотрю видео…") and "Ответ по ходу" in drafts)
+        ev = run_handler("supergroup", True, "video")
+        kinds = [e[0] for e in ev]
+        expect("видео в группе: не одно сообщение «Смотрю видео…», ставшее ответом",
+               bool(ev) and ev[0][1] == "🎬 Смотрю видео…" and kinds.count("send") == 1
+               and "delete" not in kinds and ev[-1][1] == "Готовый ответ")
     finally:
         if saved_toggle == "":
             hist.delete_setting(la.SETTING_KEY)
@@ -8662,7 +8776,8 @@ def check_live_answer():
                       f"есть и кончается до ответа; в группе одно сообщение правится по ходу "
                       f"и становится ответом, отказы Telegram ведут к ответу новым; "
                       f"фото — так же, сбой скачивания в группе превращает «Думаю…» в "
-                      f"ошибку; при выключенном тумблере — по-старому")
+                      f"ошибку; голосовое и видео идут стадиями «Слушаю/Смотрю → Думаю "
+                      f"→ текст» одним сообщением; при выключенном тумблере — по-старому")
 
 
 CHECKS = (

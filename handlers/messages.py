@@ -120,13 +120,17 @@ def _ai_ignored(user_id: int) -> bool:
 # временем разъехались бы. Выключатель один на личку и группы: в личке —
 # черновик Telegram, в группе — сообщение «💭 Думаю…», которое правится по ходу.
 
-def _start_live(bot, chat_id: int, reply_to: int, is_group: bool):
-    """Завести показ по ходу и его насос. Выключатель выключен — (None, None)."""
+def _start_live(bot, chat_id: int, reply_to: int, is_group: bool, label: str | None = None):
+    """
+    Завести показ по ходу и его насос. Выключатель выключен — (None, None).
+    label — первая стадия у голосового и видео («🎧 Слушаю голосовое…»): пока
+    файл расшифровывают, показ говорит её, потом — «💭 Думаю…» и текст.
+    """
     from services.live_answer import LiveDraft, LiveGroupMessage, live_answer_enabled
     if not live_answer_enabled():
         return None, None
-    draft = (LiveGroupMessage(chat_id, reply_to) if is_group
-             else LiveDraft(chat_id, reply_to))
+    draft = (LiveGroupMessage(chat_id, reply_to, label) if is_group
+             else LiveDraft(chat_id, reply_to, label))
     return draft, asyncio.create_task(draft.run(bot))
 
 
@@ -158,6 +162,19 @@ async def _deliver(bot, chat_id: int, draft, answer: str, reply_to: int) -> None
         await draft.finish(bot, answer)
     else:
         await send_formatted(bot, chat_id, answer, reply_to=reply_to)
+
+
+async def _reply_error(bot, message, draft, text: str) -> None:
+    """
+    Сообщить об ошибке разбора вложения. В группе с показом по ходу там уже
+    висит «Думаю…» (или «Слушаю…») — превращаем его в ошибку, а не шлём
+    второе сообщение рядом; иначе — ответом на сообщение человека, как всегда.
+    """
+    from services.live_answer import LiveGroupMessage
+    if isinstance(draft, LiveGroupMessage) and draft.message_id is not None:
+        await draft.finish(bot, text)
+    else:
+        await message.reply_text(text)
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -226,14 +243,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if delivered:
             return  # ответ уже у человека — поверх него ошибку не показываем
         await _stop_live(draft, pump, chat_id)   # сорвалось ещё до модели (скачивание)
-        error_text = "❌ Произошла ошибка при анализе фотографии."
-        from services.live_answer import LiveGroupMessage
-        if isinstance(draft, LiveGroupMessage) and draft.message_id is not None:
-            # В группе уже висит «💭 Думаю…» — превращаем его в ошибку, а не
-            # шлём второе сообщение рядом.
-            await draft.finish(context.bot, error_text)
-        else:
-            await message.reply_text(error_text)
+        await _reply_error(context.bot, message, draft, "❌ Произошла ошибка при анализе фотографии.")
 
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -267,27 +277,43 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info("👤 Сообщение пропущено (пользователь %s): ответы ИИ выключены", user_id)
         return
 
-    status_msg = await message.reply_text("🎧 _Слушаю голосовое..._", parse_mode=ParseMode.MARKDOWN)
+    # Ответ «на глазах» (09.10.2026): показ сам проходит стадии «🎧 Слушаю
+    # голосовое…» → «💭 Думаю…» → текст; в группе это одно сообщение, которое
+    # становится ответом. Отдельный статус «Слушаю…» с удалением — только
+    # при выключенном выключателе, как было.
+    draft, pump = _start_live(context.bot, chat_id, message.message_id, is_group,
+                              label="🎧 Слушаю голосовое…")
+    status_msg = None
+    if draft is None:
+        status_msg = await message.reply_text("🎧 _Слушаю голосовое..._", parse_mode=ParseMode.MARKDOWN)
+    delivered = False
 
     try:
         # Статус «печатает…» висит всю обработку голосового —
-        # в дополнение к сообщению-статусу «Слушаю голосовое…» выше.
+        # в дополнение к показу «Слушаю голосовое…» выше.
         async with keep_chat_action(context.bot, chat_id, "typing"):
             voice_file = await voice.get_file()
             file_bytes = await voice_file.download_as_bytearray()
             audio_base64 = base64.b64encode(file_bytes).decode('utf-8')
 
             loop = asyncio.get_running_loop()
-            answer = await loop.run_in_executor(None, ask_gemini_audio, chat_id, user_id, audio_base64)
+            from functools import partial
+            try:
+                answer = await loop.run_in_executor(
+                    None, partial(ask_gemini_audio, chat_id, user_id, audio_base64,
+                                  progress=draft))
+            finally:
+                await _stop_live(draft, pump, chat_id)
 
-        try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
-        except Exception:
-            pass
+        if status_msg is not None:
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
+            except Exception:
+                pass
 
-        # Единая отправка: форматирование + безопасная нарезка длинных ответов.
-        # Текст ответа в лог не пишем — см. handle_photo.
-        await send_formatted(context.bot, chat_id, answer, reply_to=message.message_id)
+        # Единая отправка (см. _deliver). Текст ответа в лог не пишем — см. handle_photo.
+        await _deliver(context.bot, chat_id, draft, answer, message.message_id)
+        delivered = True
 
         # Свой ответ — в архив групп (стенограмма проактивного режима).
         # Само голосовое архивирует collect_group_message, а текстовый ответ
@@ -297,11 +323,16 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         logger.error("⚠️ Не удалось обработать голосовое: %s", e)
-        try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
-        except Exception:
-            pass
-        await message.reply_text("❌ Произошла ошибка при обработке голосового сообщения.")
+        if delivered:
+            return  # ответ уже у человека — поверх него ошибку не показываем
+        await _stop_live(draft, pump, chat_id)   # сорвалось ещё до модели (скачивание)
+        if status_msg is not None:
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
+            except Exception:
+                pass
+        await _reply_error(context.bot, message, draft,
+                           "❌ Произошла ошибка при обработке голосового сообщения.")
 
 
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -357,10 +388,17 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    status_msg = await message.reply_text("🎬 _Смотрю видео..._", parse_mode=ParseMode.MARKDOWN)
+    # Ответ «на глазах» — как у голосового: «🎬 Смотрю видео…» → «💭 Думаю…»
+    # → текст; отдельный статус с удалением — только при выключенном выключателе.
+    draft, pump = _start_live(context.bot, chat_id, message.message_id, is_group,
+                              label="🎬 Смотрю видео…")
+    status_msg = None
+    if draft is None:
+        status_msg = await message.reply_text("🎬 _Смотрю видео..._", parse_mode=ParseMode.MARKDOWN)
+    delivered = False
 
     try:
-        # Статус «печатает…» висит весь разбор — в дополнение к сообщению-статусу.
+        # Статус «печатает…» висит весь разбор — в дополнение к показу «Смотрю видео…».
         async with keep_chat_action(context.bot, chat_id, "typing"):
             video_file = await video.get_file()
             file_bytes = await video_file.download_as_bytearray()
@@ -368,16 +406,22 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             mime = video.mime_type or "video/mp4"
 
             loop = asyncio.get_running_loop()
-            answer = await loop.run_in_executor(
-                None, ask_gemini_video, chat_id, user_id, video_base64, user_text, mime
-            )
+            from functools import partial
+            try:
+                answer = await loop.run_in_executor(
+                    None, partial(ask_gemini_video, chat_id, user_id, video_base64, user_text,
+                                  mime, progress=draft))
+            finally:
+                await _stop_live(draft, pump, chat_id)
 
-        try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
-        except Exception:
-            pass
+        if status_msg is not None:
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
+            except Exception:
+                pass
 
-        await send_formatted(context.bot, chat_id, answer, reply_to=message.message_id)
+        await _deliver(context.bot, chat_id, draft, answer, message.message_id)
+        delivered = True
 
         # Свой ответ — в архив групп (стенограмма проактивного режима).
         if is_group:
@@ -385,11 +429,15 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         logger.error("⚠️ Не удалось обработать видео: %s", e)
-        try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
-        except Exception:
-            pass
-        await message.reply_text("❌ Произошла ошибка при разборе видео.")
+        if delivered:
+            return  # ответ уже у человека — поверх него ошибку не показываем
+        await _stop_live(draft, pump, chat_id)   # сорвалось ещё до модели (скачивание)
+        if status_msg is not None:
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
+            except Exception:
+                pass
+        await _reply_error(context.bot, message, draft, "❌ Произошла ошибка при разборе видео.")
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):

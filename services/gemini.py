@@ -2445,10 +2445,14 @@ def _ask_native_media(chat_id: int, user_id: int, *, kind: str, notify_kind: str
     return answer
 
 
-def ask_gemini_audio(chat_id: int, user_id: int, audio_base64: str) -> str:
+def ask_gemini_audio(chat_id: int, user_id: int, audio_base64: str, progress=None) -> str:
     """
     Голосовое сообщение человека — модели. Весь путь общий с видео
     (`_ask_native_media`), здесь только то, чем голосовое от видео отличается.
+
+    progress (09.10.2026) — показ ответа «на глазах» (services/live_answer).
+    Доходит только до ответа АКТИВНОЙ модели по расшифровке (ask_gemini);
+    запасной путь «файл слышащей цепочке» отвечает одним куском без показа.
 
     Стратегия устойчивости: ОДНА попытка на каждую модель очереди
     AUDIO_FALLBACK_CHAIN, пока весь перебор укладывается в общий потолок
@@ -2479,7 +2483,7 @@ def ask_gemini_audio(chat_id: int, user_id: int, audio_base64: str) -> str:
                         "модель %s звук не принимает", len(described), active_model)
             return ask_gemini(chat_id, user_id,
                               _as_human_message("голосовое", described),
-                              media_kind="голосовое")
+                              media_kind="голосовое", progress=progress)
         # Расшифровки нет — отвечать не по чему. Старый путь (файл слышащей
         # цепочке) остаётся страховкой: лучше ответ чужой модели, чем заглушка.
         logger.warning("⚠️ 🔎 Расшифровки для ответа нет — отдаю голосовое слышащей "
@@ -2502,7 +2506,8 @@ def ask_gemini_audio(chat_id: int, user_id: int, audio_base64: str) -> str:
 
 
 def ask_gemini_video(chat_id: int, user_id: int, video_base64: str,
-                     user_text: str = "", mime_type: str = "video/mp4") -> str:
+                     user_text: str = "", mime_type: str = "video/mp4",
+                     progress=None) -> str:
     """
     ВИДЕО человека — модели. Весь путь общий с голосовым
     (`_ask_native_media`), здесь только отличия видео, и их по существу три:
@@ -2529,6 +2534,9 @@ def ask_gemini_video(chat_id: int, user_id: int, video_base64: str,
 
     ⚠️ С 21.09.2026, как и у голосового: активная модель видео не принимает —
     ролик к ней не пойдёт, она получит ОПИСАНИЕ как сообщение человека.
+
+    progress (09.10.2026) — как у ask_gemini_audio: показ по ходу только у
+    ответа активной модели по описанию.
     """
     caption = (user_text or "").strip()
 
@@ -2541,7 +2549,7 @@ def ask_gemini_video(chat_id: int, user_id: int, video_base64: str,
                         "видео не принимает", len(described), active_model)
             return ask_gemini(chat_id, user_id,
                               _as_human_message("видео", described, caption),
-                              media_kind="видео")
+                              media_kind="видео", progress=progress)
         logger.warning("⚠️ 🔎 Описания для ответа нет — отдаю видео зрячей цепочке, "
                        "как до 21.09.2026")
 
@@ -2858,6 +2866,8 @@ def ask_gemini(chat_id: int, user_id: int, user_text: str, image_base64: str = N
     # Черновик слушает ТОЛЬКО этот запрос (см. _live) и снимается в любом
     # исходе: поток исполнителя потом обслужит чужой ответ.
     _live.progress = progress
+    # Голосовое и видео: расшифровка позади, стадия «Слушаю/Смотрю» → «Думаю».
+    _live_call("thinking")
     try:
         data, used_model = _gemini_chat_request(
             messages,
