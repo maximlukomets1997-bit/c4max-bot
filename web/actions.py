@@ -47,6 +47,7 @@ _AUDIT_CODES = {
     "greet_timeout_sec":  ("greet", "срок проверки"),
     "thoughts_enabled":   ("thoughts", "мысли под капотом"),
     "live_answer_enabled": ("live_answer", "ответ на глазах"),
+    "batch_wait_sec":     ("batch", "склейка сообщений"),
     "proactive_hands":    ("proactive_hands", "руки «Сам в разговор»"),
 }
 

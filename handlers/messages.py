@@ -504,8 +504,64 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info("👤 Сообщение пропущено (пользователь %s): ответы ИИ выключены", user.id)
         return
 
+    # 🧩 Склейка сообщений подряд (09.10.2026, services/message_batch.py):
+    # серия сообщений одного человека — один вопрос модели и один ответ.
+    # Регулятор 0 — склейки нет, ответ сразу, как раньше.
+    from services import message_batch
+    if message_batch.wait_sec() <= 0:
+        await _answer_text(context, chat_id, user, is_group, [(message, user_text)])
+        return
+
+    async def on_open(first):
+        # Пачка начала копиться. В личке — сразу черновик «💭 Думаю…» (если
+        # включён «ответ на глазах»), чтобы ожидание не выглядело зависанием;
+        # в группе сообщение «Думаю…» появится, только когда пачка уйдёт
+        # модели, — ответом на ПОСЛЕДНЕЕ сообщение пачки.
+        try:
+            await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+        except Exception:
+            pass
+        if is_group:
+            return None
+        return _start_live(context.bot, chat_id, first[0].message_id, is_group)
+
+    async def on_flush(items, opened):
+        await _answer_text(context, chat_id, user, is_group, items, opened)
+
+    message_batch.submit((chat_id, user.id), (message, user_text), on_open, on_flush)
+
+
+async def _answer_text(context, chat_id: int, user, is_group: bool, items: list,
+                       live=None) -> None:
+    """
+    Ответ модели на одно текстовое сообщение или на склеенную пачку
+    (items — [(message, текст)] по порядку). Модели — все тексты отдельными
+    строками; ответ — на ПОСЛЕДНЕЕ сообщение. live — показ «на глазах»,
+    заведённый ещё до ожидания пачки (личка), иначе заводится здесь.
+    """
+    message = items[-1][0]
+
+    # Пока бот ждал, не допишет ли человек ещё, антиспам мог замутить его за
+    # флуд — тогда отвечать на эти сообщения нельзя (их уже и удалили).
+    if is_group:
+        from services.antispam import is_muted_now
+        if is_muted_now(chat_id, user.id):
+            logger.info("🧩 Пачка сообщений пропущена: %s замучен в чате %s", user.id, chat_id)
+            if live:
+                await _stop_live(live[0], live[1], chat_id)
+            return
+
+    user_text = "\n".join(text for _, text in items)
+    # На какое сообщение отвечают: берём справку у ПОСЛЕДНЕГО сообщения пачки,
+    # у которого она есть (Reply обычно стоит на одном из них).
+    reply_block = ""
+    for msg, _ in reversed(items):
+        reply_block = _reply_context_block(msg, context.bot)
+        if reply_block:
+            break
+
     # 💬 Ответ «на глазах» — см. _start_live.
-    draft, pump = _start_live(context.bot, chat_id, message.message_id, is_group)
+    draft, pump = live if live else _start_live(context.bot, chat_id, message.message_id, is_group)
 
     # Статус «печатает…» висит всё время, пока модель думает
     # (общая поддерживалка utils.keep_chat_action).
@@ -518,7 +574,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             answer = await loop.run_in_executor(
                 None, partial(ask_gemini, chat_id, user.id, user_text, None,
-                              _reply_context_block(message, context.bot), progress=draft)
+                              reply_block, progress=draft)
             )
         finally:
             await _stop_live(draft, pump, chat_id)

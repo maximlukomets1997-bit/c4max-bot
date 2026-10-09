@@ -787,6 +787,12 @@ def check_ai_mute_name():
         async def delete_message(self, chat_id, message_id, **kw):
             return True
 
+    # ⚠️ Модуль прав грузим ДО подмены списка владельцев (09.10.2026): он
+    # берёт ADMIN_IDS из config в момент первой загрузки. Загрузись он
+    # впервые внутри подмены — запомнил бы выдуманного владельца до конца
+    # прогона, и все проверки после этой видели бы чужого «владельца»
+    # (поймано проверкой склейки: ввод числа владельцем ушёл бы в склейку).
+    import services.roles  # noqa: F401
     saved_admins = config.ADMIN_IDS
     try:
         # Владелец нужен, чтобы письму было куда уйти: без получателей
@@ -8607,12 +8613,14 @@ def check_live_answer():
         update = types.SimpleNamespace(message=msg, effective_chat=chat, effective_user=user)
         context = types.SimpleNamespace(bot=bot, user_data={})
         hist.set_setting(la.SETTING_KEY, "1" if enabled else "0")
+        from services import message_batch as mb
         saved_h = (hm.ask_gemini, hm.should_respond_in_group, hm.clean_mention,
                    hm._archive_bot_group_reply, la.TICK_SEC, la.GROUP_TICK_SEC,
-                   hm.ask_gemini_audio, hm.ask_gemini_video)
+                   hm.ask_gemini_audio, hm.ask_gemini_video, mb.wait_sec)
         try:
             hm.ask_gemini = fake_ask
             hm.ask_gemini_audio = hm.ask_gemini_video = fake_media
+            mb.wait_sec = lambda: 0          # склейку проверяет своя группа
             hm.should_respond_in_group = lambda *a, **kw: True
             hm.clean_mention = lambda text, *a, **kw: text
 
@@ -8638,7 +8646,7 @@ def check_live_answer():
         finally:
             (hm.ask_gemini, hm.should_respond_in_group, hm.clean_mention,
              hm._archive_bot_group_reply, la.TICK_SEC, la.GROUP_TICK_SEC,
-             hm.ask_gemini_audio, hm.ask_gemini_video) = saved_h
+             hm.ask_gemini_audio, hm.ask_gemini_video, mb.wait_sec) = saved_h
         return bot.events
 
     saved_toggle = hist.get_setting(la.SETTING_KEY, "")
@@ -8780,6 +8788,309 @@ def check_live_answer():
                       f"→ текст» одним сообщением; при выключенном тумблере — по-старому")
 
 
+def check_message_batch():
+    """
+    Склейка сообщений подряд (09.10.2026, решение Максима): серия сообщений
+    одного человека — один вопрос модели и один ответ.
+
+    ⚠️ Ради чего проверка существует. Обработчик текста работает
+    параллельно, и 02.10.2026 девять сообщений одного человека дали восемь
+    одновременных вопросов модели и восемь ответов. Тихо сломаться склейка
+    может так: пачка не склеивается (снова пачка ответов); сообщения теряются;
+    сообщение, пришедшее во время ответа, запускает параллельный ответ;
+    склеиваются разные люди; бот отвечает на флуд человеку, которого антиспам
+    замутил, пока бот ждал; режимы ввода чисел начинают ждать; регулятор 0 не
+    выключает склейку. Механизм (services/message_batch.py) и настоящий
+    обработчик (handlers/messages.py::handle_message) гоняются с поддельным
+    Telegram и подставной моделью; ожидание укорочено до долей секунды.
+    """
+    import asyncio
+    import time as _time
+    import types
+    import config as c
+    import handlers.messages as hm
+    from services import message_batch as mb
+    from services import antispam
+    from services import live_answer as la
+    from database import history as hist
+
+    problems = []
+    done = 0
+
+    def expect(title, ok):
+        nonlocal done
+        done += 1
+        if not ok:
+            problems.append(title)
+
+    saved_wait, saved_cap = mb.wait_sec, mb.MAX_WAIT_SEC
+
+    async def settle(limit=2.0):
+        """Дождаться, пока у всех людей не останется неотвеченного (не дольше limit)."""
+        stop = _time.monotonic() + limit
+        await asyncio.sleep(0.02)
+        while mb._slots and _time.monotonic() < stop:
+            await asyncio.sleep(0.02)
+
+    # ─── механизм: пачка, потолок, сообщения во время ответа ───
+    async def mechanism():
+        mb.wait_sec = lambda: 0.08
+        flushed, opened = [], []
+
+        async def on_open(first):
+            opened.append(first)
+            return "открыто"
+
+        async def on_flush(items, state):
+            flushed.append((list(items), state))
+            await asyncio.sleep(0.15)              # «модель думает»
+
+        key = (-1, 1)
+        for t in ("а", "б", "в"):
+            mb.submit(key, t, on_open, on_flush)
+            await asyncio.sleep(0.02)
+        await asyncio.sleep(0.12)                  # тишина прошла — ушло модели
+        mb.submit(key, "г", on_open, on_flush)     # пришло, пока «модель думает»
+        await asyncio.sleep(0.02)
+        mb.submit(key, "д", on_open, on_flush)
+        await settle()
+        expect("три сообщения подряд не склеились в один вопрос",
+               bool(flushed) and flushed[0][0] == ["а", "б", "в"])
+        expect("начало пачки не передано ответу (черновик «Думаю» потерялся бы)",
+               bool(flushed) and flushed[0][1] == "открыто")
+        expect("сообщения, пришедшие во время ответа, не ушли ОДНИМ следующим вопросом",
+               len(flushed) == 2 and flushed[1][0] == ["г", "д"])
+        expect("после ответа очередь человека не убрана", key not in mb._slots)
+
+        # Потолок: человек пишет без остановки — ответ не позже MAX_WAIT_SEC.
+        mb.MAX_WAIT_SEC = 0.25
+        flushed.clear()
+        start = _time.monotonic()
+        for i in range(20):
+            mb.submit(key, i, on_open, on_flush)
+            await asyncio.sleep(0.05)
+            if flushed:
+                break
+        took = _time.monotonic() - start
+        expect(f"потолок ожидания не сработал: человек ждал {took:.2f} с при потолке 0.25",
+               bool(flushed) and took < 0.5)
+        await settle()
+        mb.MAX_WAIT_SEC = saved_cap
+
+        # Разные люди — разные пачки.
+        flushed.clear()
+        mb.submit((-1, 1), "x", on_open, on_flush)
+        mb.submit((-1, 2), "y", on_open, on_flush)
+        await settle()
+        expect("сообщения разных людей склеились",
+               sorted(f[0] for f in flushed) == [["x"], ["y"]])
+
+    try:
+        asyncio.run(mechanism())
+    finally:
+        mb.wait_sec, mb.MAX_WAIT_SEC = saved_wait, saved_cap
+
+    # ─── регулятор: настройка, предел, сбой ───
+    saved_setting = hist.get_setting(mb.SETTING_KEY, "")
+    try:
+        hist.set_setting(mb.SETTING_KEY, "5")
+        expect("регулятор 5 с не читается как 5", mb.wait_sec() == 5)
+        hist.set_setting(mb.SETTING_KEY, "0")
+        expect("регулятор 0 не выключает склейку", mb.wait_sec() == 0)
+        hist.delete_setting(mb.SETTING_KEY)
+        expect("начальное значение склейки не 3 с", mb.wait_sec() == 3)
+    finally:
+        if saved_setting == "":
+            hist.delete_setting(mb.SETTING_KEY)
+        else:
+            hist.set_setting(mb.SETTING_KEY, saved_setting)
+
+    # ─── настоящий обработчик ───
+    class Bot:
+        username = "c4max_test_bot"
+
+        def __init__(self):
+            self.sent = []
+
+        async def send_message(self, chat_id=None, text=None, reply_to_message_id=None, **kw):
+            self.sent.append((chat_id, text, reply_to_message_id))
+            return types.SimpleNamespace(message_id=900 + len(self.sent))
+
+        async def send_chat_action(self, *a, **kw):
+            return True
+
+        async def send_message_draft(self, *a, **kw):
+            return True
+
+    asked, active = [], {"now": 0, "max": 0}
+
+    def fake_ask(chat_id, user_id, text, image, reply_ctx, media_kind="", progress=None):
+        active["now"] += 1
+        active["max"] = max(active["max"], active["now"])
+        asked.append((chat_id, user_id, text))
+        _time.sleep(0.12)
+        active["now"] -= 1
+        return f"ответ на «{text}»"
+
+    def make(chat_id, chat_type, user_id, mid, text, user_data=None):
+        chat = types.SimpleNamespace(id=chat_id, type=chat_type)
+        user = types.SimpleNamespace(id=user_id, full_name="Проверка", username=None)
+        msg = types.SimpleNamespace(text=text, message_id=mid, reply_to_message=None,
+                                    chat=chat, from_user=user)
+        upd = types.SimpleNamespace(message=msg, effective_chat=chat, effective_user=user)
+        return upd, user_data if user_data is not None else {}
+
+    def run(script, wait=0.08):
+        """script — [(пауза до, chat_id, тип, user_id, message_id, текст)]."""
+        bot = Bot()
+        asked.clear()
+        active.update(now=0, max=0)
+        saved_h = (hm.ask_gemini, hm.should_respond_in_group, hm.clean_mention,
+                   hm._archive_bot_group_reply, mb.wait_sec)
+        try:
+            hm.ask_gemini = fake_ask
+            hm.should_respond_in_group = lambda *a, **kw: True
+            hm.clean_mention = lambda text, *a, **kw: text
+
+            async def _no_archive(*a, **kw):
+                return None
+            hm._archive_bot_group_reply = _no_archive
+            mb.wait_sec = lambda: wait
+
+            async def go():
+                for pause, chat_id, ctype, uid, mid, text in script:
+                    await asyncio.sleep(pause)
+                    upd, ud = make(chat_id, ctype, uid, mid, text)
+                    await hm.handle_message(upd, types.SimpleNamespace(bot=bot, user_data=ud))
+                await settle()
+            asyncio.run(go())
+        finally:
+            (hm.ask_gemini, hm.should_respond_in_group, hm.clean_mention,
+             hm._archive_bot_group_reply, mb.wait_sec) = saved_h
+        return bot.sent
+
+    saved_live = hist.get_setting(la.SETTING_KEY, "")
+    hist.set_setting(la.SETTING_KEY, "0")          # показ по ходу проверяет своя группа
+    try:
+        sent = run([(0, 555, "private", 555, 1, "Бот…"),
+                    (0.03, 555, "private", 555, 2, "Бооот…"),
+                    (0.03, 555, "private", 555, 3, "Ти знову завис?")])
+        expect("личка: три сообщения подряд дали не один вопрос модели со всеми тремя",
+               [a[2] for a in asked] == ["Бот…\nБооот…\nТи знову завис?"])
+        expect("личка: не один ответ, или он не на последнее сообщение",
+               len(sent) == 1 and sent[0][2] == 3)
+
+        sent = run([(0, 555, "private", 555, 1, "раз"),
+                    (0.14, 555, "private", 555, 2, "два"),
+                    (0.02, 555, "private", 555, 3, "три")])
+        expect("сообщения во время ответа: вопросы модели не «раз», потом «два + три»",
+               [a[2] for a in asked] == ["раз", "два\nтри"])
+        expect("сообщения во время ответа запустили ПАРАЛЛЕЛЬНЫЙ ответ",
+               active["max"] == 1 and len(sent) == 2)
+
+        sent = run([(0, -100, "supergroup", 11, 1, "от первого"),
+                    (0.02, -100, "supergroup", 22, 2, "от второго")])
+        expect("группа: сообщения РАЗНЫХ людей склеились",
+               sorted(a[2] for a in asked) == ["от второго", "от первого"] and len(sent) == 2)
+
+        # Антиспам замутил человека, пока бот ждал, — бот молчит.
+        async def mute_soon():
+            await asyncio.sleep(0.02)
+            antispam._muted_until[(-100, 33)] = _time.monotonic() + 60
+        saved_mute = dict(antispam._muted_until)
+        try:
+            bot = Bot()
+            asked.clear()
+            saved_h = (hm.ask_gemini, hm.should_respond_in_group, hm.clean_mention, mb.wait_sec)
+            try:
+                hm.ask_gemini = fake_ask
+                hm.should_respond_in_group = lambda *a, **kw: True
+                hm.clean_mention = lambda text, *a, **kw: text
+                mb.wait_sec = lambda: 0.08
+
+                async def go():
+                    for mid, text in ((1, "флуд"), (2, "флуд"), (3, "флуд")):
+                        upd, ud = make(-100, "supergroup", 33, mid, text)
+                        await hm.handle_message(upd, types.SimpleNamespace(bot=bot, user_data=ud))
+                    await mute_soon()
+                    await settle()
+                asyncio.run(go())
+            finally:
+                hm.ask_gemini, hm.should_respond_in_group, hm.clean_mention, mb.wait_sec = saved_h
+            expect("антиспам замутил человека во время ожидания, а бот ответил на флуд",
+                   not asked and not bot.sent)
+        finally:
+            antispam._muted_until.clear()
+            antispam._muted_until.update(saved_mute)
+
+        # Регулятор 0 — каждое сообщение сразу, как до склейки.
+        sent = run([(0, 555, "private", 555, 1, "а"),
+                    (0.02, 555, "private", 555, 2, "б")], wait=0)
+        expect("регулятор 0: сообщения склеились или ответов не два",
+               sorted(a[2] for a in asked) == ["а", "б"] and len(sent) == 2)
+
+        # Режим ввода числа (экран счетов) — сразу, без ожидания и без модели.
+        owner = next(iter(c.ADMIN_IDS), None)
+        if owner is not None:
+            got = []
+            import handlers.admin as ha
+            saved_bal, saved_w = ha.handle_balance_input, mb.wait_sec
+
+            async def fake_balance(update, context, text):
+                got.append((text, _time.monotonic()))
+                return True
+            try:
+                ha.handle_balance_input = fake_balance
+                mb.wait_sec = lambda: 5
+                bot = Bot()
+
+                async def go():
+                    upd, ud = make(owner, "private", owner, 1, "12.5", {"balance_edit": "deepseek"})
+                    t0 = _time.monotonic()
+                    await hm.handle_message(upd, types.SimpleNamespace(bot=bot, user_data=ud))
+                    return t0
+                t0 = asyncio.run(go())
+            finally:
+                ha.handle_balance_input, mb.wait_sec = saved_bal, saved_w
+            expect("ввод числа на экране счетов ждёт склейки или ушёл модели",
+                   len(got) == 1 and got[0][1] - t0 < 0.5 and not mb._slots)
+    finally:
+        if saved_live == "":
+            hist.delete_setting(la.SETTING_KEY)
+        else:
+            hist.set_setting(la.SETTING_KEY, saved_live)
+
+    # ─── регулятор в боте ───
+    from services.roles import perm_for_callback
+    from handlers.admin.panel_main import _build_api_keyboard
+    expect("регулятор склейки может нажать не только владелец",
+           all(perm_for_callback(d) == "owner" for d in ("batch_dec", "batch_inc", "batch_info")))
+    saved_setting = hist.get_setting(mb.SETTING_KEY, "")
+    try:
+        labels = {}
+        for raw in ("3", "0"):
+            hist.set_setting(mb.SETTING_KEY, raw)
+            kb = _build_api_keyboard(next(iter(c.ADMIN_IDS), 1))
+            datas = [b.callback_data for row in kb.inline_keyboard for b in row]
+            labels[raw] = [b.text for row in kb.inline_keyboard for b in row
+                           if b.callback_data == "batch_info"]
+            expect(f"в «Настройках API» нет кнопок ➖/➕ склейки (значение {raw})",
+                   "batch_dec" in datas and "batch_inc" in datas)
+        expect("надпись регулятора не следует за настройкой",
+               bool(labels["3"]) and "3 с" in labels["3"][0]
+               and bool(labels["0"]) and "ВЫКЛ" in labels["0"][0])
+    finally:
+        if saved_setting == "":
+            hist.delete_setting(mb.SETTING_KEY)
+        else:
+            hist.set_setting(mb.SETTING_KEY, saved_setting)
+
+    return problems, (f"{done} проверок: пачка склеивается в один вопрос, сообщения во "
+                      f"время ответа — одним следующим, без параллельного; потолок "
+                      f"ожидания; разные люди не склеиваются; замученному за флуд бот "
+                      f"не отвечает; ввод чисел не ждёт; 0 — склейки нет; регулятор в боте")
+
+
 CHECKS = (
     ("деньги — расчёт стоимости запросов", check_money),
     ("квота Qwen — оборванный ответ, срок и письма", check_qwen_quota),
@@ -8832,6 +9143,7 @@ CHECKS = (
     ("суточная чистка журналов и месячный сброс", check_cleanup),
     ("перезапуск отправкой с ПК не будит сторожа", check_planned_restart),
     ("ответ «на глазах»: черновик в личке", check_live_answer),
+    ("склейка сообщений подряд в один ответ", check_message_batch),
 )
 
 

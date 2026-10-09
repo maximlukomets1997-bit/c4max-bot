@@ -66,6 +66,17 @@ _timestamps: dict[int, deque] = defaultdict(deque)
 # (сообщения могли прийти пачкой до того, как Telegram применил ограничение).
 _muted_until: dict[tuple[int, int], float] = {}
 
+
+def is_muted_now(chat_id: int, user_id: int) -> bool:
+    """
+    Замучен ли человек в этом чате прямо сейчас — антифлудом, фильтром ссылок
+    или вручную (все три пишут _muted_until; размут снимает). Нужна склейке
+    сообщений (handlers/messages.py, 09.10.2026): пока бот ждал, не допишет ли
+    человек ещё, антиспам мог его замутить — отвечать на флуд тогда нельзя.
+    """
+    until = _muted_until.get((chat_id, user_id))
+    return bool(until and until > time.monotonic())
+
 # ─── Лог модерации (персистентный, в БД) ────────────────────────────
 # Журнал мутов/размутов и тексты удалённых сообщений теперь хранятся в БД
 # (таблицы moderation_log / mute_evidence) — чтобы статистика за 7 дней и

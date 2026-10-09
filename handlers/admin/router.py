@@ -777,6 +777,36 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             logger.warning("⚠️ Не удалось обновить клавиатуру тумблера ответа на глазах: %s", e)
         return
 
+    if data in ("batch_dec", "batch_inc", "batch_info"):
+        # Регулятор «🧩 СКЛЕЙКА» (2026-10-09, решение Максима): сколько секунд
+        # ждать, не допишет ли человек ещё, прежде чем ответить одним
+        # сообщением на всё (services/message_batch.py). Пределы и шаг —
+        # services/settings_spec.py, тот же регулятор на сайте; 0 — выключено.
+        from services.message_batch import SETTING_KEY, wait_sec
+        if data == "batch_info":
+            await query.answer(
+                "🧩 Склейка: бот ждёт столько секунд, не допишет ли человек ещё, и "
+                "отвечает одним сообщением на всё. 0 — выключено: ответ на каждое сразу.",
+                show_alert=True,
+            )
+            return
+        from services.settings_spec import adjust
+        before = wait_sec()
+        after = adjust(SETTING_KEY, 1 if data == "batch_inc" else -1)
+        if after == before:
+            # Упёрлись в предел — клавиатура та же, перерисовка дала бы ошибку
+            # Telegram «Message is not modified».
+            await query.answer("Это крайнее значение.")
+            return
+        logger.info("🔧 Админ %s: склейка сообщений %s → %s с", user_id, before, after)
+        _audit(user_id, "batch", 0, f"склейка сообщений: {after} с" if after else "склейка выключена")
+        await query.answer(f"🧩 Склейка: {after} с" if after else "🧩 Склейка выключена")
+        try:
+            await query.edit_message_reply_markup(reply_markup=_build_api_keyboard(user_id))
+        except Exception as e:
+            logger.warning("⚠️ Не удалось обновить клавиатуру регулятора склейки: %s", e)
+        return
+
     if data == "web:link":
         # Ссылка на пять минут на веб-админку для НАСТОЯЩЕГО браузера
         # (30.08.2026, этап 0). Соседняя кнопка «🌐 Админка» открывает тот же

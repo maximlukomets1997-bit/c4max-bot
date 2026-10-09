@@ -203,11 +203,23 @@ def _build_api_keyboard(user_id):
     live_row = [InlineKeyboardButton(
         f"✍️ ОТВЕТ НА ГЛАЗАХ: {_onoff(live_answer_enabled())}",
         callback_data="toggle_live_answer")]
+    # Склейка сообщений подряд (2026-10-09, services/message_batch.py): сколько
+    # секунд ждать, не допишет ли человек ещё. Пределы и шаг — settings_spec
+    # (тот же регулятор на странице настроек сайта); 0 — выключено.
+    from services.message_batch import wait_sec
+    batch = wait_sec()
+    batch_row = [
+        InlineKeyboardButton("➖", callback_data="batch_dec"),
+        InlineKeyboardButton(f"🧩 СКЛЕЙКА: {f'{batch} с' if batch else '🔴ВЫКЛ'}",
+                             callback_data="batch_info"),
+        InlineKeyboardButton("➕", callback_data="batch_inc"),
+    ]
     # inline_keyboard у собранной клавиатуры — кортеж (tuple), складывать его
     # со списком нельзя — приводим всё к спискам.
     rows = list(model_markup.inline_keyboard) + _thinking_rows() + [
         thoughts_row,
         live_row,
+        batch_row,
         list(_REPORT_BUTTON_ROW),
         [InlineKeyboardButton("💰 СЧЕТА И КВОТЫ", callback_data="bal:panel")],
         _adm_back_row(),
