@@ -200,23 +200,20 @@ def _restart_self() -> None:
 
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _staff_recipients() -> list:
+def _service_recipients() -> list:
     """
-    Кому слать служебные сообщения о запуске/остановке: владельцы + модераторы,
-    у которых есть хоть одно право (модератору без прав панель бесполезна, и
-    дёргать его при каждом перезапуске незачем).
+    Кому слать служебные сообщения о запуске/остановке и автопанель /adm —
+    ТОЛЬКО владельцам, как и все прочие служебные письма (отчёты, расходы,
+    сбои моделей, база знаний).
 
-    ВАЖНО: это ТОЛЬКО про запуск и остановку. Итоги месяца, расходы, сбои
-    моделей и состояние базы знаний остаются владельцам (jobs/, services/gemini.py).
+    ⚠️ До 09.10.2026 сюда входили и модераторы с правами. Бот перезапускается
+    при каждой выкатке и самообновлении — 08.10 это шесть раз за день, и
+    каждый раз модератору приходили «✅ Бот запущен» и его панель. Оба
+    модератора бота заблокировали, и до них перестали доходить письма о
+    мутах. Решение Максима: модераторам — только то, что их касается (письма
+    о мутах и нарушениях, services/antispam.py); своя панель у них по /adm.
     """
-    ids = list(ADMIN_IDS)
-    try:
-        from services.roles import list_moderators, has_any_perm
-        ids += [uid for uid in list_moderators()
-                if uid not in ADMIN_IDS and has_any_perm(uid)]
-    except Exception as e:
-        logger.debug("⚠️ Не удалось получить список модераторов: %s", e)
-    return ids
+    return list(ADMIN_IDS)
 
 
 def _friendly_error(err: Exception) -> str:
@@ -237,7 +234,8 @@ def _friendly_error(err: Exception) -> str:
 
 async def _notify_admins(bot, text: str, html: bool = False):
     """
-    Шлёт короткое служебное сообщение всему персоналу в личку (chat_id == их user_id).
+    Шлёт короткое служебное сообщение владельцам в личку (chat_id == их user_id;
+    кому именно — _service_recipients).
     Идёт через register_and_clean_bot_message — поэтому новое служебное сообщение
     УДАЛЯЕТ предыдущее «панельное» сообщение бота в этом чате (так «🔄 перезапуск…»,
     «🛑 остановлен», «✅ запущен» сменяют друг друга, не копясь). Хранилище в SQLite,
@@ -260,7 +258,7 @@ async def _notify_admins(bot, text: str, html: bool = False):
             "link_preview_options": LinkPreviewOptions(is_disabled=True),
         }
 
-    for admin_id in _staff_recipients():
+    for admin_id in _service_recipients():
         try:
             sent = await bot.send_message(chat_id=admin_id, text=text, **extra)
             if sent:
@@ -379,27 +377,27 @@ async def post_init(application):
     except Exception as e:
         logger.warning("⚠️ Не удалось прибрать отвисевшее уведомление об обновлении: %s", e)
 
-    # Сообщаем админам, что бот поднялся (после обычного старта И после перезапуска
-    # кнопкой — новый процесс всегда проходит через post_init).
+    # Сообщаем владельцам, что бот поднялся (после обычного старта И после
+    # перезапуска кнопкой — новый процесс всегда проходит через post_init).
+    # Модераторам — нет, см. _service_recipients.
     await _notify_admins(
         application.bot,
         f"✅ Бот запущен и готов к работе · {BOT_VERSION_HTML}",
         html=True,
     )
 
-    # Сразу за этим автоматически показываем каждому из персонала его панель.
+    # Сразу за этим автоматически показываем владельцу его панель.
     # Панель отправляется через тот же механизм очистки, поэтому она УДАЛЯЕТ
     # только что отправленное «✅ Бот запущен…» — в итоге остаётся готовая
-    # к работе панель. У модератора она собрана по его правам (send_adm_panel
-    # спрашивает services/roles.py) — второй аргумент обязателен, иначе в личке
-    # panel возьмёт chat_id и получится то же самое, но полагаться на это не надо.
+    # к работе панель. Второй аргумент send_adm_panel — чьи права: в личке он
+    # совпадает с chat_id, но полагаться на это не надо.
     try:
         from handlers.admin import send_adm_panel
-        for staff_id in _staff_recipients():
+        for owner_id in _service_recipients():
             try:
-                await send_adm_panel(application.bot, staff_id, staff_id)
+                await send_adm_panel(application.bot, owner_id, owner_id)
             except Exception as e:
-                logger.warning("⚠️ Не удалось показать панель %s: %s", staff_id, _friendly_error(e))
+                logger.warning("⚠️ Не удалось показать панель %s: %s", owner_id, _friendly_error(e))
     except Exception as e:
         logger.warning("⚠️ Не удалось автоматически показать /adm при запуске: %s", e)
 

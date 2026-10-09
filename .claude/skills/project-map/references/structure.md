@@ -30,7 +30,7 @@ python .claude/skills/project-map/scripts/map.py --module services/rag.py
 | файл | строк | тянут | публичные имена |
 |---|---:|---:|---|
 | `bot.py` | 11 | 0 | — (только вызывает `main.main`) |
-| `main.py` | 629 | 1 | `post_init`, `post_stop`, `post_shutdown`, `main` |
+| `main.py` | 627 | 1 | `post_init`, `post_stop`, `post_shutdown`, `main` |
 | `config.py` | 1681 | 48 | `read_build_mark` + 132 константы верхнего уровня (заводские тексты пяти промптов «личности» — пустые строки; у трёх заданий разборщику вложений, `MEDIA_PROMPT_VOICE`, `MEDIA_PROMPT_PHOTO`, `MEDIA_PROMPT_VIDEO`, заводской текст непустой) |
 | `utils.py` | 301 | 22 | `should_respond_in_group`, `clean_mention`, `keep_chat_action`, `delete_user_message_safe`, `mention`, `schedule_delete`, `restore_pending_deletes`, `cancel_pending_deletes`, `register_and_clean_bot_message`. Самоудаление с 03.10.2026 переживает перезапуск: у таймера есть заметка в базе (`pending_deletes`), запуск её подхватывает, остановка отменяет таймеры, а не бросает |
 | `utils_format.py` | 312 | 11 | `strip_thoughts`, `thoughts_enabled`, `build_text_and_entities`, `send_formatted`, `convert_md`, `fits_caption`, `reply_md` |
