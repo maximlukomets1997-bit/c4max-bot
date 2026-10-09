@@ -77,6 +77,30 @@ def is_muted_now(chat_id: int, user_id: int) -> bool:
     until = _muted_until.get((chat_id, user_id))
     return bool(until and until > time.monotonic())
 
+
+# (chat_id, message_id) → когда антиспам или фильтр ссылок САМИ удалили это
+# сообщение (09.10.2026). Нужно склейке: пачка ждёт ответа до нескольких
+# секунд, и удалённое за это время сообщение не должно попасть в вопрос
+# модели. Помним недолго — DELETED_MEMORY_SEC с запасом длиннее любой пачки
+# (message_batch.MAX_WAIT_SEC). Не удалось удалить (нет прав) — не пишем:
+# сообщение осталось в чате, и отвечать на него можно, как раньше.
+_deleted_recently: dict[tuple[int, int], float] = {}
+DELETED_MEMORY_SEC = 120
+
+
+def _note_deleted(chat_id: int, message_id: int) -> None:
+    """Запомнить удалённое сообщение; заодно выбросить старые записи."""
+    now = time.monotonic()
+    for key in [k for k, ts in _deleted_recently.items() if now - ts > DELETED_MEMORY_SEC]:
+        del _deleted_recently[key]
+    _deleted_recently[(chat_id, message_id)] = now
+
+
+def was_deleted(chat_id: int, message_id: int) -> bool:
+    """Удалил ли это сообщение антиспам или фильтр ссылок за последние DELETED_MEMORY_SEC."""
+    ts = _deleted_recently.get((chat_id, message_id))
+    return bool(ts and time.monotonic() - ts <= DELETED_MEMORY_SEC)
+
 # ─── Лог модерации (персистентный, в БД) ────────────────────────────
 # Журнал мутов/размутов и тексты удалённых сообщений теперь хранятся в БД
 # (таблицы moderation_log / mute_evidence) — чтобы статистика за 7 дней и
@@ -221,6 +245,7 @@ async def _delete_messages(bot, chat_id: int, message_ids) -> None:
     for mid in message_ids:
         try:
             await bot.delete_message(chat_id=chat_id, message_id=mid)
+            _note_deleted(chat_id, mid)
         except Exception as e:
             logger.debug("🛡 Не удалось удалить сообщение %s в чате %s: %s", mid, chat_id, e)
 
@@ -843,6 +868,7 @@ async def check_and_delete_links(bot, chat_id: int, user, message) -> bool:
 
         try:
             await bot.delete_message(chat_id=chat_id, message_id=message.message_id)
+            _note_deleted(chat_id, message.message_id)
         except Exception as e:
             # Нет прав или сообщение уже удалено (например, добито антиспамом)
             logger.debug("🛡 Фильтр ссылок: не удалось удалить сообщение %s в чате %s: %s",

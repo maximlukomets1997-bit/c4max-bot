@@ -1756,8 +1756,13 @@ def check_link_filter():
         antispam._link_strikes.clear()
         bot = _Bot()
         before = len(hist.get_recent_moderation_actions(50))
+        antispam._deleted_recently.clear()
         expect("чужая ссылка не удалена", run(bot, STRANGER, foreign_msg()) is True)
         expect("сообщение со ссылкой не удалено у Telegram", bot.deleted == [555])
+        # Склейка (09.10.2026) выкидывает из пачки удалённое модерацией — для
+        # этого фильтр обязан запомнить, что удалил.
+        expect("фильтр удалил ссылку, но не запомнил это — склейка возьмёт её в "
+               "вопрос модели", antispam.was_deleted(CHAT, 555))
         expect("человеку не сказали, почему сообщение исчезло",
                bool(bot.said) and "ссылки" in bot.said[0].lower())
         log = hist.get_recent_moderation_actions(50)
@@ -1781,6 +1786,17 @@ def check_link_filter():
                        f"{LINKFILTER_MUTE_COUNT}", not bot.muted)
         expect(f"после {LINKFILTER_MUTE_COUNT} удалённых ссылок мут не выдан — "
                f"повторы остаются безнаказанными", bot.muted == [STRANGER])
+
+        # Удалить не вышло (нет прав) — сообщение в чате, «удалённым» не считаем.
+        antispam._link_strikes.clear()
+        antispam._deleted_recently.clear()
+
+        class _NoRightsBot(_Bot):
+            async def delete_message(self, chat_id, message_id):
+                raise RuntimeError("нет прав на удаление")
+        run(_NoRightsBot(), STRANGER, foreign_msg(777))
+        expect("удалить не вышло, а сообщение помечено удалённым — бот промолчит "
+               "на живое сообщение", not antispam.was_deleted(CHAT, 777))
 
         # Личное разрешение «ссылки можно» — не трогаем вовсе.
         antispam._link_strikes.clear()
@@ -8890,6 +8906,34 @@ def check_message_batch():
     finally:
         mb.wait_sec, mb.MAX_WAIT_SEC = saved_wait, saved_cap
 
+    # ─── память об удалённом модерацией (для выкидывания из пачки) ───
+    saved_del = dict(antispam._deleted_recently)
+    try:
+        antispam._deleted_recently.clear()
+        antispam._note_deleted(-100, 5)
+        expect("свежее удаление модерацией не запомнено", antispam.was_deleted(-100, 5))
+        antispam._deleted_recently[(-100, 6)] = _time.monotonic() - antispam.DELETED_MEMORY_SEC - 1
+        expect("удаление старше срока всё ещё выкидывает сообщения из пачки",
+               not antispam.was_deleted(-100, 6))
+        antispam._note_deleted(-100, 7)
+        expect("старые записи об удалениях не выбрасываются — память растёт без конца",
+               (-100, 6) not in antispam._deleted_recently)
+
+        # Удаление всплеска флуда идёт через общий _delete_messages — он тоже
+        # обязан помнить удалённое, но только то, что удалить удалось.
+        class _DelBot:
+            async def delete_message(self, chat_id=None, message_id=None):
+                if message_id == 9:
+                    raise RuntimeError("нет прав")
+                return True
+        asyncio.run(antispam._delete_messages(_DelBot(), -100, [8, 9]))
+        expect("удалённое через общий помощник антиспама не запомнено",
+               antispam.was_deleted(-100, 8))
+        expect("неудавшееся удаление запомнено как удалённое", not antispam.was_deleted(-100, 9))
+    finally:
+        antispam._deleted_recently.clear()
+        antispam._deleted_recently.update(saved_del)
+
     # ─── регулятор: настройка, предел, сбой ───
     saved_setting = hist.get_setting(mb.SETTING_KEY, "")
     try:
@@ -9023,6 +9067,49 @@ def check_message_batch():
             antispam._muted_until.clear()
             antispam._muted_until.update(saved_mute)
 
+        # Фильтр ссылок удалил часть пачки, пока бот ждал, — её в вопрос не берём;
+        # удалил всё — бот молчит.
+        def run_with_deleted(texts, deleted_ids):
+            bot = Bot()
+            asked.clear()
+            saved_h = (hm.ask_gemini, hm.should_respond_in_group, hm.clean_mention,
+                       hm._archive_bot_group_reply, mb.wait_sec)
+            saved_del = dict(antispam._deleted_recently)
+            try:
+                hm.ask_gemini = fake_ask
+                hm.should_respond_in_group = lambda *a, **kw: True
+                hm.clean_mention = lambda text, *a, **kw: text
+
+                async def _no_archive(*a, **kw):
+                    return None
+                hm._archive_bot_group_reply = _no_archive
+                mb.wait_sec = lambda: 0.08
+
+                async def go():
+                    for mid, text in texts:
+                        upd, ud = make(-100, "supergroup", 44, mid, text)
+                        await hm.handle_message(upd, types.SimpleNamespace(bot=bot, user_data=ud))
+                    await asyncio.sleep(0.02)
+                    for mid in deleted_ids:
+                        antispam._note_deleted(-100, mid)
+                    await settle()
+                asyncio.run(go())
+            finally:
+                (hm.ask_gemini, hm.should_respond_in_group, hm.clean_mention,
+                 hm._archive_bot_group_reply, mb.wait_sec) = saved_h
+                antispam._deleted_recently.clear()
+                antispam._deleted_recently.update(saved_del)
+            return bot.sent
+
+        sent = run_with_deleted([(1, "что скажешь?"), (2, "посмотри https://чужой.сайт")], [2])
+        expect("сообщение, удалённое фильтром ссылок, попало в вопрос модели",
+               [a[2] for a in asked] == ["что скажешь?"])
+        expect("ответ не на оставшееся сообщение пачки",
+               len(sent) == 1 and sent[0][2] == 1)
+        sent = run_with_deleted([(1, "https://чужой.сайт"), (2, "https://чужой.сайт/2")], [1, 2])
+        expect("вся пачка удалена модерацией, а бот ответил",
+               not asked and not sent)
+
         # Регулятор 0 — каждое сообщение сразу, как до склейки.
         sent = run([(0, 555, "private", 555, 1, "а"),
                     (0.02, 555, "private", 555, 2, "б")], wait=0)
@@ -9088,7 +9175,8 @@ def check_message_batch():
     return problems, (f"{done} проверок: пачка склеивается в один вопрос, сообщения во "
                       f"время ответа — одним следующим, без параллельного; потолок "
                       f"ожидания; разные люди не склеиваются; замученному за флуд бот "
-                      f"не отвечает; ввод чисел не ждёт; 0 — склейки нет; регулятор в боте")
+                      f"не отвечает; удалённое модерацией из пачки выкидывается; ввод "
+                      f"чисел не ждёт; 0 — склейки нет; регулятор в боте")
 
 
 CHECKS = (

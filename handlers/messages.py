@@ -539,17 +539,28 @@ async def _answer_text(context, chat_id: int, user, is_group: bool, items: list,
     строками; ответ — на ПОСЛЕДНЕЕ сообщение. live — показ «на глазах»,
     заведённый ещё до ожидания пачки (личка), иначе заводится здесь.
     """
-    message = items[-1][0]
-
     # Пока бот ждал, не допишет ли человек ещё, антиспам мог замутить его за
-    # флуд — тогда отвечать на эти сообщения нельзя (их уже и удалили).
+    # флуд — тогда отвечать на эти сообщения нельзя (их уже и удалили). А
+    # фильтр ссылок мог удалить часть пачки — такие сообщения в вопрос модели
+    # не берём (09.10.2026); удалены все — молчим.
     if is_group:
-        from services.antispam import is_muted_now
+        from services.antispam import is_muted_now, was_deleted
         if is_muted_now(chat_id, user.id):
             logger.info("🧩 Пачка сообщений пропущена: %s замучен в чате %s", user.id, chat_id)
             if live:
                 await _stop_live(live[0], live[1], chat_id)
             return
+        kept = [it for it in items if not was_deleted(chat_id, it[0].message_id)]
+        if len(kept) < len(items):
+            logger.info("🧩 Из пачки выкинуто удалённых модерацией сообщений: %d из %d (чат %s)",
+                        len(items) - len(kept), len(items), chat_id)
+        if not kept:
+            if live:
+                await _stop_live(live[0], live[1], chat_id)
+            return
+        items = kept
+
+    message = items[-1][0]
 
     user_text = "\n".join(text for _, text in items)
     # На какое сообщение отвечают: берём справку у ПОСЛЕДНЕГО сообщения пачки,
