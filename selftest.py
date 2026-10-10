@@ -1354,11 +1354,40 @@ def check_wait_budgets():
             if calls and calls[0] != base:
                 problems.append(f"{title}: ПЕРВОЙ попытке урезали время — "
                                 f"{calls[0]} с вместо {base} с")
+            # ⚠️ Раньше здесь стояло «перебрана вся цепочка = потолок не сработал»
+            # (10.10.2026). Это был признак-заместитель, верный только при
+            # длинной очереди: с пятью моделями потолок всегда обрывал перебор
+            # раньше конца. Когда Google снял две модели и очередей стало по
+            # три, вся цепочка честно укладывается в потолок (фото: 3 × 30 с
+            # при потолке 120), и признак стал врать. Настоящих правил два:
+            # общее время не больше потолка (выше) и попытка не начинается,
+            # когда времени осталось меньше минимума, — иначе перебор молча
+            # прошёлся бы по всем моделям с нулевым сроком.
             done += 1
-            if len(calls) >= chain_len and chain_len > 1:
-                problems.append(f"{title}: потолок не сработал, перебрана вся "
-                                f"цепочка из {chain_len} моделей")
+            if calls and min(calls) < MIN_ATTEMPT:
+                problems.append(f"{title}: попытка начата с запасом {min(calls)} с — "
+                                f"меньше минимума {MIN_ATTEMPT} с, "
+                                f"потолок перебор не оборвал")
+            done += 1
+            if len(calls) > chain_len:
+                problems.append(f"{title}: попыток {len(calls)} при очереди из "
+                                f"{chain_len} моделей — одну модель спросили дважды")
             return result
+
+        # ⚠️ ПОТОЛКИ ЗАКРЕПЛЕНЫ ЧИСЛАМИ (10.10.2026). Сверять перебор с самими
+        # константами нельзя: подними потолок в сто раз — и «уложились в
+        # потолок» останется правдой. Нарочная поломка это и показала. Меняешь
+        # потолок намеренно — поменяй число и здесь.
+        AUDIO_BUDGET, VIDEO_BUDGET, MEDIA_BUDGET, MIN_ATTEMPT = 150, 240, 120, 15
+        for name, want in (("_DIRECT_AUDIO_BUDGET_SEC", AUDIO_BUDGET),
+                           ("_DIRECT_VIDEO_BUDGET_SEC", VIDEO_BUDGET),
+                           ("_MEDIA_CHAIN_BUDGET_SEC", MEDIA_BUDGET),
+                           ("_MEDIA_MIN_ATTEMPT_SEC", MIN_ATTEMPT)):
+            done += 1
+            if getattr(g, name) != want:
+                problems.append(f"потолок ожидания {name} изменился: было {want} с, "
+                                f"стало {getattr(g, name)} с — если намеренно, "
+                                f"поправь число в проверке")
 
         n_audio = len(c.AUDIO_FALLBACK_CHAIN)
         n_video = len([m for m in c.VIDEO_FALLBACK_CHAIN
@@ -1367,14 +1396,14 @@ def check_wait_budgets():
 
         # Личка: человек ждёт ответа
         answer = run("голосовое в личке", lambda: g.ask_gemini_audio(1, 1, "QQ"),
-                     g._DIRECT_AUDIO_BUDGET_SEC, c.GEMINI_TIMEOUT, n_audio)
+                     AUDIO_BUDGET, c.GEMINI_TIMEOUT, n_audio)
         done += 1
         if not answer:
             problems.append("голосовое в личке: человек не получил вообще ничего — "
                             "должна уйти заглушка, а не пустота")
 
         answer = run("видео в личке", lambda: g.ask_gemini_video(1, 1, "QQ"),
-                     g._DIRECT_VIDEO_BUDGET_SEC, c.VIDEO_TIMEOUT, n_video)
+                     VIDEO_BUDGET, c.VIDEO_TIMEOUT, n_video)
         done += 1
         if not answer:
             problems.append("видео в личке: человек не получил вообще ничего")
@@ -1382,11 +1411,11 @@ def check_wait_budgets():
         # Группа: бот работает фоном, потолок жёстче
         run("альбом из 10 фото в группе",
             lambda: g._describe_image("QQ", 0, ["QQ"] * 9),
-            g._MEDIA_CHAIN_BUDGET_SEC, g._describe_timeout(10), n_media)
+            MEDIA_BUDGET, g._describe_timeout(10), n_media)
         run("голосовое в группе", lambda: g._transcribe_audio("QQ"),
-            g._MEDIA_CHAIN_BUDGET_SEC, g._AUDIO_DESCRIBE_TIMEOUT, n_media)
+            MEDIA_BUDGET, g._AUDIO_DESCRIBE_TIMEOUT, n_media)
         run("видео в группе", lambda: g._describe_video("QQ"),
-            g._MEDIA_CHAIN_BUDGET_SEC, 90, n_media)
+            MEDIA_BUDGET, 90, n_media)
 
         # ── Разбор в личке: подстраховка ПОЛНАЯ (21.09.2026) ───────────
         #
@@ -1399,7 +1428,7 @@ def check_wait_budgets():
         # Сторожим теперь ОБРАТНОЕ: что цепочка снова не укоротилась молча.
         run("фото в личке (разбор ради поиска по базе)",
             lambda: g._describe_image("QQ"),
-            g._MEDIA_CHAIN_BUDGET_SEC, g._describe_timeout(1), n_media)
+            MEDIA_BUDGET, g._describe_timeout(1), n_media)
         done += 1
         # ⚠️ СРАВНИВАТЬ С ДЛИНОЙ ОЧЕРЕДИ НЕЛЬЗЯ: перебор имеет полное право
         # оборваться по общему потолку времени — это и есть то, что сторожит

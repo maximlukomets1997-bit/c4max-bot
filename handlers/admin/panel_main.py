@@ -65,9 +65,12 @@ from .panel_rag import _end_kb_test
 # та же кнопка на том же месте, в паре с qwen3.8-flash.
 # 2026-10-03: удалены qwen3.7-plus и qwen3.7-max (решение Максима) — их ряд
 # ушёл целиком, остальные ряды и порядок кнопок прежние. Стало 6 рядов.
+# 2026-10-10: удалены gemini-3.5-flash и gemini-3.7-flash (решение Максима):
+# 08.10 Google снял обе и молча переадресует их на 3.6 и 3.8 — кнопки врали
+# бы. Их ряд (нижние клетки «столбцов» Gemini) ушёл целиком, остальное на
+# своих местах. Стало 5 рядов.
 _MODEL_BUTTON_ROWS = [
     ["gemini-3.5-flash-lite", "gemini-3.6-flash"],
-    ["gemini-3.5-flash", "gemini-3.7-flash"],
     ["gemini-3.8-flash"],
     ["qwen3.8-max-0902", "qwen3.8-flash"],
     ["deepseek-flash"],

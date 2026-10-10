@@ -193,7 +193,7 @@ user_image_calls, user_settings, user_token_usage
 
 ## Конфигурация
 
-`config.py` (1681 строка по счёту `map.py`, 132 константы) — читают 48
+`config.py` (1606 строк по счёту `map.py`, 132 константы) — читают 48
 модулей. Значения берутся из `.env` (`python-dotenv`). Ключи из
 `.env.example` (последние три там закомментированы — необязательные):
 
@@ -209,7 +209,7 @@ WEB_HOST, WEB_PORT, IS_DOCKER
 `DB_PATH = "history.db"`, `BACKUP_DIR = "backups"`,
 `RAG_INDEX_FILE = "knowledge/knowledge_base_vectors.json"`,
 `KNOWLEDGE_PENDING_DIR`, `KNOWLEDGE_APPROVED_DIR`,
-`AVAILABLE_MODELS` (10 моделей: 21.09.2026 добавлена Qwen3.8 Flash, 28.09 MiMo V2.5 заменены на V2.6, 29.09 qwen3.8-max — на qwen3.8-max-0902, 03.10 удалены обе Qwen 3.7; слепых моделей с 03.10 нет), `PROVIDERS` (5 ключей: gemini, image, qwen, deepseek, xiaomi — «image» это
+`AVAILABLE_MODELS` (8 моделей: 21.09.2026 добавлена Qwen3.8 Flash, 28.09 MiMo V2.5 заменены на V2.6, 29.09 qwen3.8-max — на qwen3.8-max-0902, 03.10 удалены обе Qwen 3.7, 10.10 — Gemini 3.5 Flash и 3.7 Flash, снятые Google 08.10 (молча переадресуются на 3.6 и 3.8); слепых моделей с 03.10 нет; три очереди подстраховки медиа с 10.10 — по три модели: 3.8 Flash → 3.6 Flash → 3.5 Flash-Lite), `PROVIDERS` (5 ключей: gemini, image, qwen, deepseek, xiaomi — «image» это
 не провайдер моделей, а картинки; `preflight` считает четвёрку по
 `AVAILABLE_MODELS`), `AVAILABLE_IMAGE_MODELS` (2), `QUIZ_RANKS` (20 званий),
 `AUTO_UPDATE_INTERVAL_SEC = 300`, `AUTO_UPDATE_QUIET_SEC = 60`,
