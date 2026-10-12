@@ -677,14 +677,14 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         context.application.stop_running()
         return
 
-    # ── Подтверждение и отмена сброса ВОСЬМИ промптов ──────────────────
-    # Шестнадцать кнопок, одна логика: стереть ключ в settings → попап →
+    # ── Подтверждение и отмена сброса ДЕВЯТИ промптов ──────────────────
+    # Восемнадцать кнопок, одна логика: стереть ключ в settings → попап →
     # переписать сообщение. Тексты и ключи — в таблице `_PROMPTS`
     # (panel_prompts.py), там же исполнитель `handle_prompt_reset`.
     # ⚠️ СПИСОК ЛИТЕРАЛОВ НИЖЕ НЕ ЗАМЕНЯТЬ ВЫЧИСЛЯЕМЫМ (кортежем, собранным из
     # `_PROMPTS`, или приставкой): preflight.py читает роутер разбором ast и видит только
     # `data == "…"`, `data in (…)` и `data.startswith("…")` — за вычисляемым
-    # ключом проверка «кнопки ↔ роутер» объявит все шестнадцать необработанными.
+    # ключом проверка «кнопки ↔ роутер» объявит все восемнадцать необработанными.
     # Отвечает на callback сам handle_prompt_reset, здесь `query.answer` НЕТ:
     # второй ответ Telegram отбивает ошибкой, и кнопка выглядит зависшей.
     if data in ("prompt_reset_confirm", "prompt_reset_cancel",
@@ -692,6 +692,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 "rag_prompt_reset_confirm", "rag_prompt_reset_cancel",
                 "author_prompt_reset_confirm", "author_prompt_reset_cancel",
                 "proactive_prompt_reset_confirm", "proactive_prompt_reset_cancel",
+                "hands_prompt_reset_confirm", "hands_prompt_reset_cancel",
                 "voice_prompt_reset_confirm", "voice_prompt_reset_cancel",
                 "photo_prompt_reset_confirm", "photo_prompt_reset_cancel",
                 "video_prompt_reset_confirm", "video_prompt_reset_cancel"):

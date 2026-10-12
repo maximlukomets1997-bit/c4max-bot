@@ -183,7 +183,9 @@ def note_answer(user_id: int, model: str, seconds: float, answer: str,
 
 
 def note_outcome(user_id: int, text: str) -> None:
-    """Чем кончилось обращение, когда ответа модели не было (отказ цепочки)."""
+    """Чем кончилось обращение, если этого не видно из ответа модели: отказ
+    цепочки (ответа не было) или мут, выданный автору за это обращение
+    (12.10.2026, services/proactive.py::settle_direct_answer)."""
     _write(user_id, f"── ИТОГ: {text} ──\n")
 
 

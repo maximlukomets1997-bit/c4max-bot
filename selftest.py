@@ -9208,6 +9208,470 @@ def check_message_batch():
                       f"чисел не ждёт; 0 — склейки нет; регулятор в боте")
 
 
+def check_direct_hands():
+    """
+    «Руки» при прямом обращении к боту в группе (12.10.2026, решение Максима
+    после живого случая 11.10: человек слал боту оскорбления ответами на его
+    сообщения, а наказать бот не мог — пометку мута понимал только режим
+    «Сам в разговор»).
+
+    ⚠️ Ради чего проверка существует. Правка стоит на пути КАЖДОГО ответа бота
+    в группе, и тихо сломаться она может в обе стороны:
+      • мут НЕ выдаётся — права не доехали до запроса, пометку не разобрали,
+        один из четырёх обработчиков забыл общий шаг;
+      • служебная пометка [МУТ:секунды] УТЕКАЕТ людям — в готовом ответе, в
+        показе «на глазах», в архиве группы или в памяти бота (оттуда модель
+        начала бы повторять её как манеру речи);
+      • мут выдаётся ТОМУ, КОМУ НЕЛЬЗЯ, или там, где его не бывает: персоналу,
+        в личке, при выключенных «руках», без заданного текста прав.
+    Глазами ничего из этого не видно, пока кто-нибудь не нахамит боту.
+
+    Гоняются настоящие: правило `proactive.direct_hands_block`, запросы
+    `gemini.ask_gemini` и `ask_gemini_audio` на поддельной сети, обработчики
+    `handlers/messages.py` (текст, пачка, фото, голосовое, видео) с поддельным
+    Telegram и подставной моделью, показ `live_answer.LiveGroupMessage`.
+    Ожидаемые строки выписаны здесь руками, а не собраны тем же кодом.
+    """
+    import asyncio
+    import json as _json
+    import time as _time
+    import types
+    from datetime import datetime, timezone
+
+    import config as c
+    from database import history as hist
+    from services import antispam, proactive, roles
+    from services import gemini as g
+    from services import live_answer as la
+    from services import message_batch as mb
+    import handlers.messages as hm
+    import handlers.admin.panel_prompts as pp
+
+    problems = []
+    done = 0
+
+    def expect(title, ok):
+        nonlocal done
+        done += 1
+        if not ok:
+            problems.append(title)
+
+    GROUP = -100777050
+    OWNER, MOD, PLAIN, BOT_ID = 777050001, 777050002, 777050011, 777050999
+    KEY = "direct_hands_instruction"
+    RIGHTS = "[Твои права] За хамство в твой адрес ставь в конце ответа пометку мута."
+    TAGGED = "Остынь. [МУТ:300]"
+
+    def no_tag(text) -> bool:
+        """В тексте для людей нет ни пометки, ни её обломка."""
+        up = (text or "").upper()
+        return "[" not in up and "МУТ" not in up and "MUTE" not in up
+
+    class Bot:
+        """Telegram без сети: каждое действие — в записную книжку по порядку."""
+        id = BOT_ID
+        username = "c4max_test_bot"
+        first_name = "Бот"
+
+        def __init__(self, delete_fail=()):
+            self.events, self.next_id = [], 500
+            self.delete_fail = set(delete_fail)
+
+        async def send_message(self, chat_id=None, text=None, entities=None,
+                               reply_to_message_id=None, **kw):
+            self.next_id += 1
+            self.events.append(("send", chat_id, text, reply_to_message_id, self.next_id))
+            return types.SimpleNamespace(message_id=self.next_id)
+
+        async def edit_message_text(self, chat_id=None, message_id=None, text=None, **kw):
+            self.events.append(("edit", chat_id, text, message_id))
+            return True
+
+        async def delete_message(self, chat_id=None, message_id=None, **kw):
+            if message_id in self.delete_fail:
+                raise RuntimeError("нет права удалять сообщения")
+            self.events.append(("delete", chat_id, message_id))
+            return True
+
+        async def restrict_chat_member(self, chat_id=None, user_id=None, permissions=None,
+                                       until_date=None, **kw):
+            self.events.append(("mute", chat_id, user_id, until_date))
+            return True
+
+        async def send_chat_action(self, *a, **kw):
+            return True
+
+        async def send_message_draft(self, chat_id=None, draft_id=None, text=None, **kw):
+            self.events.append(("draft", chat_id, text))
+            return True
+
+    def mutes(ev):
+        return [(e[1], e[2]) for e in ev if e[0] == "mute"]
+
+    def deleted(ev):
+        return sorted(e[2] for e in ev if e[0] == "delete" and e[1] == GROUP)
+
+    def said(ev, chat=GROUP):
+        """Что бот написал в чат: отправки и правки, по порядку."""
+        return [e for e in ev if e[0] in ("send", "edit") and e[1] == chat]
+
+    # ─── всё, что проверка трогает, возвращается на место ───
+    import services.roles  # noqa: F401 — модуль прав грузим ДО подмены владельцев
+    saved_settings = {k: hist.get_setting(k, "") for k in
+                      ("proactive_hands", KEY, la.SETTING_KEY, "active_model")}
+    saved_roles = (roles.ADMIN_IDS, dict(roles._cache), roles._loaded)
+    saved_admins = c.ADMIN_IDS
+    saved_g = {name: getattr(g, name) for name in ("_http", "logger", "RAG_ENABLED")}
+    saved_mute = dict(antispam._muted_until)
+
+    def setup(hands="1", rights=RIGHTS, live="0"):
+        hist.set_setting("proactive_hands", hands)
+        hist.set_setting(KEY, rights)
+        hist.set_setting(la.SETTING_KEY, live)
+        antispam._muted_until.clear()
+
+    try:
+        roles.ADMIN_IDS = (OWNER,)
+        roles._cache.clear()
+        roles._cache[MOD] = {"user_id": MOD, "p_mod": 1, "p_ban": 0,
+                             "p_cards": 0, "p_cards_edit": 0}
+        roles._loaded = True
+        c.ADMIN_IDS = (OWNER,)
+
+        # ═══ 1. Правило: кому права вообще дают ═══
+        setup()
+        expect("обычному участнику в группе при включённых руках права не выданы",
+               proactive.direct_hands_block(GROUP, PLAIN) == RIGHTS)
+        expect("права на мут выданы в ЛИЧКЕ — мут бывает только в группе",
+               proactive.direct_hands_block(PLAIN, PLAIN) == "")
+        expect("права на мут выданы против ВЛАДЕЛЬЦА",
+               proactive.direct_hands_block(GROUP, OWNER) == "")
+        expect("права на мут выданы против МОДЕРАТОРА",
+               proactive.direct_hands_block(GROUP, MOD) == "")
+        setup(hands="0")
+        expect("руки выключены, а права на мут выданы",
+               proactive.direct_hands_block(GROUP, PLAIN) == "")
+        setup(rights="")
+        expect("текст прав не задан, а права не пусты — заводского текста быть не должно",
+               proactive.direct_hands_block(GROUP, PLAIN) == "")
+
+        # ═══ 2. Запрос: права доезжают до модели, пометка не оседает в памяти ═══
+        sent_payloads = []
+
+        class _Resp:
+            def __init__(self, native):
+                self.native = native
+
+            @staticmethod
+            def raise_for_status():
+                pass
+
+            def json(self):
+                if self.native:
+                    return {"candidates": [{"content": {"parts": [{"text": TAGGED}]}}],
+                            "usageMetadata": {"promptTokenCount": 10, "totalTokenCount": 15}}
+                return {"choices": [{"message": {"content": TAGGED}}],
+                        "usage": {"prompt_tokens": 10, "total_tokens": 15}}
+
+        class _Session:
+            @staticmethod
+            def post(url, json=None, **kw):
+                sent_payloads.append(_json.dumps(json, ensure_ascii=False))
+                return _Resp(":generateContent" in url)
+
+        class Silent:
+            def _skip(self, *a, **kw): pass
+            debug = info = warning = error = exception = _skip
+
+        g._http = lambda: _Session()
+        g.logger = Silent()
+        g.RAG_ENABLED = False          # поиск по базе сам зовёт модели — здесь лишний шум
+        hist.set_setting("active_model", c.FALLBACK_MODEL)
+
+        def asked_with_rights(chat_id, user_id) -> bool:
+            sent_payloads.clear()
+            g.ask_gemini(chat_id, user_id, "ты тупой")
+            return any(RIGHTS in p for p in sent_payloads)
+
+        setup()
+        expect("обращение в группе: текст прав на мут НЕ ушёл модели",
+               asked_with_rights(GROUP, PLAIN))
+        answer = g.ask_gemini(GROUP, PLAIN, "ты тупой")
+        expect("запрос к модели сам вырезал пометку — обработчику нечего исполнять",
+               "[МУТ:300]" in (answer or ""))
+        memory = [m["content"] for m in hist.get_history(PLAIN) if m["role"] == "assistant"]
+        expect(f"в памяти бота осталась пометка мута: {memory[-1:]!r}",
+               bool(memory) and memory[-1] == "Остынь.")
+        expect("личка: текст прав на мут ушёл модели", not asked_with_rights(PLAIN, PLAIN))
+        expect("обращение МОДЕРАТОРА: текст прав на мут ушёл модели",
+               not asked_with_rights(GROUP, MOD))
+        setup(hands="0")
+        expect("руки выключены, а текст прав на мут ушёл модели",
+               not asked_with_rights(GROUP, PLAIN))
+
+        # Голосовое к слышащей модели — свой путь сборки запроса (_ask_native_media).
+        hearing = next((m for m in c.AUDIO_FALLBACK_CHAIN if m in c.AVAILABLE_MODELS), None)
+        if hearing is None:
+            expect("в очереди голосовых нет ни одной модели — путь файла проверить нечем", False)
+        else:
+            setup()
+            hist.set_setting("active_model", hearing)
+            g._quota_blocked.clear()
+            sent_payloads.clear()
+            answer = g.ask_gemini_audio(GROUP, PLAIN, "QQ")
+            expect("голосовое в группе: текст прав на мут НЕ ушёл слышащей модели",
+                   any(RIGHTS in p for p in sent_payloads))
+            expect("голосовое: запрос сам вырезал пометку — обработчику нечего исполнять",
+                   "[МУТ:300]" in (answer or ""))
+            memory = [m["content"] for m in hist.get_history(PLAIN) if m["role"] == "assistant"]
+            expect(f"голосовое: в памяти бота осталась пометка мута: {memory[-1:]!r}",
+                   bool(memory) and memory[-1] == "Остынь.")
+
+        # ═══ 3. Обработчики: мут выдан, пометки люди не видят ═══
+        state = {"answer": TAGGED, "pieces": None}
+
+        def fake_ask(chat_id, user_id, *rest, progress=None, **kw):
+            if progress is not None and state["pieces"]:
+                for piece in state["pieces"]:
+                    progress.feed(piece)
+                    _time.sleep(0.05)
+            return state["answer"]
+
+        def make(chat_id, user_id, mid, kind, bot):
+            chat = types.SimpleNamespace(
+                id=chat_id, type="private" if chat_id == user_id else "supergroup")
+            user = types.SimpleNamespace(id=user_id, full_name="Проверка",
+                                         first_name="Проверка", username=None)
+
+            class _File:
+                async def download_as_bytearray(self):
+                    return bytearray(b"QQ")
+
+            async def _get_file():
+                return _File()
+
+            async def _reply_text(text, **kw):
+                bot.next_id += 1
+                bot.events.append(("status", chat_id, text, bot.next_id))
+                return types.SimpleNamespace(message_id=bot.next_id)
+
+            media = types.SimpleNamespace(get_file=_get_file, file_size=1000,
+                                          mime_type="video/mp4")
+            msg = types.SimpleNamespace(
+                text="иди лесом, бот" if kind == "text" else None,
+                caption="иди лесом, бот" if kind in ("photo", "video") else None,
+                photo=[media] if kind == "photo" else None,
+                voice=media if kind == "voice" else None, audio=None,
+                video=media if kind == "video" else None,
+                message_id=mid, reply_to_message=None, media_group_id=None,
+                chat=chat, from_user=user, reply_text=_reply_text)
+            upd = types.SimpleNamespace(message=msg, effective_chat=chat, effective_user=user)
+            return upd, msg, user
+
+        def run(kind="text", *, chat=GROUP, user=PLAIN, mids=(77,), delete_fail=()):
+            """Один прогон настоящего обработчика. Несколько mids — склеенная пачка."""
+            bot = Bot(delete_fail)
+            context = types.SimpleNamespace(bot=bot, user_data={})
+            saved_h = (hm.ask_gemini, hm.ask_gemini_audio, hm.ask_gemini_video,
+                       hm.should_respond_in_group, hm.clean_mention, mb.wait_sec,
+                       la.TICK_SEC, la.GROUP_TICK_SEC)
+            try:
+                hm.ask_gemini = hm.ask_gemini_audio = hm.ask_gemini_video = fake_ask
+                hm.should_respond_in_group = lambda *a, **kw: True
+                hm.clean_mention = lambda text, *a, **kw: text
+                mb.wait_sec = lambda: 0          # склейку проверяет своя группа
+                la.TICK_SEC = la.GROUP_TICK_SEC = 0.01
+
+                async def go():
+                    if len(mids) > 1:
+                        made = [make(chat, user, mid, "text", bot) for mid in mids]
+                        items = [(m[1], f"строка {i}") for i, m in enumerate(made, 1)]
+                        await hm._answer_text(context, chat, made[0][2], True, items)
+                    else:
+                        upd, _, _ = make(chat, user, mids[0], kind, bot)
+                        handler = {"text": hm.handle_message, "photo": hm.handle_photo,
+                                   "voice": hm.handle_voice, "video": hm.handle_video}[kind]
+                        await handler(upd, context)
+                    await asyncio.sleep(0.05)
+                asyncio.run(go())
+            finally:
+                (hm.ask_gemini, hm.ask_gemini_audio, hm.ask_gemini_video,
+                 hm.should_respond_in_group, hm.clean_mention, mb.wait_sec,
+                 la.TICK_SEC, la.GROUP_TICK_SEC) = saved_h
+            return bot.events
+
+        # ── главный случай: текст, показ по ходу выключен ──
+        setup()
+        before = datetime.now(timezone.utc)
+        ev = run()
+        expect(f"обращение с хамством: мут автору в его группе не выдан (выдано: {mutes(ev)})",
+               mutes(ev) == [(GROUP, PLAIN)])
+        until = next((e[3] for e in ev if e[0] == "mute"), None)
+        expect("срок мута не 300 секунд, как просила модель",
+               until is not None and 290 <= (until - before).total_seconds() <= 320)
+        expect(f"сообщение, за которое наказали, не удалено (удалено: {deleted(ev)})",
+               deleted(ev) == [77])
+        group_said = said(ev)
+        expect(f"после мута бот написал в группу не один раз: {[e[2] for e in group_said]}",
+               len(group_said) == 1 and "Остынь" in (group_said[0][2] or ""))
+        expect("служебная пометка мута доехала до группы",
+               all(no_tag(e[2]) for e in group_said))
+        expect("ответ после мута ушёл Reply-ем на стёртое сообщение",
+               bool(group_said) and group_said[0][3] is None)
+        letters = [e[2] for e in said(ev, OWNER)]
+        expect("владельцу не ушло письмо о муте от бота",
+               len(letters) == 1 and letters[0].startswith("🗣 Бот сам выдал мут:"))
+        expect("в письме владельцу нет слов, за которые наказали",
+               bool(letters) and "иди лесом, бот" in letters[0])
+        expect("в журнале наказаний нет записи «мут от бота»",
+               any(e["action"] == "mute_ai" and e["user_id"] == PLAIN
+                   for e in hist.get_recent_moderation_actions(10)))
+        archived = [r["text"] for r in hist.get_recent_group_messages(GROUP, 5)
+                    if r["user_id"] == BOT_ID]
+        expect(f"в архив группы реплика бота легла с пометкой или не легла: {archived[-1:]!r}",
+               bool(archived) and archived[-1] == "Остынь.")
+
+        # ── склеенная пачка: удаляется вся, а не последнее сообщение ──
+        setup()
+        ev = run(mids=(71, 72, 73))
+        expect(f"пачка из трёх сообщений: удалены не все три (удалено: {deleted(ev)})",
+               mutes(ev) == [(GROUP, PLAIN)] and deleted(ev) == [71, 72, 73])
+
+        # ── удалить сообщение не вышло: мут есть, ответ — обычным Reply ──
+        setup()
+        ev = run(delete_fail=(77,))
+        group_said = said(ev)
+        expect("сообщение удалить не вышло: мут не выдан или ответ ушёл не Reply-ем на него",
+               mutes(ev) == [(GROUP, PLAIN)] and len(group_said) == 1
+               and group_said[0][3] == 77 and no_tag(group_said[0][2]))
+
+        # ── кому мут не положен: пометка вырезана, наказания нет ──
+        for title, kwargs, prep in (
+                ("руки выключены", {}, dict(hands="0")),
+                ("текст прав не задан", {}, dict(rights="")),
+                ("пишет модератор", {"user": MOD}, {}),
+                ("пишет владелец", {"user": OWNER}, {})):
+            setup(**prep)
+            ev = run(**kwargs)
+            group_said = said(ev)
+            expect(f"{title}: мут всё равно выдан", not mutes(ev) and not deleted(ev))
+            expect(f"{title}: пометка мута доехала до группы или ответа нет",
+                   len(group_said) == 1 and no_tag(group_said[0][2])
+                   and "Остынь" in (group_said[0][2] or ""))
+            expect(f"{title}: ответ ушёл не Reply-ем на сообщение человека",
+                   bool(group_said) and group_said[0][3] == 77)
+
+        # ── личка: мута не бывает ──
+        setup()
+        ev = run(chat=PLAIN)
+        expect("в личке выдан мут", not mutes(ev))
+        expect("в личке пропал ответ", len(said(ev, PLAIN)) == 1)
+
+        # ── ответ без пометки возвращается знак в знак ──
+        setup()
+        plain_answer = "  Привет, командир.\n"
+        got = asyncio.run(proactive.settle_direct_answer(Bot(), GROUP, PLAIN, plain_answer,
+                                                         "привет", [77]))
+        expect("обычный ответ без пометки изменён разбором мута",
+               got[0] is plain_answer and got[1] is False)
+
+        # ── ответ из ОДНОЙ пометки: наказать можно, сказать нечего ──
+        setup()
+        state["answer"] = "[МУТ:300]"
+        ev = run()
+        expect("ответ из одной пометки: мут не выдан", mutes(ev) == [(GROUP, PLAIN)])
+        expect(f"ответ из одной пометки: бот всё же что-то написал в группу: "
+               f"{[e[2] for e in said(ev)]}", not said(ev))
+        state["answer"] = TAGGED
+
+        # ── показ «на глазах»: пометки нет ни в одной правке, «Думаю…» убрано ──
+        setup(live="1")
+        state["pieces"] = ["Остынь. ", "[МУ", "Т:30", "0]"]
+        ev = run()
+        state["pieces"] = None
+        group_said = said(ev)
+        expect("показ по ходу: сообщение бота в группе не появилось",
+               bool(group_said) and group_said[0][0] == "send" and group_said[0][3] == 77)
+        expect(f"показ по ходу: пометка мута (или её обломок) видна людям: "
+               f"{[e[2] for e in group_said if not no_tag(e[2])]}",
+               all(no_tag(e[2]) for e in group_said))
+        live_id = group_said[0][4] if group_said else None
+        expect("показ по ходу: после мута «Думаю…» осталось висеть ответом на стёртое",
+               live_id in deleted(ev) and 77 in deleted(ev))
+        expect("показ по ходу: готовый ответ не пришёл новым сообщением без Reply",
+               bool(group_said) and group_said[-1][0] == "send"
+               and group_said[-1][3] is None and "Остынь" in (group_said[-1][2] or ""))
+        expect("показ по ходу: мут не выдан", mutes(ev) == [(GROUP, PLAIN)])
+
+        # ── фото, голосовое, видео: общий шаг не забыт ни в одном обработчике ──
+        for kind, name in (("photo", "фото"), ("voice", "голосовое"), ("video", "видео")):
+            setup()
+            ev = run(kind)
+            group_said = said(ev)
+            expect(f"{name}: мут за хамство не выдан — обработчик забыл общий шаг",
+                   mutes(ev) == [(GROUP, PLAIN)] and 77 in deleted(ev))
+            expect(f"{name}: пометка мута доехала до группы или ответа нет",
+                   bool(group_said) and all(no_tag(e[2]) for e in group_said)
+                   and "Остынь" in (group_said[-1][2] or "") and group_said[-1][3] is None)
+
+        # ═══ 4. Сам показ: целая пометка, недописанная, чужие скобки ═══
+        def view_of(text, cls=la.LiveGroupMessage):
+            m = cls(-100, 77)
+            m.feed(text)
+            return m.view()
+
+        for tail in ("[МУТ:300]", "[MUTE:300]", "[", "[М", "[МУ", "[МУТ", "[МУТ:", "[МУТ:30",
+                     "[ мут : 300", "[MUT"):
+            expect(f"показ в группе не прячет хвост «{tail}»",
+                   view_of(f"Остынь. {tail}") == "Остынь.")
+        expect("ответ из одной пометки показан в группе вместо «Думаю…»",
+               view_of("[МУТ:300]") == la.GROUP_THINK_TEXT)
+        for keep in ("Смотри [статью](https://wtmobile.com) тут", "Список: [1] готово",
+                     "[МУТАЦИЯ] бывает", "Цена [100] монет."):
+            expect(f"показ в группе испортил обычный текст «{keep}»", view_of(keep) == keep)
+        expect("показ в ЛИЧКЕ режет текст про пометку — прав на мут там нет",
+               view_of("пометка [МУТ:300] ставится в конце", la.LiveDraft)
+               == "пометка [МУТ:300] ставится в конце")
+
+        # ═══ 5. Текст прав правится как остальные промпты ═══
+        setup()
+        expect("в таблице промптов панели нет прав на мут при обращении",
+               pp._PROMPTS.get("hands_prompt", {}).get("set_key") == KEY
+               and pp._PROMPTS["hands_prompt"]["keys"] == (KEY,))
+        panel_text, _ = pp._build_prompt_panel_text_and_keyboard(OWNER)
+        at = panel_text.find("ПРАВА НА МУТ ПРИ ОБРАЩЕНИИ К БОТУ")
+        block = panel_text[at:at + 400] if at >= 0 else ""
+        expect("панель промптов не показывает права на мут, их длину и команды правки",
+               "/hands_prompt_set" in block and "/hands_prompt_reset" in block
+               and f">{len(RIGHTS)}<" in block)
+        files = {f[0]: f[4] for f in pp._collect_prompt_files()}
+        expect("права на мут не выгружаются файлом вместе с остальными промптами",
+               files.get("HANDS_PROMPT.txt") == RIGHTS)
+        setup(rights="")
+        expect("пустые права на мут выгружаются пустым файлом",
+               "HANDS_PROMPT.txt" not in {f[0] for f in pp._collect_prompt_files()})
+    finally:
+        for name, value in saved_g.items():
+            setattr(g, name, value)
+        roles.ADMIN_IDS, cache, roles._loaded = saved_roles
+        roles._cache.clear()
+        roles._cache.update(cache)
+        c.ADMIN_IDS = saved_admins
+        antispam._muted_until.clear()
+        antispam._muted_until.update(saved_mute)
+        for key, value in saved_settings.items():
+            if value == "":
+                hist.delete_setting(key)
+            else:
+                hist.set_setting(key, value)
+
+    return problems, (f"{done} проверок: права уходят модели только в группе, при "
+                      f"включённых руках и не против персонала; мут и удаление "
+                      f"сообщения (и всей пачки); пометки нет в ответе, показе по ходу, "
+                      f"архиве и памяти; ответ без Reply на стёртое; фото, голосовое и "
+                      f"видео — тем же шагом; текст прав в панели и файлом")
+
+
 CHECKS = (
     ("деньги — расчёт стоимости запросов", check_money),
     ("квота Qwen — оборванный ответ, срок и письма", check_qwen_quota),
@@ -9261,6 +9725,7 @@ CHECKS = (
     ("перезапуск отправкой с ПК не будит сторожа", check_planned_restart),
     ("ответ «на глазах»: черновик в личке", check_live_answer),
     ("склейка сообщений подряд в один ответ", check_message_batch),
+    ("руки при обращении к боту — мут за хамство в свой адрес", check_direct_hands),
 )
 
 

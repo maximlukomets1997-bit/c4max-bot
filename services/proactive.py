@@ -66,7 +66,8 @@ from config import (
     PROACTIVE_MUTE_CLEANUP_PATTERN,
     PROACTIVE_VIDEO_MAX_BYTES,
 )
-from database.history import get_setting, log_proactive_check, save_group_message
+from database.history import (get_direct_hands_instruction, get_setting,
+                              log_proactive_check, save_group_message)
 from services.gemini import (ask_group_proactive, ask_group_proactive_media,
                              _describe_image,
                              _transcribe_audio, _describe_video)
@@ -162,9 +163,14 @@ def is_enabled() -> bool:
 def hands_enabled() -> bool:
     """
     Тумблер «руки» (settings: proactive_hands, по умолчанию ВЫКЛ): разрешено ли
-    боту самому выдавать короткий мут. Проверяется ОДИН раз — перед выдачей
-    мута, уже после ответа модели. Блок прав живёт в живом промпте и уходит
-    всегда: тумблер до него не дотягивается (config.py, «ГДЕ ЛЕЖИТ БЛОК ПРАВ»).
+    боту самому выдавать короткий мут. Один на оба пути — «Сам в разговор» и
+    прямое обращение к боту (12.10.2026), но слушаются они его по-разному:
+      • «Сам в разговор» проверяет ОДИН раз — перед выдачей мута, уже после
+        ответа модели. Блок прав живёт в живой инструкции участия и уходит
+        всегда: тумблер до него не дотягивается (config.py, «ГДЕ ЛЕЖИТ БЛОК
+        ПРАВ»);
+      • прямое обращение проверяет ДВАЖДЫ — права не кладутся в запрос при
+        выключенных руках и пометка не исполняется (direct_hands_block).
     """
     return get_setting("proactive_hands", PROACTIVE_HANDS_DEFAULT) == "1"
 
@@ -275,6 +281,120 @@ async def _apply_mute(bot, chat_id: int, user_id: int | None, seconds: int,
         logger.info("🤖 Чат %s: за мут удалено сообщений: %d из %d",
                     chat_id, done, len(to_delete))
     return deleted
+
+
+# ─── «Руки» при ПРЯМОМ обращении к боту (12.10.2026) ─────────────────
+#
+#  До этого дня пометку [МУТ:секунды] понимал только режим «Сам в разговор»:
+#  нахамить третьему человеку было наказуемо, а послать самого бота ответом на
+#  его сообщение — нет, по устройству. Прямое обращение идёт другим путём
+#  (handlers/messages.py → gemini.ask_gemini), и там не было ни прав в запросе,
+#  ни разбора пометки (живой случай 11.10.2026, решение Максима 12.10).
+#
+#  Теперь у прямого обращения в ГРУППЕ свои права — отдельный текст (settings
+#  'direct_hands_instruction', команда /hands_prompt_set), а всё остальное
+#  общее с режимом «Сам в разговор»: тумблер «🤚 РУКИ», разбор пометки
+#  (_extract_mute), потолок срока, выдача, письмо владельцам и удаление
+#  сообщения (_apply_mute). Второго набора этих правил быть не должно.
+#
+#  ⚠️ ТЕКСТ ПРАВ ОТДЕЛЬНЫЙ, А НЕ БЛОК ИЗ ИНСТРУКЦИИ УЧАСТИЯ, и это не
+#  дублирование: там правила про чужой разговор («К тебе НЕ обращались»,
+#  «не за критику тебя самого»), здесь — ровно обратный случай.
+#  ⚠️ От тумблера «САМ В РАЗГОВОР» эти права НЕ зависят: режим можно
+#  выключить, а право наказать за хамство в свой адрес оставить.
+
+
+def direct_hands_block(chat_id: int, user_id: int | None) -> str:
+    """
+    Права на мут для запроса при ПРЯМОМ обращении — или пустая строка, если
+    в этом обращении их у модели нет. Уходит в запрос (services/gemini.py) и
+    этим же правилом проверяется ПОСЛЕ ответа (settle_direct_answer): пометка
+    исполняется, только если право на неё модели действительно давали.
+
+    Прав нет, когда:
+      • это личка — мут бывает только в группе;
+      • тумблер «руки» выключен;
+      • пишет владелец или модератор — мут им всё равно не выдать
+        (antispam._manual_guard), а грозить персоналу незачем;
+      • текст прав не задан — заводского у него нет.
+
+    Тихая: сбой настроек или прав не должен стоить человеку ответа.
+    """
+    try:
+        if not user_id or chat_id == user_id:
+            return ""
+        if not hands_enabled():
+            return ""
+        from services.roles import is_staff
+        if is_staff(user_id):
+            return ""
+        return get_direct_hands_instruction()
+    except Exception as e:
+        logger.debug("🤖 Не удалось собрать права на мут при обращении: %s", e)
+        return ""
+
+
+async def settle_direct_answer(bot, chat_id: int, user_id: int, answer: str,
+                               trigger_text: str,
+                               message_ids: list[int]) -> tuple[str, bool]:
+    """
+    Разбирает ответ модели на ПРЯМОЕ обращение в группе: вырезает пометку мута
+    и исполняет её, если право на мут у модели было. Зовётся из
+    handlers/messages.py перед отправкой ответа — для текста, фото, голосового
+    и видео одинаково.
+
+    message_ids — сообщения человека, на которые это ответ: одно или вся
+    склеенная пачка (services/message_batch.py). Удаляются ВСЕ: пачка ушла
+    модели одним вопросом, и хамство может стоять в любом её сообщении — та
+    же логика, что у альбома в _apply_mute. Последнее из них — то, на которое
+    бот отвечает Reply.
+
+    Возвращает (ответ без пометки, «отвечать отдельным сообщением»). Второй
+    признак поднят в двух случаях, и вызывающий в обоих поступает одинаково —
+    убирает своё «💭 Думаю…» и шлёт ответ БЕЗ Reply:
+      • сообщение, на которое отвечаем, удалено — ссылаться на стёртое незачем;
+      • после пометки не осталось ни слова — тогда и слать нечего.
+
+    ⚠️ ОТВЕТ БЕЗ ПОМЕТКИ ВОЗВРАЩАЕТСЯ НЕТРОНУТЫМ, знак в знак: путь прямого
+    ответа — самый нагруженный в боте, и обычных ответов эта функция менять
+    не должна никак.
+    ⚠️ ПОМЕТКА ВЫРЕЗАЕТСЯ ВСЕГДА, даже когда мута не будет: служебный маркер
+    участники не должны видеть ни при каких условиях.
+    Наружу не бросает: сбой наказания не должен стоить человеку ответа.
+    """
+    try:
+        if not re.search(PROACTIVE_MUTE_CLEANUP_PATTERN, answer or "", re.IGNORECASE):
+            return answer, False
+        cleaned, mute_sec = _extract_mute(answer)
+    except Exception as e:
+        logger.warning("⚠️ 🤖 Не удалось разобрать пометку мута в ответе на обращение: %s", e)
+        return answer, False
+    said_nothing = not strip_thoughts(cleaned).strip()
+
+    if mute_sec and not direct_hands_block(chat_id, user_id):
+        # Руки погасили, пока модель думала, или пометка пришла без спроса:
+        # прав в запросе не было (персонал, текст не задан).
+        logger.info("🤖 Чат %s: пометка мута в ответе на обращение отброшена — "
+                    "права на неё у модели не было", chat_id)
+        mute_sec = None
+    if not mute_sec:
+        return cleaned, said_nothing
+
+    deleted = False
+    try:
+        ids = [mid for mid in (message_ids or []) if mid]
+        deleted = await _apply_mute(bot, chat_id, user_id, mute_sec, trigger_text,
+                                    ids[-1] if ids else None, ids)
+        # _apply_mute отдаёт только «удалено ли сообщение» — выдан ли сам мут,
+        # спрашиваем у антиспама: он запоминает каждый удавшийся.
+        from services.antispam import is_muted_now
+        if is_muted_now(chat_id, user_id):
+            from services import dialog_log
+            dialog_log.note_outcome(
+                user_id, f"автору выдан мут на {mute_sec} сек за это обращение")
+    except Exception as e:
+        logger.warning("⚠️ 🤖 Чат %s: мут за обращение к боту не выдан: %s", chat_id, e)
+    return cleaned, deleted or said_nothing
 
 
 def note_bot_group_reply(chat_id: int) -> None:

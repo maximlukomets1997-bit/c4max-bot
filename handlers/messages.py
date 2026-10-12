@@ -150,14 +150,49 @@ async def _stop_live(draft, pump, chat_id: int) -> None:
     logger.debug("💬 Ответ на глазах: обновлений %d (чат %s)", draft.sent, chat_id)
 
 
-async def _deliver(bot, chat_id: int, draft, answer: str, reply_to: int) -> None:
+async def _use_hands(bot, chat_id: int, user_id: int, is_group: bool, answer: str,
+                     trigger_text: str, message_ids: list) -> tuple:
+    """
+    «Руки» при прямом обращении к боту в группе (12.10.2026): вырезать из
+    ответа пометку мута [МУТ:секунды] и исполнить её. Общий шаг всех четырёх
+    обработчиков — текста, фото, голосового и видео; сами правила живут в
+    services/proactive.py::settle_direct_answer.
+
+    Возвращает (ответ для отправки, «отвечать отдельным сообщением») — второе
+    уходит в _deliver. В личке мута не бывает: ответ возвращается как есть.
+    """
+    if not is_group:
+        return answer, False
+    from services.proactive import settle_direct_answer
+    return await settle_direct_answer(bot, chat_id, user_id, answer,
+                                      trigger_text, message_ids)
+
+
+async def _deliver(bot, chat_id: int, draft, answer: str, reply_to: int,
+                   detached: bool = False) -> None:
     """
     Отправить готовый ответ. В группе с показом по ходу — последней правкой
     того же сообщения (LiveGroupMessage.finish; его не было — finish шлёт как
     обычно), иначе — send_formatted: форматирование (telegramify), свёрнутые
     мысли и безопасная нарезка длинных ответов.
+
+    detached (12.10.2026, признак от _use_hands) — отвечать ОТДЕЛЬНЫМ
+    сообщением: человек наказан, и его сообщение удалено, либо после пометки
+    мута не осталось ни слова. «💭 Думаю…» в группе при этом висит ответом на
+    стёртое, поэтому его убираем, а ответ (если он есть) шлём новым сообщением
+    без Reply — так же поступает «Сам в разговор».
     """
     from services.live_answer import LiveGroupMessage
+    if detached:
+        if isinstance(draft, LiveGroupMessage) and draft.message_id is not None:
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=draft.message_id)
+            except Exception as e:
+                logger.debug("💬 Не удалось убрать «Думаю…» после мута (чат %s): %s", chat_id, e)
+        from utils_format import strip_thoughts
+        if strip_thoughts(answer).strip():
+            await send_formatted(bot, chat_id, answer, reply_to=None)
+        return
     if isinstance(draft, LiveGroupMessage):
         await draft.finish(bot, answer)
     else:
@@ -229,9 +264,14 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             finally:
                 await _stop_live(draft, pump, chat_id)
 
+        # «Руки»: пометка мута вырезается и исполняется до отправки (_use_hands).
+        answer, detached = await _use_hands(context.bot, chat_id, user_id, is_group, answer,
+                                            user_text or "🖼 фото без подписи",
+                                            [message.message_id])
+
         # Текст ответа в лог не пишем: модель, время и токены уже логирует
         # services/gemini.py строкой «♊️/🐪/🐋/🍚 Ответ от …» (значок провайдера).
-        await _deliver(context.bot, chat_id, draft, answer, message.message_id)
+        await _deliver(context.bot, chat_id, draft, answer, message.message_id, detached)
         delivered = True
 
         # Свой ответ — в архив групп (стенограмма проактивного режима)
@@ -311,8 +351,12 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
 
+        # «Руки»: пометка мута вырезается и исполняется до отправки (_use_hands).
+        answer, detached = await _use_hands(context.bot, chat_id, user_id, is_group, answer,
+                                            "🎧 голосовое сообщение", [message.message_id])
+
         # Единая отправка (см. _deliver). Текст ответа в лог не пишем — см. handle_photo.
-        await _deliver(context.bot, chat_id, draft, answer, message.message_id)
+        await _deliver(context.bot, chat_id, draft, answer, message.message_id, detached)
         delivered = True
 
         # Свой ответ — в архив групп (стенограмма проактивного режима).
@@ -420,7 +464,12 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
 
-        await _deliver(context.bot, chat_id, draft, answer, message.message_id)
+        # «Руки»: пометка мута вырезается и исполняется до отправки (_use_hands).
+        answer, detached = await _use_hands(context.bot, chat_id, user_id, is_group, answer,
+                                            user_text or "🎬 видео без подписи",
+                                            [message.message_id])
+
+        await _deliver(context.bot, chat_id, draft, answer, message.message_id, detached)
         delivered = True
 
         # Свой ответ — в архив групп (стенограмма проактивного режима).
@@ -590,8 +639,13 @@ async def _answer_text(context, chat_id: int, user, is_group: bool, items: list,
         finally:
             await _stop_live(draft, pump, chat_id)
 
+    # «Руки»: пометка мута вырезается и исполняется до отправки (_use_hands).
+    # Под удаление уходит вся пачка — модель судила её одним вопросом.
+    answer, detached = await _use_hands(context.bot, chat_id, user.id, is_group, answer,
+                                        user_text, [msg.message_id for msg, _ in items])
+
     # Единая отправка (см. _deliver). Текст ответа в лог не пишем — см. handle_photo.
-    await _deliver(context.bot, chat_id, draft, answer, message.message_id)
+    await _deliver(context.bot, chat_id, draft, answer, message.message_id, detached)
 
     # Свой ответ — в архив групп (стенограмма проактивного режима)
     if is_group:

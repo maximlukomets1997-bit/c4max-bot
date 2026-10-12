@@ -41,7 +41,10 @@
 
 import asyncio
 import logging
+import re
 import time
+
+from config import PROACTIVE_MUTE_CLEANUP_PATTERN
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +75,26 @@ GROUP_THINK_TEXT = "💭 Думаю…"
 # Сколько готов ждать последнюю правку, если Telegram попросил подождать
 # (RetryAfter). Дольше — готовый ответ уходит новым сообщением, а не висит.
 FINISH_WAIT_MAX_SEC = 30
+
+
+# ── Пометка мута в показе по ходу (12.10.2026) ─────────────────────────
+# С этого дня модель может закончить ответ на обращение в группе пометкой
+# [МУТ:секунды] (services/proactive.py, «руки» при прямом обращении). Из
+# готового ответа её вырезает обработчик, но показ по ходу идёт РАНЬШЕ — и
+# без этого среза люди несколько секунд видели бы служебный маркер, а с ним и
+# то, что человека сейчас накажут. Шаблон целой пометки — общий, из config;
+# второй ловит НЕДОПИСАННУЮ в самом хвосте («[», «[МУ», «[МУТ:30»): поток
+# приносит её по кусочкам. Чужая незакрытая скобка в хвосте тоже пропадёт из
+# показа на один тик — и вернётся, как только за ней придёт что-то ещё.
+_MUTE_TAG_RE = re.compile(PROACTIVE_MUTE_CLEANUP_PATTERN, re.IGNORECASE)
+_MUTE_TAG_TAIL_RE = re.compile(
+    r"\[\s*(?:(?:М|МУ|МУТ|M|MU|MUT|MUTE)|(?:МУТ|MUTE)\s*[:=][^\]\n]{0,24})?\s*$",
+    re.IGNORECASE)
+
+
+def _hide_mute_tag(text: str) -> str:
+    """Текст показа без пометки мута — целой и недописанной в хвосте."""
+    return _MUTE_TAG_TAIL_RE.sub("", _MUTE_TAG_RE.sub("", text))
 
 
 def live_answer_enabled() -> bool:
@@ -130,9 +153,16 @@ class LiveDraft:
         self._parts.append(piece)
 
     # ── показ ────────────────────────────────────────────────
+    # Прятать ли из показа пометку мута. В личке прав на мут у модели нет, и
+    # резать там нечего; в группе — см. LiveGroupMessage и _hide_mute_tag.
+    _HIDE_MUTE_TAG = False
+
     def _view(self, seconds: bool) -> str:
         """Показ по ходу (сырой Markdown); seconds — тикающий счётчик ожидания."""
-        text = "".join(self._parts).strip()
+        text = "".join(self._parts)
+        if self._HIDE_MUTE_TAG:
+            text = _hide_mute_tag(text)
+        text = text.strip()
         if text:
             if len(text) > DRAFT_MAX_CHARS:
                 text = text[:DRAFT_MAX_CHARS].rstrip() + " …"
@@ -224,6 +254,10 @@ class LiveGroupMessage(LiveDraft):
     уведомление: правки уведомлений не дают. Так задумано и обсуждено с
     Максимом 08.10.2026.
     """
+
+    # Ответ на обращение в группе может кончаться пометкой мута — участники
+    # её видеть не должны и по ходу тоже (см. _hide_mute_tag).
+    _HIDE_MUTE_TAG = True
 
     def __init__(self, chat_id: int, reply_to: int, label: str | None = None):
         super().__init__(chat_id, 1, label)

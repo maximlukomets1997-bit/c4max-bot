@@ -30,6 +30,7 @@ from .panel_prompts import (
     cmd_news_prompt_set, cmd_news_prompt_reset, cmd_rag_prompt_set, cmd_rag_prompt_reset,
     cmd_proactive_prompt_set, cmd_proactive_prompt_reset,
     cmd_author_prompt_set, cmd_author_prompt_reset, send_prompt_files,
+    cmd_hands_prompt_set, cmd_hands_prompt_reset,
     cmd_voice_prompt_set, cmd_voice_prompt_reset,
     cmd_photo_prompt_set, cmd_photo_prompt_reset,
     cmd_video_prompt_set, cmd_video_prompt_reset,

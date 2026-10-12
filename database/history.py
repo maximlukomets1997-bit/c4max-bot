@@ -58,6 +58,7 @@ from .settings import (get_setting, set_setting, delete_setting,
                        get_active_system_prompt, append_prompt_addition,
                        get_news_system_prompt, get_rag_instruction,
                        get_proactive_instruction, get_author_brief_instruction,
+                       get_direct_hands_instruction,
                        get_media_prompt_voice, get_media_prompt_photo,
                        get_media_prompt_video)
 

@@ -71,6 +71,7 @@ from config import (
     TELEGRAM_TOKEN,
     PROACTIVE_CONTEXT_MSGS,
     PROACTIVE_SKIP_MARKER,
+    PROACTIVE_MUTE_CLEANUP_PATTERN,
     PROVIDER_ICONS,
     PROVIDER_ICON_FALLBACK,
     RAG_ICON,
@@ -2180,6 +2181,47 @@ def _rag_block(query_text: str, *, remember_query: bool = True) -> str:
         return ""
 
 
+def _direct_hands(chat_id: int, user_id: int) -> str:
+    """
+    Права на мут при ПРЯМОМ обращении к боту в группе (12.10.2026) — готовый
+    кусок системного промпта или пустая строка. Кому и когда их давать, решает
+    services/proactive.py::direct_hands_block: там живут «руки», и тем же
+    правилом пометка проверяется после ответа.
+
+    ЕДИНАЯ точка для всех прямых путей — текста, фото, голосового и видео:
+    иначе мут работал бы на слова и молчал на голосовое, смотря какая модель
+    сейчас активная.
+    """
+    try:
+        # Локальный импорт: proactive сам тянет этот модуль в шапке —
+        # на верхнем уровне вышло бы кольцо.
+        from services.proactive import direct_hands_block
+        return direct_hands_block(chat_id, user_id)
+    except Exception as e:
+        logger.debug("🤖 Не удалось добавить права на мут в запрос: %s", e)
+        return ""
+
+
+def _memory_answer(db_answer: str, chat_id: int, user_id: int) -> str:
+    """
+    Ответ бота — в вид для ПАМЯТИ: без пометки мута [МУТ:секунды] (12.10.2026).
+
+    Человеку пометку вырезает services/proactive.py::settle_direct_answer, но
+    в память ответ пишется здесь, раньше. Останься пометка в памяти — модель
+    видела бы её в своих прошлых репликах и начала бы повторять как манеру
+    речи, уже без всякого повода.
+
+    Только группы: в личке прав на мут в запросе нет, и вырезать там нечего,
+    а текст человека про саму пометку портить незачем.
+    ⚠️ Ответ из ОДНОЙ пометки в память пустым не кладём: пустая реплика бота в
+    истории — повод для отказа провайдера на следующем же запросе человека.
+    """
+    if chat_id == user_id or not db_answer:
+        return db_answer
+    cleaned = re.sub(PROACTIVE_MUTE_CLEANUP_PATTERN, "", db_answer, flags=re.IGNORECASE).strip()
+    return cleaned or "…"
+
+
 # ───────────────────────────────────────────────
 #  Файл человека — модели: голосовое и видео (native generateContent).
 #  Путь ОДИН на оба типа с 21.09.2026 (до того — две копии одного кода);
@@ -2280,6 +2322,15 @@ def _ask_native_media(chat_id: int, user_id: int, *, kind: str, notify_kind: str
             current_system_prompt = (
                 f"{current_system_prompt}\n\n{block}" if current_system_prompt else block
             )
+
+    # Права на мут при прямом обращении в группе (12.10.2026) — тот же кусок,
+    # что в ask_gemini: нахамить боту можно и голосом. В личке и для персонала
+    # вернётся пустота (services/proactive.py::direct_hands_block).
+    hands = _direct_hands(chat_id, user_id)
+    if hands:
+        current_system_prompt = (
+            f"{current_system_prompt}\n\n{hands}" if current_system_prompt else hands
+        )
 
     # Разбор — в память бота вместо заглушки (см. предупреждение выше).
     if described:
@@ -2443,6 +2494,8 @@ def _ask_native_media(chat_id: int, user_id: int, *, kind: str, notify_kind: str
     # В историю — без блока мыслей: он нужен только на экране, а в контексте
     # диалога занимал бы место (тот же порядок, что в ask_gemini).
     db_answer = re.sub(r'<thought>.*?</thought>', '', answer, flags=re.DOTALL | re.IGNORECASE).strip()
+    # …и без пометки мута: человеку её вырежут перед отправкой (см. _memory_answer).
+    db_answer = _memory_answer(db_answer, chat_id, user_id)
     hist.add_messages(chat_id, user_id, context_note, db_answer,
                       prompt_tokens, used_model, total_tokens)
     return answer
@@ -2821,6 +2874,21 @@ def ask_gemini(chat_id: int, user_id: int, user_text: str, image_base64: str = N
         except Exception as who_err:
             logger.debug("🤖 Не удалось добавить справку об авторе в запрос: %s", who_err)
 
+    # ── Права на мут при ПРЯМОМ обращении в группе (12.10.2026) ──
+    # Решение Максима после живого случая 11.10: человек слал боту оскорбления
+    # ответами на его сообщения, а наказать бот не мог — «руки» работали только
+    # в режиме «Сам в разговор». Текст прав отдельный (/hands_prompt_set) и
+    # уходит ТОЛЬКО когда право есть: группа, руки включены, пишет не персонал
+    # (services/proactive.py::direct_hands_block). Стоит после справки об
+    # авторе: сначала «кто говорит», потом «что с ним можно сделать».
+    # Саму пометку из ответа вырезает и исполняет обработчик
+    # (handlers/messages.py → proactive.settle_direct_answer).
+    hands = _direct_hands(chat_id, user_id)
+    if hands:
+        current_system_prompt = (
+            f"{current_system_prompt}\n\n{hands}" if current_system_prompt else hands
+        )
+
     # ── На какое сообщение человек отвечает (2026-08-16) ──
     # Reply Telegram присылает отдельным полем, в тексте сообщения его нет
     # вовсе: без этого блока бот получал голое «а это точно?» и не знал, о чём
@@ -2928,6 +2996,8 @@ def ask_gemini(chat_id: int, user_id: int, user_text: str, image_base64: str = N
 
     # Очищаем ответ от блока мыслей <thought> перед сохранением (экономия контекста)
     db_answer = re.sub(r'<thought>.*?</thought>', '', answer, flags=re.DOTALL | re.IGNORECASE).strip()
+    # …и от пометки мута: человеку её вырежут перед отправкой (см. _memory_answer).
+    db_answer = _memory_answer(db_answer, chat_id, user_id)
 
     hist.add_messages(chat_id, user_id, db_text, db_answer, prompt_tokens, used_model, total_tokens)
     return answer

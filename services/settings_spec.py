@@ -199,7 +199,10 @@ SPEC = {
     "proactive_hands": {
         "section": "proactive", "kind": "toggle", "default": PROACTIVE_HANDS_DEFAULT,
         "title": "Руки",
-        "hint": "разрешить боту самому выдавать мут",
+        # Один тумблер на оба пути (12.10.2026): чужой разговор, куда бот
+        # вступил сам, и слова в адрес самого бота (services/proactive.py).
+        "hint": "разрешить боту самому выдавать мут — и в чужом разговоре, "
+                "и за слова в свой адрес",
     },
     "proactive_min_msgs": {
         "section": "proactive", "kind": "int", "default": PROACTIVE_MIN_MSGS,
