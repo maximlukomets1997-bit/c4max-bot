@@ -3795,7 +3795,7 @@ def check_settings_spec():
     from services.antispam import is_enabled, is_linkfilter_enabled
     from services import greeter
     from utils_format import thoughts_enabled
-    from services.live_answer import live_answer_enabled
+    from services.live_answer import live_answer_enabled, live_thoughts_enabled
 
     readers = {
         "antispam_enabled":   is_enabled,
@@ -3805,6 +3805,7 @@ def check_settings_spec():
         "greet_kick":         greeter.kick_enabled,
         "thoughts_enabled":   thoughts_enabled,
         "live_answer_enabled": live_answer_enabled,
+        "live_thoughts_enabled": live_thoughts_enabled,
     }
     for key, reader in readers.items():
         # Начальное значение: список и читалка обязаны сойтись на чистой базе.
@@ -8363,20 +8364,47 @@ def check_live_answer():
         def close(self): pass
         def iter_lines(self): yield from lines
 
-    saved_http = g._http
-    d = la.LiveDraft(1, 1)
-    g._http = lambda: type("H", (), {"post": lambda self, *a, **kw: ListResponse()})()
-    g._live.progress = d
+    # ⚠️ ВЫКЛЮЧАТЕЛИ МЫСЛЕЙ СТАВЯТСЯ ЯВНО (14.10.2026): с этого дня мысли
+    # МОГУТ быть в черновике (тумблер «🧠 Мысли в черновике»), и без явной
+    # настройки сверка зависела бы от того, что оставила соседняя проверка.
+    saved_toggles = {k: hist.get_setting(k, "") for k in
+                     (la.THOUGHTS_SETTING_KEY, "thoughts_enabled")}
+
+    def stream_into_draft():
+        saved_http = g._http
+        d = la.LiveDraft(1, 1)
+        g._http = lambda: type("H", (), {"post": lambda self, *a, **kw: ListResponse()})()
+        g._live.progress = d
+        try:
+            got = g._openai_stream_request("m", [{"role": "user", "content": "q"}],
+                                           "http://example", "key", {})
+        finally:
+            g._live.progress = None
+            g._http = saved_http
+        return d, got
+
     try:
-        got = g._openai_stream_request("m", [{"role": "user", "content": "q"}],
-                                       "http://example", "key", {})
+        hist.set_setting(la.THOUGHTS_SETTING_KEY, "0")
+        hist.set_setting("thoughts_enabled", "1")
+        d, got = stream_into_draft()
+        expect("в черновик не попал ответ потоковой модели", d.view() == "Ответ по делу")
+        expect("мысли в черновике выключены, а они туда утекли", "СЕКРЕТНЫЕ" not in d.view())
+        expect("черновик изменил то, что вернула модель",
+               bool(got) and got["choices"][0]["message"]["content"].endswith("Ответ по делу"))
+        hist.set_setting(la.THOUGHTS_SETTING_KEY, "1")
+        d, got = stream_into_draft()
+        expect("мысли в черновике включены, а поток не донёс до черновика мысли, или они "
+               "не перед ответом, или смешались с текстом ответа",
+               d.view() == "<thought>СЕКРЕТНЫЕ МЫСЛИ</thought>Ответ по делу")
+        expect("с мыслями в черновике поток изменил то, что вернула модель",
+               bool(got) and got["choices"][0]["message"]["content"]
+               == "<thought>СЕКРЕТНЫЕ МЫСЛИ</thought>\nОтвет по делу")
     finally:
-        g._live.progress = None
-        g._http = saved_http
-    expect("в черновик не попал ответ потоковой модели", d.view() == "Ответ по делу")
-    expect("в черновик утекли мысли модели", "СЕКРЕТНЫЕ" not in d.view())
-    expect("черновик изменил то, что вернула модель",
-           bool(got) and got["choices"][0]["message"]["content"].endswith("Ответ по делу"))
+        for k, v in saved_toggles.items():
+            if v == "":
+                hist.delete_setting(k)
+            else:
+                hist.set_setting(k, v)
 
     # ─── цепочка: новая попытка обнуляет черновик ───
     QWEN = next((m for m, meta in c.AVAILABLE_MODELS.items()
@@ -8800,11 +8828,257 @@ def check_live_answer():
         else:
             hist.set_setting(la.SETTING_KEY, saved_toggle)
 
+    # ─── мысли в черновике лички (14.10.2026, решение Максима) ───
+    # Мысли видны по ходу тем же свёрнутым блоком, что в готовом ответе, а
+    # ответ пишется под ними; длинные мысли уходят сообщениями по ходу и НЕ
+    # режутся. Выключен любой из трёх тумблеров — как до 14.10.2026.
+    from utils_format import THOUGHT_HEADER, utf16_len
+
+    class TBot:
+        """Telegram лички без сети: черновики, сообщения и удаления по порядку."""
+        username = "c4max_test_bot"
+
+        def __init__(self):
+            self.events, self.next_id = [], 900
+
+        async def send_message_draft(self, chat_id=None, draft_id=None, text=None,
+                                     entities=None, **kw):
+            self.events.append(("draft", draft_id, text, entities))
+            return True
+
+        async def send_message(self, chat_id=None, text=None, entities=None,
+                               reply_to_message_id=None, **kw):
+            self.next_id += 1
+            self.events.append(("send", self.next_id, text, reply_to_message_id, entities))
+            return types.SimpleNamespace(message_id=self.next_id)
+
+        async def delete_message(self, chat_id=None, message_id=None, **kw):
+            self.events.append(("delete", message_id))
+            return True
+
+        async def send_chat_action(self, *a, **kw):
+            return True
+
+    def has_quote(entities) -> bool:
+        return any(getattr(e, "type", "") == "expandable_blockquote" for e in (entities or []))
+
+    def norm(s: str) -> str:
+        return " ".join((s or "").split())
+
+    LONG = "Перебираю варианты и сверяю цифры. " * 300        # около 10 500 знаков
+    ANSWER = "Готовый ответ."
+    saved_t = {k: hist.get_setting(k, "") for k in
+               (la.THOUGHTS_SETTING_KEY, "thoughts_enabled", la.SETTING_KEY)}
+
+    def toggles(live_thoughts="1", thoughts="1"):
+        hist.set_setting(la.THOUGHTS_SETTING_KEY, live_thoughts)
+        hist.set_setting("thoughts_enabled", thoughts)
+
+    try:
+        # ── показ: мысли первыми свёрнутым блоком, ответ под ними ──
+        toggles()
+        d = la.LiveDraft(42, 7)
+        expect("мысли в черновике: до первых мыслей нет «Думаю…»",
+               d.view().startswith("💭 Думаю…"))
+        d.think("Прикидываю, что ответить.")
+        text, ents = d._render(d.view())
+        expect("мысли не появились в черновике первыми свёрнутым блоком с шапкой",
+               text.startswith(THOUGHT_HEADER + "Прикидываю") and has_quote(ents))
+        d.feed("Вот ответ")
+        text, ents = d._render(d.view())
+        expect("ответ в черновике пишется не под мыслями",
+               text.startswith(THOUGHT_HEADER) and text.endswith("Вот ответ")
+               and text.index("Прикидываю") < text.index("Вот ответ"))
+        d.attempt()
+        expect("модель сбилась, а мысли сбившейся остались в черновике",
+               d.view() == la.RETRY_TEXT)
+
+        # ── любой тумблер выключен или группа — мыслей по ходу нет ──
+        for title, lt, th in (("«мысли в черновике» выключены", "0", "1"),
+                              ("«мысли под капотом» выключены", "1", "0")):
+            toggles(lt, th)
+            d = la.LiveDraft(42, 7)
+            d.think("секрет")
+            d.feed("Вот ответ")
+            expect(f"{title}, а мысли в черновике есть", d.view() == "Вот ответ")
+        toggles()
+        g_msg = la.LiveGroupMessage(-100, 77)
+        g_msg.think("секрет")
+        g_msg.feed("Вот ответ")
+        expect("в группе по ходу показались мысли", g_msg.view() == "Вот ответ")
+
+        # ── длинные мысли: части уходят сообщениями, ничего не режется ──
+        async def long_thoughts():
+            bot, d = TBot(), la.LiveDraft(42, 7)
+            step = 700
+            for i in range(0, len(LONG), step):
+                d.think(LONG[i:i + step])
+                await d.send_once(bot)
+            d.feed(ANSWER)
+            await d.send_once(bot)
+            final, cont = await d.finish_text(bot, f"<thought>{LONG.strip()}</thought>\n{ANSWER}")
+            return bot, final, cont
+
+        bot, final, cont = asyncio.run(long_thoughts())
+        sends = [e for e in bot.events if e[0] == "send"]
+        drafts = [e for e in bot.events if e[0] == "draft"]
+        expect(f"длинные мысли не ушли сообщениями по ходу (сообщений {len(sends)})",
+               len(sends) >= 2)
+        expect("сообщение или черновик с мыслями длиннее предела Telegram",
+               all(utf16_len(e[2]) <= 4096 for e in sends + drafts))
+        expect("у первой части мыслей нет шапки или Reply на вопрос",
+               bool(sends) and sends[0][2].startswith(THOUGHT_HEADER) and sends[0][3] == 7
+               and has_quote(sends[0][4]))
+        expect("у продолжения мыслей шапка или Reply — как будто ответ начался заново",
+               all(not e[2].startswith(THOUGHT_HEADER) and e[3] is None and has_quote(e[4])
+                   for e in sends[1:]))
+        expect("после части мыслей черновик не начался заново ниже неё",
+               bool(sends) and any(e[1] != 7 for e in drafts))
+        expect("готовый ответ не досылает остаток как продолжение", cont is True)
+        parts = [e[2][len(THOUGHT_HEADER):] if e[2].startswith(THOUGHT_HEADER) else e[2]
+                 for e in sends]
+        rest = final[len("<thought>"):final.index("</thought>")] if "</thought>" in final else ""
+        expect("мысли по дороге потерялись или задвоились",
+               norm(" ".join(parts + [rest])) == norm(LONG))
+        expect("из готового ответа пропал сам ответ", final.endswith(ANSWER))
+
+        # ── модель сбилась после части мыслей: эта часть убирается из чата ──
+        async def stale():
+            bot, d = TBot(), la.LiveDraft(42, 7)
+            for i in range(0, len(LONG), 700):
+                d.think(LONG[i:i + 700])
+                await d.send_once(bot)
+            first = [e[1] for e in bot.events if e[0] == "send"]
+            d.attempt()
+            d.feed("ответ новой попытки")
+            await d.send_once(bot)
+            gone = [e[1] for e in bot.events if e[0] == "delete"]
+            final, cont = await d.finish_text(bot, "ответ новой попытки")
+            return first, gone, final, cont
+
+        first, gone, final, cont = asyncio.run(stale())
+        expect("модель сбилась, а её мысли, ушедшие сообщениями, остались в чате",
+               bool(first) and sorted(gone) == sorted(first))
+        expect("после сбоя готовый ответ ушёл как продолжение чужих мыслей",
+               final == "ответ новой попытки" and cont is False)
+
+        async def chain_dead():
+            bot, d = TBot(), la.LiveDraft(42, 7)
+            for i in range(0, len(LONG), 700):
+                d.think(LONG[i:i + 700])
+                await d.send_once(bot)
+            first = [e[1] for e in bot.events if e[0] == "send"]
+            final, cont = await d.finish_text(bot, "📡 Связь временно нестабильна")
+            gone = [e[1] for e in bot.events if e[0] == "delete"]
+            return first, gone, final, cont
+
+        first, gone, final, cont = asyncio.run(chain_dead())
+        expect("вся цепочка легла, а мысли сбившейся попытки остались над заглушкой",
+               bool(first) and sorted(gone) == sorted(first) and cont is False)
+
+        # ── настоящий обработчик лички ──
+        from services import message_batch as mb
+
+        def run_private(plan):
+            """plan — [("think" | "feed", кусок)]; возвращает события Telegram."""
+            bot = TBot()
+            chat = types.SimpleNamespace(id=555, type="private")
+            user = types.SimpleNamespace(id=555, full_name="Проверка", username=None)
+            msg = types.SimpleNamespace(text="вопрос", caption=None, photo=None, voice=None,
+                                        audio=None, video=None, message_id=77,
+                                        reply_to_message=None, chat=chat, from_user=user)
+            upd = types.SimpleNamespace(message=msg, effective_chat=chat, effective_user=user)
+
+            def fake(chat_id, user_id, text, *a, progress=None, **kw):
+                thoughts, body = [], []
+                for kind, piece in plan:
+                    if progress is not None:
+                        getattr(progress, kind)(piece)
+                    (thoughts if kind == "think" else body).append(piece)
+                    _time.sleep(0.03)
+                th = "".join(thoughts).strip()
+                return (f"<thought>{th}</thought>\n" if th else "") + "".join(body)
+
+            saved_h = (hm.ask_gemini, mb.wait_sec, la.TICK_SEC)
+            try:
+                hm.ask_gemini, mb.wait_sec, la.TICK_SEC = fake, (lambda: 0), 0.01
+
+                async def go():
+                    await hm.handle_message(upd, types.SimpleNamespace(bot=bot, user_data={}))
+                    await asyncio.sleep(0.05)
+                asyncio.run(go())
+            finally:
+                hm.ask_gemini, mb.wait_sec, la.TICK_SEC = saved_h
+            return bot.events
+
+        hist.set_setting(la.SETTING_KEY, "1")
+        toggles()
+        ev = run_private([("think", "Прикидываю, "), ("think", "что сказать."),
+                          ("feed", "Вот "), ("feed", "ответ")])
+        drafts = [e[2] for e in ev if e[0] == "draft"]
+        sends = [e for e in ev if e[0] == "send"]
+        first_thought = next((i for i, t in enumerate(drafts) if "Прикидываю" in t), None)
+        first_answer = next((i for i, t in enumerate(drafts) if "Вот" in t), None)
+        expect("личка: мысли в черновике не появились раньше ответа",
+               first_thought is not None and first_answer is not None
+               and first_thought < first_answer)
+        expect("личка: в черновике ответ пишется не под мыслями",
+               any(t.startswith(THOUGHT_HEADER) and t.endswith("Вот ответ") for t in drafts))
+        expect("личка: готовый ответ не одно сообщение с мыслями сверху Reply-ем на вопрос",
+               len(sends) == 1 and sends[0][2].startswith(THOUGHT_HEADER)
+               and sends[0][2].endswith("Вот ответ") and sends[0][3] == 77)
+
+        long_plan = [("think", LONG[i:i + 700]) for i in range(0, len(LONG), 700)]
+        ev = run_private(long_plan + [("feed", ANSWER)])
+        sends = [e for e in ev if e[0] == "send"]
+        expect("личка, длинные мысли: не несколько сообщений с мыслями и последнее с ответом",
+               len(sends) >= 3 and sends[0][3] == 77 and sends[0][2].startswith(THOUGHT_HEADER)
+               and sends[-1][2].endswith(ANSWER) and sends[-1][3] is None
+               and not sends[-1][2].startswith(THOUGHT_HEADER))
+        texts = [e[2] for e in sends]
+        texts[0] = texts[0][len(THOUGHT_HEADER):]
+        texts[-1] = texts[-1][:-len(ANSWER)]
+        expect("личка, длинные мысли: что-то потерялось или задвоилось",
+               norm(" ".join(texts)) == norm(LONG))
+
+        toggles(live_thoughts="0")
+        ev = run_private([("think", "секрет"), ("feed", "Вот ответ")])
+        drafts = [e[2] for e in ev if e[0] == "draft"]
+        sends = [e for e in ev if e[0] == "send"]
+        expect("личка: «мысли в черновике» выключены, а черновик не как раньше",
+               not any("секрет" in t for t in drafts) and len(sends) == 1
+               and sends[0][2].startswith(THOUGHT_HEADER))
+    finally:
+        for k, v in saved_t.items():
+            if v == "":
+                hist.delete_setting(k)
+            else:
+                hist.set_setting(k, v)
+
     # ─── кнопка в боте: та же настройка, нажимает только владелец ───
     from services.roles import perm_for_callback
     from handlers.admin.panel_main import _build_api_keyboard
     expect("кнопку «ответ на глазах» может нажать не только владелец",
            perm_for_callback("toggle_live_answer") == "owner")
+    expect("кнопку «мысли в черновике» может нажать не только владелец",
+           perm_for_callback("toggle_live_thoughts") == "owner")
+    saved_lt = hist.get_setting(la.THOUGHTS_SETTING_KEY, "")
+    try:
+        lt_labels = {}
+        for raw in ("1", "0"):
+            hist.set_setting(la.THOUGHTS_SETTING_KEY, raw)
+            kb = _build_api_keyboard(next(iter(c.ADMIN_IDS), 1))
+            lt_labels[raw] = [b.text for row in kb.inline_keyboard for b in row
+                              if b.callback_data == "toggle_live_thoughts"]
+        expect("в «Настройках API» нет кнопки «мысли в черновике», или надпись не следует "
+               "за настройкой",
+               bool(lt_labels["1"]) and bool(lt_labels["0"]) and lt_labels["1"] != lt_labels["0"]
+               and "МЫСЛИ В ЧЕРНОВИКЕ" in lt_labels["1"][0])
+    finally:
+        if saved_lt == "":
+            hist.delete_setting(la.THOUGHTS_SETTING_KEY)
+        else:
+            hist.set_setting(la.THOUGHTS_SETTING_KEY, saved_lt)
     try:
         labels = {}
         for raw in ("1", "0"):

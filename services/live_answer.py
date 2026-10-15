@@ -13,9 +13,10 @@
 #    готовым ответом (finish) — с разметкой и мыслями.
 #
 # Как устроено:
-#  • Поток модели (services/gemini.py, через _live_call) зовёт feed(кусок) и
-#    attempt() — «началась новая попытка цепочки»; насос run() в цикле
-#    событий шлёт обновление, если показ изменился.
+#  • Поток модели (services/gemini.py, через _live_call) зовёт feed(кусок),
+#    think(кусок мыслей) — с 14.10.2026, мысли в черновике лички, см. раздел
+#    ниже — и attempt() — «началась новая попытка цепочки»; насос run() в
+#    цикле событий шлёт обновление, если показ изменился.
 #  • Выключатель ОДИН на личку и группы (решение Максима): кнопка
 #    «✍️ ОТВЕТ НА ГЛАЗАХ» в «📡 Настройки API» и тумблер на странице настроек
 #    сайта, ключ live_answer_enabled. Выключен — везде по-старому.
@@ -109,6 +110,57 @@ def live_answer_enabled() -> bool:
         return False
 
 
+# ── Мысли в черновике лички (14.10.2026, решение Максима) ────────────────
+# До этого дня в черновик шёл только текст ответа, а мысли появлялись лишь в
+# готовом сообщении — сверху. Выглядело так, будто сообщение исчезло и пришло
+# заново: черновик убирался, и над тем же текстом вырастал блок «🧠 Мысли».
+# Теперь мысли видны по ходу — тем же свёрнутым блоком и на том же месте, что
+# в готовом ответе (сборка общая, utils_format.build_text_and_entities), а
+# ответ пишется под ними. Живая проба 14.10.2026: Telegram показывает
+# свёрнутую цитату и в черновике, подмена на сообщение незаметна.
+#
+# ⚠️ МЫСЛИ НЕ РЕЖУТСЯ (решение Максима). Черновик — один пузырь до 4096 знаков,
+# а мысли бывают по 10 000+. Перестали влезать — заполнившаяся часть уходит
+# ОБЫЧНЫМ сообщением (как раньше в конце, только по ходу), а черновик
+# продолжается ниже. Готовый ответ досылает остаток мыслей и сам ответ
+# (finish_text) — в итоге всё выглядит как раньше: несколько сообщений с
+# мыслями и последнее с ответом.
+#
+# Работает, только когда включены ВСЕ ТРИ: этот тумблер, «🧠 МЫСЛИ ПОД
+# КАПОТОМ» и «✍️ ОТВЕТ НА ГЛАЗАХ». Выключен любой — как до 14.10.2026.
+THOUGHTS_SETTING_KEY = "live_thoughts_enabled"
+
+# Предел текста черновика с запасом на служебные знаки (у Telegram 4096
+# после разметки).
+DRAFT_LIMIT_UTF16 = 4000
+# Сколько сырых знаков мыслей уходит одним сообщением, когда они перерастают
+# черновик; граница — перевод строки или пробел не дальше этого.
+THOUGHTS_PART_CHARS = 3400
+
+
+def live_thoughts_enabled() -> bool:
+    """
+    Тумблер «🧠 Мысли в черновике» (по умолчанию ВКЛЮЧЁН) — только своя
+    настройка: её же показывает кнопка и сайт. Будут ли мысли в черновике на
+    самом деле, решает _thoughts_wanted. Сбой чтения — выключен: тогда
+    черновик как раньше.
+    """
+    try:
+        from database.history import get_setting
+        return get_setting(THOUGHTS_SETTING_KEY, "1") == "1"
+    except Exception:
+        return False
+
+
+def _thoughts_wanted() -> bool:
+    """Показывать ли мысли по ходу: свой тумблер И общий «мысли под капотом»."""
+    try:
+        from utils_format import thoughts_enabled
+        return live_thoughts_enabled() and thoughts_enabled()
+    except Exception:
+        return False
+
+
 class LiveDraft:
     """
     Черновик одного ответа в личке.
@@ -136,6 +188,15 @@ class LiveDraft:
         self._dead = False                   # Telegram отказал — больше не шлём
         self._last_sent = None
         self.sent = 0                        # сколько черновиков ушло (для лога и проверки)
+        # Мысли по ходу (14.10.2026, см. _thoughts_wanted). Решается ОДИН раз на
+        # ответ: щёлкнул тумблером посреди ответа — этот ответ дойдёт как начался.
+        self._show_thoughts = self._THOUGHTS_ALLOWED and _thoughts_wanted()
+        self._thoughts: list[str] = []       # куски мыслей ТЕКУЩЕЙ попытки (сырые)
+        self._committed = 0                  # сколько сырых знаков мыслей ушло сообщениями
+        self._committed_ids: list[int] = []  # эти сообщения — текущей попытки
+        self._stale_ids: list[int] = []      # сообщения сбившейся попытки — убрать
+        self._epoch = 0                      # номер попытки: сменился посреди отправки — сообщение устарело
+        self._draft_seq = 0                  # сколько раз черновик начинался заново под сообщением
 
     # ── зовёт поток модели ───────────────────────────────────
     def thinking(self) -> None:
@@ -143,29 +204,69 @@ class LiveDraft:
         self._thinking = True
 
     def attempt(self) -> None:
-        """Началась новая попытка цепочки: прежний текст недействителен."""
-        if self._parts:
+        """
+        Началась новая попытка цепочки: прежний текст недействителен. Мысли —
+        тоже, а их части, уже ушедшие сообщениями, насос уберёт из чата.
+        """
+        if self._parts or (self._show_thoughts and (self._thoughts or self._committed_ids)):
             self._restarted = True
         self._parts = []
+        self._thoughts = []
+        if self._committed_ids:
+            self._stale_ids.extend(self._committed_ids)
+        self._committed_ids = []
+        self._committed = 0
+        self._epoch += 1
 
     def feed(self, piece: str) -> None:
         """Пришёл очередной кусок ответа (без мыслей)."""
         self._parts.append(piece)
 
+    def think(self, piece: str) -> None:
+        """Пришёл очередной кусок мыслей (14.10.2026). Мысли не показываем — отбрасываем."""
+        if self._show_thoughts:
+            self._thoughts.append(piece)
+
     # ── показ ────────────────────────────────────────────────
     # Прятать ли из показа пометку мута. В личке прав на мут у модели нет, и
     # резать там нечего; в группе — см. LiveGroupMessage и _hide_mute_tag.
     _HIDE_MUTE_TAG = False
+    # Можно ли этому виду показа показывать мысли по ходу (14.10.2026): да —
+    # только черновику лички, см. LiveGroupMessage.
+    _THOUGHTS_ALLOWED = True
 
-    def _view(self, seconds: bool) -> str:
-        """Показ по ходу (сырой Markdown); seconds — тикающий счётчик ожидания."""
+    def _answer_text(self) -> str:
+        """Текст ответа для показа: без пометки мута (группа), длинный — с многоточием."""
         text = "".join(self._parts)
         if self._HIDE_MUTE_TAG:
             text = _hide_mute_tag(text)
         text = text.strip()
+        if len(text) > DRAFT_MAX_CHARS:
+            text = text[:DRAFT_MAX_CHARS].rstrip() + " …"
+        return text
+
+    def _thoughts_rest(self) -> str:
+        """
+        Мысли, ещё НЕ ушедшие сообщениями, — в том виде, в каком их покажет
+        готовый ответ: лишние пустые строки сжаты тем же правилом, что у всего
+        ответа (gemini.compress_newlines), иначе черновик и сообщение
+        различались бы, и подмена была бы видна.
+        """
+        if not self._show_thoughts:
+            return ""
+        # Локальный импорт: gemini грузится раньше и к этому модулю не тянется.
+        from services.gemini import compress_newlines
+        return compress_newlines("".join(self._thoughts)[self._committed:]).strip()
+
+    def _view(self, seconds: bool) -> str:
+        """Показ по ходу (сырой Markdown); seconds — тикающий счётчик ожидания.
+        Мысли (если показываются) — блоком <thought> перед ответом, ровно так,
+        как их получит готовое сообщение."""
+        text = self._answer_text()
+        rest = self._thoughts_rest()
+        if rest:
+            return f"<thought>{rest}</thought>{text}"
         if text:
-            if len(text) > DRAFT_MAX_CHARS:
-                text = text[:DRAFT_MAX_CHARS].rstrip() + " …"
             return text
         if self._restarted:
             return RETRY_TEXT
@@ -178,19 +279,129 @@ class LiveDraft:
         """Что сейчас должно стоять в черновике лички (со счётчиком секунд)."""
         return self._view(seconds=True)
 
+    def _render(self, raw: str, header: bool | None = None):
+        """
+        Показ → (текст, выделения Telegram). С мыслями — той же сборкой, что
+        готовое сообщение (свёрнутая цитата сверху); шапка «🧠 Мысли» — только
+        у первой части: продолжение мыслей ниже идёт без неё, как раньше при
+        нарезке длинного ответа.
+        """
+        from utils_format import _to_ptb, build_text_and_entities, convert_md
+        if raw.startswith("<thought>"):
+            text, entities = build_text_and_entities(
+                raw, header=(self._committed == 0) if header is None else header)
+            return text, _to_ptb(entities)
+        return convert_md(raw)
+
+    def _current_draft_id(self) -> int:
+        """Номер черновика: после каждого ушедшего сообщения — новый, ниже него."""
+        return self.draft_id if not self._draft_seq else self.draft_id * 100 + self._draft_seq
+
+    async def _settle_thoughts(self, bot) -> None:
+        """
+        Перед обновлением черновика: убрать из чата мысли сбившейся попытки и
+        вынести ОБЫЧНЫМ сообщением часть мыслей, которая перестала влезать в
+        черновик (см. шапку раздела). Начался ответ — мысли кончились, и если
+        вместе с ним они не влезают, уходят все сразу; иначе — по границе
+        строки или слова. Отказ Telegram — черновик умолкает до конца ответа,
+        а невынесенные мысли дошлёт готовый ответ.
+        """
+        from utils_format import utf16_len
+        from services.gemini import compress_newlines
+        for mid in list(self._stale_ids):
+            self._stale_ids.remove(mid)
+            try:
+                await bot.delete_message(chat_id=self.chat_id, message_id=mid)
+            except Exception as e:
+                logger.debug("💬 Не удалось убрать мысли сбившейся попытки (чат %s): %s",
+                             self.chat_id, e)
+        for _ in range(20):                  # потолок проходов — страховка от вечного цикла
+            rest_raw = "".join(self._thoughts)[self._committed:]
+            if not rest_raw.strip():
+                return
+            shown, _ = self._render(self.view())
+            if utf16_len(shown) <= DRAFT_LIMIT_UTF16:
+                return
+            cut = 0
+            if self._answer_text():
+                whole, _ = self._render(f"<thought>{compress_newlines(rest_raw).strip()}</thought>")
+                if utf16_len(whole) <= DRAFT_LIMIT_UTF16:
+                    cut = len(rest_raw)
+            if not cut:
+                limit = min(len(rest_raw), THOUGHTS_PART_CHARS)
+                cut = max(rest_raw.rfind("\n", 0, limit), rest_raw.rfind(" ", 0, limit)) + 1
+                if cut < limit // 2:
+                    cut = limit
+            part_raw = compress_newlines(rest_raw[:cut]).strip()
+            if not part_raw:
+                self._committed += cut
+                continue
+            text, entities = self._render(f"<thought>{part_raw}</thought>")
+            epoch, first = self._epoch, not self._committed_ids and self._committed == 0
+            try:
+                msg = await bot.send_message(
+                    chat_id=self.chat_id, text=text, entities=entities,
+                    reply_to_message_id=self.draft_id if first else None)
+            except Exception as e:
+                self._dead = True
+                logger.warning("💬 Мысли по ходу не ушли сообщением (чат %s): %s — "
+                               "остаток дошлёт готовый ответ", self.chat_id, e)
+                return
+            if epoch != self._epoch:
+                # Попытка сменилась, пока слали: это мысли сбившейся модели.
+                self._stale_ids.append(msg.message_id)
+                return
+            self._committed += cut
+            self._committed_ids.append(msg.message_id)
+            self._draft_seq += 1
+            self._last_sent = None
+
+    async def finish_text(self, bot, answer: str) -> tuple[str, bool]:
+        """
+        Готовый ответ с учётом мыслей, уже ушедших сообщениями по ходу.
+        Возвращает (что отправить, «это продолжение»): продолжение уходит без
+        шапки мыслей и без Reply — шапка и Reply были у первой части.
+
+        Ушедших частей нет — ответ как есть. Ответ пришёл без мыслей (вся
+        цепочка легла и пришла заглушка, или ответила модель без потока) —
+        ушедшие части принадлежат сбившейся попытке и убираются из чата.
+        """
+        for mid in list(self._stale_ids):
+            self._stale_ids.remove(mid)
+            try:
+                await bot.delete_message(chat_id=self.chat_id, message_id=mid)
+            except Exception:
+                pass
+        if not self._committed_ids:
+            return answer, False
+        from utils_format import THOUGHT_RE, strip_thoughts
+        if not THOUGHT_RE.search(answer or ""):
+            for mid in self._committed_ids:
+                try:
+                    await bot.delete_message(chat_id=self.chat_id, message_id=mid)
+                except Exception:
+                    pass
+            self._committed_ids = []
+            return answer, False
+        rest, body = self._thoughts_rest(), strip_thoughts(answer)
+        return (f"<thought>{rest}</thought>{body}" if rest else body), True
+
     async def send_once(self, bot) -> None:
         """Отправить черновик, если показ изменился. Отказ — черновик умолкает."""
         if self._dead:
             return
+        if self._show_thoughts:
+            await self._settle_thoughts(bot)
+            if self._dead:
+                return
         raw = self.view()
         if raw == self._last_sent:
             return
         try:
-            from utils_format import convert_md
-            text, entities = convert_md(raw)
+            text, entities = self._render(raw)
             if not text.strip():
                 return
-            await bot.send_message_draft(chat_id=self.chat_id, draft_id=self.draft_id,
+            await bot.send_message_draft(chat_id=self.chat_id, draft_id=self._current_draft_id(),
                                          text=text, entities=entities)
             self._last_sent = raw
             self.sent += 1
@@ -258,6 +469,9 @@ class LiveGroupMessage(LiveDraft):
     # Ответ на обращение в группе может кончаться пометкой мута — участники
     # её видеть не должны и по ходу тоже (см. _hide_mute_tag).
     _HIDE_MUTE_TAG = True
+    # Мыслей по ходу в группе нет (14.10.2026): черновиков там не бывает, а
+    # правки идут скачками раз в GROUP_TICK_SEC и тратят запас Telegram.
+    _THOUGHTS_ALLOWED = False
 
     def __init__(self, chat_id: int, reply_to: int, label: str | None = None):
         super().__init__(chat_id, 1, label)

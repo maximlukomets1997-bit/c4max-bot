@@ -206,6 +206,13 @@ def _build_api_keyboard(user_id):
     live_row = [InlineKeyboardButton(
         f"✍️ ОТВЕТ НА ГЛАЗАХ: {_onoff(live_answer_enabled())}",
         callback_data="toggle_live_answer")]
+    # Мысли в черновике лички (2026-10-14, решение Максима): мысли видны по
+    # ходу над ответом. Свой выключатель — чтобы вернуть «как было» без
+    # выкатки; тот же, что на странице настроек сайта.
+    from services.live_answer import live_thoughts_enabled
+    live_thoughts_row = [InlineKeyboardButton(
+        f"🧠 МЫСЛИ В ЧЕРНОВИКЕ: {_onoff(live_thoughts_enabled())}",
+        callback_data="toggle_live_thoughts")]
     # Склейка сообщений подряд (2026-10-09, services/message_batch.py): сколько
     # секунд ждать, не допишет ли человек ещё. Пределы и шаг — settings_spec
     # (тот же регулятор на странице настроек сайта); 0 — выключено.
@@ -222,6 +229,7 @@ def _build_api_keyboard(user_id):
     rows = list(model_markup.inline_keyboard) + _thinking_rows() + [
         thoughts_row,
         live_row,
+        live_thoughts_row,
         batch_row,
         list(_REPORT_BUTTON_ROW),
         [InlineKeyboardButton("💰 СЧЕТА И КВОТЫ", callback_data="bal:panel")],

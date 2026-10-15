@@ -1311,10 +1311,14 @@ def _openai_stream_request(model_name: str, messages: list, api_url: str,
                 rc = delta.get("reasoning_content") or delta.get("reasoning")
                 if rc:
                     reasoning_parts.append(rc)
+                    # Мысли — в черновик лички отдельным путём (14.10.2026): в
+                    # текст ответа они не смешиваются, показывать ли их — решает
+                    # сам черновик (services/live_answer.py, «мысли в черновике»).
+                    _live_call("think", rc)
                 c = delta.get("content")
                 if c:
                     answer_parts.append(c)
-                    _live_call("feed", c)   # черновик «ответ на глазах»; мысли туда не идут
+                    _live_call("feed", c)   # черновик «ответ на глазах»: текст ответа
         # ⚠️ ПОТОК КОНЧИЛСЯ БЕЗ ОТЧЁТА О ТОКЕНАХ — ЭТО ОБРЫВ, А НЕ ОТВЕТ
         # (05.10.2026). Отчёт (usage) провайдер шлёт последним куском, и все
         # трое шлют его в КАЖДОМ нормальном ответе — сверено живыми запросами

@@ -195,8 +195,17 @@ async def _deliver(bot, chat_id: int, draft, answer: str, reply_to: int,
         return
     if isinstance(draft, LiveGroupMessage):
         await draft.finish(bot, answer)
-    else:
+        return
+    # Личка: часть мыслей могла уйти сообщениями по ходу (14.10.2026, «мысли в
+    # черновике», services/live_answer.py) — тогда досылаем только остаток
+    # мыслей и сам ответ: без шапки мыслей и без Reply, они были у первой части.
+    continued = False
+    if draft is not None:
+        answer, continued = await draft.finish_text(bot, answer)
+    if not continued:
         await send_formatted(bot, chat_id, answer, reply_to=reply_to)
+    elif answer.strip():
+        await send_formatted(bot, chat_id, answer, reply_to=None, thought_header=False)
 
 
 async def _reply_error(bot, message, draft, text: str) -> None:

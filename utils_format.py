@@ -97,7 +97,7 @@ def thoughts_enabled() -> bool:
         return True
 
 
-def build_text_and_entities(raw_answer: str):
+def build_text_and_entities(raw_answer: str, header: bool = True):
     """
     Превращает ответ модели в (text, entities[telegramify]).
     Тело форматируется обычным образом; цепочка рассуждений (если есть)
@@ -105,6 +105,10 @@ def build_text_and_entities(raw_answer: str):
 
     Смещения считаются в UTF-16 (utf16_len), потому что Telegram измеряет
     offset/length именно так (эмодзи 🧠 — это 2 кодовых юнита).
+
+    header=False (14.10.2026) — цитата без шапки «🧠 Мысли (под капотом)»:
+    это продолжение мыслей, первая часть которых уже ушла отдельным
+    сообщением (services/live_answer.py, мысли в черновике лички).
     """
     body, thought_text = _extract_thoughts(raw_answer)
 
@@ -128,14 +132,16 @@ def build_text_and_entities(raw_answer: str):
         return body_text, body_entities
 
     th_text, th_entities = convert(thought_text)
-    header_units = utf16_len(THOUGHT_HEADER)          # длина шапки вместе с \n
-    header_bold_len = utf16_len(THOUGHT_HEADER.rstrip("\n"))
-    block_body = THOUGHT_HEADER + th_text             # шапка + текст мыслей
+    head = THOUGHT_HEADER if header else ""
+    header_units = utf16_len(head)                    # длина шапки вместе с \n
+    header_bold_len = utf16_len(head.rstrip("\n"))
+    block_body = head + th_text                       # шапка + текст мыслей
     block_len = utf16_len(block_body)
 
     quote_entities = []
     # Жирная шапка «🧠 Мысли (под капотом)» (offset проставим относительно начала блока)
-    quote_entities.append(MessageEntity(type="bold", offset=0, length=header_bold_len))
+    if head:
+        quote_entities.append(MessageEntity(type="bold", offset=0, length=header_bold_len))
     # Текст мыслей — сдвиг за шапку
     for e in th_entities:
         e.offset += header_units
@@ -199,7 +205,8 @@ async def _send_plain(bot, chat_id, text, reply_to, disable_preview):
         first = False
 
 
-async def send_formatted(bot, chat_id, raw_answer, reply_to=None, disable_preview=True):
+async def send_formatted(bot, chat_id, raw_answer, reply_to=None, disable_preview=True,
+                         thought_header=True):
     """
     Единая точка отправки ответов модели (текст / Vision / аудио).
     Форматирует через telegramify-markdown, безопасно нарезает длинный текст
@@ -207,9 +214,12 @@ async def send_formatted(bot, chat_id, raw_answer, reply_to=None, disable_previe
     При любой ошибке — мягкий фолбэк на голый текст.
 
     :param reply_to: message_id, на который отвечаем (только в первом чанке).
+    :param thought_header: False — цитата мыслей без шапки (14.10.2026): это
+        остаток мыслей, начало которых уже ушло сообщениями по ходу
+        (services/live_answer.py::LiveDraft.finish_text).
     """
     try:
-        text, entities = build_text_and_entities(raw_answer)
+        text, entities = build_text_and_entities(raw_answer, header=thought_header)
         chunks = list(split_entities(text, entities, MAX_UTF16))
         # ✂️ ДИАГНОСТИКА НАРЕЗКИ (2026-08-11, просьба Максима: «первая часть с
         # разметкой приходит, а вторая без»). Проверка механизма показала, что

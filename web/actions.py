@@ -47,6 +47,7 @@ _AUDIT_CODES = {
     "greet_timeout_sec":  ("greet", "срок проверки"),
     "thoughts_enabled":   ("thoughts", "мысли под капотом"),
     "live_answer_enabled": ("live_answer", "ответ на глазах"),
+    "live_thoughts_enabled": ("live_thoughts", "мысли в черновике"),
     "batch_wait_sec":     ("batch", "склейка сообщений"),
     # «Руки бота», а не «руки „Сам в разговор“»: с 12.10.2026 тумблер решает
     # и про мут за слова в адрес самого бота (services/proactive.py).

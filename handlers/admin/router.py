@@ -778,6 +778,29 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             logger.warning("⚠️ Не удалось обновить клавиатуру тумблера ответа на глазах: %s", e)
         return
 
+    if data == "toggle_live_thoughts":
+        # Тумблер «🧠 МЫСЛИ В ЧЕРНОВИКЕ» (2026-10-14, решение Максима): в личке
+        # мысли модели видны по ходу над ответом (services/live_answer.py).
+        # Он же откат без выкатки. Тот же выключатель и код журнала, что на сайте.
+        from services.live_answer import THOUGHTS_SETTING_KEY, live_thoughts_enabled
+        new_val = "0" if live_thoughts_enabled() else "1"
+        set_setting(THOUGHTS_SETTING_KEY, new_val)
+        state = "включены" if new_val == "1" else "выключены"
+        logger.info("🔧 Админ %s: мысли в черновике %s", user_id, state)
+        _audit(user_id, "live_thoughts", 0, f"мысли в черновике {state}")
+        await query.answer(
+            "🧠 Мысли в черновике включены: в личке мысли видны по ходу над ответом. "
+            "Нужны включённые «Мысли под капотом» и «Ответ на глазах»."
+            if new_val == "1" else
+            "🧠 Мысли в черновике выключены: мысли снова только в готовом ответе.",
+            show_alert=True,
+        )
+        try:
+            await query.edit_message_reply_markup(reply_markup=_build_api_keyboard(user_id))
+        except Exception as e:
+            logger.warning("⚠️ Не удалось обновить клавиатуру тумблера мыслей в черновике: %s", e)
+        return
+
     if data in ("batch_dec", "batch_inc", "batch_info"):
         # Регулятор «🧩 СКЛЕЙКА» (2026-10-09, решение Максима): сколько секунд
         # ждать, не допишет ли человек ещё, прежде чем ответить одним
