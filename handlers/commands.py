@@ -194,6 +194,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _menu_text(context.bot, user.first_name if user else ""),
         _menu_keyboard(chat_id),
     )
+    # Нижние кнопки владельца (2026-10-17): только его личка — проверка внутри.
+    if user is not None:
+        from handlers.admin.panel_keys import send_owner_keys
+        await send_owner_keys(context.bot, chat_id, user.id)
 
 
 

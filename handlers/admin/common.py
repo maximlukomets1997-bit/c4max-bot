@@ -448,6 +448,22 @@ def _build_logs_menu_text() -> str:
     )
 
 
+async def send_logs_menu(bot, chat_id: int) -> None:
+    """
+    Прислать развилку «📜 Логи бота» новым сообщением (через гигиену панелей).
+    Общая для кнопки /adm (router.py, adm_logs) и нижней кнопки владельца
+    (panel_keys.py, 17.10.2026) — экран один, сборка его тоже одна.
+    """
+    sent_msg = await bot.send_message(
+        chat_id=chat_id,
+        text=_build_logs_menu_text(),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(_logs_menu_rows() + [_adm_back_row()]),
+    )
+    if sent_msg:
+        await register_and_clean_bot_message(bot, chat_id, sent_msg.message_id)
+
+
 def _build_chat_log_header(stats: dict) -> str:
     """Шапка экрана записи разговора — она же уходит в _build_log_text."""
     from services.backup import human_size

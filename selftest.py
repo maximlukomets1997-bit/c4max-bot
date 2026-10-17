@@ -9946,6 +9946,280 @@ def check_direct_hands():
                       f"видео — тем же шагом; текст прав в панели и файлом")
 
 
+def check_owner_keys():
+    """
+    Нижние кнопки владельца (17.10.2026, просьба Максима): панель под полем
+    ввода в его личке, кнопки ведут в разделы /adm и в две очистки оттуда же.
+
+    ⚠️ Ради чего проверка существует. `preflight` нижних кнопок не видит вовсе:
+    у них нет callback_data, по которому он считает кнопки. А сломаться тихо
+    они могут так: нажатие уходит модели вопросом (и стоит денег), кнопка
+    открывает не тот раздел, панель приходит модератору или постороннему,
+    перехват ловит чужой такой же текст, выключатель не убирает панель.
+
+    Гоняются настоящие: панель и её отправка (`panel_keys`), обработчик
+    `handlers/messages.py::handle_message`, `/start` и `/adm`; поддельные —
+    только Telegram, модель и сами панели разделов (их собственную сборку
+    сторожат другие проверки). Надписи кнопок выписаны здесь руками.
+    """
+    import asyncio
+    import types
+
+    import config as c
+    from telegram import InlineKeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, WebAppInfo
+    from database import history as hist
+    from services import roles
+    from services import live_answer as la
+    from services import message_batch as mb
+    import handlers.messages as hm
+    import handlers.commands as hc
+    from handlers.admin import panel_keys as pk
+    from handlers.admin import panel_main as pm, panel_prompts as pp, panel_mod, panel_users
+    from handlers.admin import panel_rag, panel_quiz, common as cm
+
+    problems = []
+    done = 0
+
+    def expect(title, ok):
+        nonlocal done
+        done += 1
+        if not ok:
+            problems.append(title)
+
+    OWNER, MOD, PLAIN = 777060001, 777060002, 777060011
+    WANT = ["🎛 Админ-панель", "💬 Статистика", "⚙️ PROMPTы", "📡 Настройки API",
+            "🛠 DDoS-Guard", "👥 Пользователи", "📚 База знаний", "🎮 Викторина",
+            "📜 Логи бота", "🌐 Сайт", "🧹 Очистить РАЗГОВОРЫ", "🗑 Очистить мой диалог"]
+
+    class Bot:
+        username = "c4max_test_bot"
+        id = 777060999
+        first_name = "Бот"
+
+        def __init__(self):
+            self.events, self.next_id = [], 700
+
+        async def send_message(self, chat_id=None, text=None, reply_markup=None, **kw):
+            self.next_id += 1
+            self.events.append(("send", chat_id, text, reply_markup, self.next_id, kw))
+            return types.SimpleNamespace(message_id=self.next_id)
+
+        async def delete_message(self, chat_id=None, message_id=None, **kw):
+            self.events.append(("delete", chat_id, message_id))
+            return True
+
+        async def send_chat_action(self, *a, **kw):
+            return True
+
+        async def send_message_draft(self, *a, **kw):
+            return True
+
+    def keyboards(bot):
+        return [e for e in bot.events if e[0] == "send" and isinstance(e[3], ReplyKeyboardMarkup)]
+
+    def make(user_id, text, chat_type="private"):
+        chat = types.SimpleNamespace(id=user_id if chat_type == "private" else -100777060,
+                                     type=chat_type)
+        user = types.SimpleNamespace(id=user_id, full_name="Проверка", first_name="Проверка",
+                                     username=None)
+        gone = []
+
+        async def _delete():
+            gone.append(True)
+        msg = types.SimpleNamespace(text=text, caption=None, message_id=55, reply_to_message=None,
+                                    chat=chat, from_user=user, delete=_delete)
+        upd = types.SimpleNamespace(message=msg, effective_chat=chat, effective_user=user,
+                                    effective_message=msg)
+        return upd, gone
+
+    # ─── все подмены — с возвратом на место ───
+    import services.roles  # noqa: F401 — модуль прав грузим ДО подмены владельцев
+    saved_roles = (roles.ADMIN_IDS, dict(roles._cache), roles._loaded)
+    saved_settings = {k: hist.get_setting(k, "") for k in (pk.SETTING_KEY, la.SETTING_KEY)}
+    targets = {
+        "adm": (pm, "send_adm_panel"), "stats": (pm, "send_stats_panel"),
+        "prompts": (pp, "send_prompts_panel"), "api": (pm, "send_api_panel"),
+        "mod": (panel_mod, "send_mod_panel"), "users": (panel_users, "send_users_panel"),
+        "rag": (panel_rag, "send_rag_panel"), "quiz": (panel_quiz, "send_quiz_panel"),
+        "logs": (cm, "send_logs_menu"), "wipe": (pp, "wipe_conversations"),
+    }
+    saved_targets = {code: getattr(mod, name) for code, (mod, name) in targets.items()}
+    saved_h = (hm.ask_gemini, mb.wait_sec, pm._web_row, hc._send_public_panel)
+    opened = []
+    asked = []
+
+    def recorder(code):
+        if code == "wipe":
+            return lambda user_id: opened.append(code)
+
+        async def _rec(*a, **kw):
+            opened.append(code)
+        return _rec
+
+    def fake_ask(*a, **kw):
+        asked.append(a[2] if len(a) > 2 else "")
+        return "ответ модели"
+
+    try:
+        roles.ADMIN_IDS = (OWNER,)
+        roles._cache.clear()
+        roles._cache[MOD] = {"user_id": MOD, "p_mod": 1, "p_ban": 1,
+                             "p_cards": 1, "p_cards_edit": 1}
+        roles._loaded = True
+        for code, (mod, name) in targets.items():
+            setattr(mod, name, recorder(code))
+        hm.ask_gemini = fake_ask
+        mb.wait_sec = lambda: 0
+        hist.set_setting(la.SETTING_KEY, "0")        # показ по ходу сторожит своя группа
+        hist.set_setting(pk.SETTING_KEY, "1")
+
+        # ═══ 1. Панель: надписи, порядок, вид ═══
+        kb = pk.owner_keyboard()
+        labels = [b.text for row in kb.keyboard for b in row]
+        expect(f"надписи или порядок нижних кнопок не те: {labels}", labels == WANT)
+        expect("нижние кнопки не по две в ряд", all(len(row) == 2 for row in kb.keyboard))
+        expect("панель не компактная или сворачивается сама",
+               kb.resize_keyboard is True and kb.is_persistent is True)
+        expect("у нижней кнопки «🌐 Сайт» мини-приложение — с неё сайт не пускает (проба 17.10)",
+               all(getattr(b, "web_app", None) is None for row in kb.keyboard for b in row))
+
+        # ═══ 2. Кому панель приходит ═══
+        async def put(chat_id, user_id):
+            bot = Bot()
+            await pk.send_owner_keys(bot, chat_id, user_id)
+            return bot
+
+        bot = asyncio.run(put(OWNER, OWNER))
+        sent = keyboards(bot)
+        expect("владельцу в личке панель не пришла", len(sent) == 1)
+        expect("сообщение с панелью не убрано — в чате копились бы служебные сообщения",
+               bool(sent) and ("delete", OWNER, sent[0][4]) in bot.events)
+        expect("панель приходит со звуком уведомления",
+               bool(sent) and sent[0][5].get("disable_notification") is True)
+        for title, chat_id, uid in (("модератору", MOD, MOD), ("постороннему", PLAIN, PLAIN),
+                                    ("в группе", -100777060, OWNER)):
+            expect(f"нижние кнопки пришли {title}", not asyncio.run(put(chat_id, uid)).events)
+        hist.set_setting(pk.SETTING_KEY, "0")
+        expect("кнопки выключены, а панель всё равно пришла",
+               not asyncio.run(put(OWNER, OWNER)).events)
+        bot = Bot()
+        asyncio.run(pk.remove_owner_keys(bot, OWNER))
+        expect("выключатель не убирает панель",
+               any(e[0] == "send" and isinstance(e[3], ReplyKeyboardRemove) for e in bot.events))
+        hist.set_setting(pk.SETTING_KEY, "1")
+
+        # ═══ 3. Каждая кнопка — в свой раздел ═══
+        def press(user_id, text, chat_type="private", user_data=None):
+            bot = Bot()
+            upd, gone = make(user_id, text, chat_type)
+            ctx = types.SimpleNamespace(bot=bot, user_data=user_data if user_data is not None else {})
+            opened.clear()
+            asked.clear()
+
+            async def go():
+                await hm.handle_message(upd, ctx)
+                await asyncio.sleep(0.02)
+            asyncio.run(go())
+            return bot, gone, ctx
+
+        codes = dict(pk.KEYS)
+        for label in WANT:
+            code = codes.get(label)
+            if code in targets:
+                bot, gone, _ = press(OWNER, label)
+                expect(f"кнопка «{label}» открыла не свой раздел: {opened}", opened == [code])
+                expect(f"нажатие «{label}» ушло модели вопросом", not asked)
+                expect(f"нажатие «{label}» осталось висеть в чате", bool(gone))
+
+        # «🌐 Сайт» — две кнопки входа из /adm, а не мини-приложение с нижней кнопки.
+        pm._web_row = lambda: [[InlineKeyboardButton("🌐 Админка",
+                                                     web_app=WebAppInfo(url="https://example.test"))]]
+        bot, gone, _ = press(OWNER, "🌐 Сайт")
+        site = [e for e in bot.events if e[0] == "send" and e[3] is not None
+                and not isinstance(e[3], (ReplyKeyboardMarkup, ReplyKeyboardRemove))]
+        expect("«🌐 Сайт» не прислал кнопки входа на сайт",
+               bool(site) and any(getattr(b, "web_app", None)
+                                  for row in site[-1][3].inline_keyboard for b in row)
+               and not asked)
+
+        # «🗑 Очистить мой диалог» — настоящая очистка памяти владельца.
+        hist.add_messages(OWNER, OWNER, "вопрос до очистки", "ответ до очистки")
+        bot, gone, _ = press(OWNER, "🗑 Очистить мой диалог")
+        expect("«🗑 Очистить мой диалог» не очистил память бота о владельце",
+               not hist.get_history(OWNER) and not asked)
+
+        # ═══ 4. Кого не перехватывать ═══
+        for title, uid in (("постороннего", PLAIN), ("модератора", MOD)):
+            bot, gone, _ = press(uid, "💬 Статистика")
+            expect(f"текст кнопки от {title} перехвачен — а это обычный вопрос модели",
+                   not opened and asked == ["💬 Статистика"])
+        hist.set_setting(pk.SETTING_KEY, "0")
+        bot, gone, _ = press(OWNER, "💬 Статистика")
+        expect("кнопки выключены, а нажатие всё равно перехвачено",
+               not opened and asked == ["💬 Статистика"])
+        hist.set_setting(pk.SETTING_KEY, "1")
+        bot, gone, _ = press(OWNER, "привет, как дела")
+        expect("обычное сообщение владельца не дошло до модели",
+               not opened and asked == ["привет, как дела"])
+        bot, gone, ctx = press(OWNER, "📡 Настройки API", user_data={"balance_edit": "qwen"})
+        expect("нажатие нижней кнопки не сняло ожидание числа, как это делает команда",
+               opened == ["api"] and "balance_edit" not in ctx.user_data)
+
+        # ═══ 5. Где панель появляется ═══
+        async def no_panel(*a, **kw):
+            return None
+        hc._send_public_panel = no_panel
+        for title, uid, want in (("владельца", OWNER, 1), ("постороннего", PLAIN, 0)):
+            bot = Bot()
+            upd, _ = make(uid, "/start")
+            asyncio.run(hc.cmd_start(upd, types.SimpleNamespace(bot=bot, user_data={})))
+            expect(f"/start {title}: нижних кнопок {len(keyboards(bot))}, а ждали {want}",
+                   len(keyboards(bot)) == want)
+        bot = Bot()
+        upd, _ = make(OWNER, "/adm")
+        asyncio.run(pm.cmd_adm(upd, types.SimpleNamespace(bot=bot, user_data={})))
+        expect("/adm владельца не вернул нижние кнопки",
+               opened[-1:] == ["adm"] and len(keyboards(bot)) == 1)
+        main_src = open(os.path.join(ROOT, "main.py"), encoding="utf-8").read()
+        at_panel = main_src.find("await send_adm_panel(application.bot, owner_id, owner_id)")
+        at_keys = main_src.find("await send_owner_keys(application.bot, owner_id, owner_id)")
+        expect("после запуска бота нижние кнопки не ставятся вместе с панелью (main.py)",
+               0 <= at_panel < at_keys)
+
+        # ═══ 6. Выключатель в /adm ═══
+        from services.roles import perm_for_callback
+        expect("выключатель нижних кнопок может нажать не только владелец",
+               perm_for_callback("toggle_owner_keys") == "owner")
+        found = {}
+        for raw in ("1", "0"):
+            hist.set_setting(pk.SETTING_KEY, raw)
+            found[raw] = [b.text for row in pm.build_adm_keyboard(OWNER).inline_keyboard
+                          for b in row if b.callback_data == "toggle_owner_keys"]
+        expect("в /adm нет выключателя нижних кнопок, или надпись не следует за настройкой",
+               bool(found["1"]) and bool(found["0"]) and found["1"] != found["0"]
+               and "НИЖНИЕ КНОПКИ" in found["1"][0])
+        expect("выключатель нижних кнопок виден модератору",
+               not any(b.callback_data == "toggle_owner_keys"
+                       for row in pm.build_adm_keyboard(MOD).inline_keyboard for b in row))
+    finally:
+        roles.ADMIN_IDS, cache, roles._loaded = saved_roles
+        roles._cache.clear()
+        roles._cache.update(cache)
+        for code, (mod, name) in targets.items():
+            setattr(mod, name, saved_targets[code])
+        hm.ask_gemini, mb.wait_sec, pm._web_row, hc._send_public_panel = saved_h
+        for k, v in saved_settings.items():
+            if v == "":
+                hist.delete_setting(k)
+            else:
+                hist.set_setting(k, v)
+
+    return problems, (f"{done} проверок: надписи, порядок и вид панели; приходит только "
+                      f"владельцу в личке и без следа в чате; каждая кнопка — в свой раздел, "
+                      f"мимо модели; чужой такой же текст и выключенные кнопки — модели; "
+                      f"/start, /adm и запуск ставят панель; выключатель в /adm")
+
+
 CHECKS = (
     ("деньги — расчёт стоимости запросов", check_money),
     ("квота Qwen — оборванный ответ, срок и письма", check_qwen_quota),
@@ -10000,6 +10274,7 @@ CHECKS = (
     ("ответ «на глазах»: черновик в личке", check_live_answer),
     ("склейка сообщений подряд в один ответ", check_message_batch),
     ("руки при обращении к боту — мут за хамство в свой адрес", check_direct_hands),
+    ("нижние кнопки владельца — панель под полем ввода", check_owner_keys),
 )
 
 

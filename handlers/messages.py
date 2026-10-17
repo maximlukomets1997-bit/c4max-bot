@@ -520,6 +520,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text("Напиши мне что-нибудь 😊")
         return
 
+    # ⌨️ Нижние кнопки владельца (2026-10-17, handlers/admin/panel_keys.py):
+    # нажатие приходит обычным текстом. Ловим его ДО модели и до склейки —
+    # только в личке владельца и только текст ровно как на кнопке.
+    if not is_group:
+        from handlers.admin import handle_owner_key
+        if await handle_owner_key(update, context, user_text):
+            return
+
     user = update.effective_user
     uname = f"@{user.username}" if user.username else "без ника"
     logger.info("👤 Сообщение от %s (%s): %s", user.full_name, uname, user_text)

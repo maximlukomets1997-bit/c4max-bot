@@ -199,14 +199,9 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         context.user_data.pop("kb_replace_target", None)
         await _end_kb_test(context.bot, chat_id, context)
         await query.answer()
-        sent_msg = await context.bot.send_message(
-            chat_id=chat_id,
-            text=_build_logs_menu_text(),
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup(_logs_menu_rows() + [_adm_back_row()]),
-        )
-        if sent_msg:
-            await register_and_clean_bot_message(context.bot, chat_id, sent_msg.message_id)
+        # Сборка экрана общая с нижней кнопкой «📜 Логи бота» (panel_keys.py).
+        from .common import send_logs_menu
+        await send_logs_menu(context.bot, chat_id)
         return
 
     # ── «⚙️ Работа бота»: текст с максимумом последних строк общего лога ──
@@ -776,6 +771,30 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             await query.edit_message_reply_markup(reply_markup=_build_api_keyboard(user_id))
         except Exception as e:
             logger.warning("⚠️ Не удалось обновить клавиатуру тумблера ответа на глазах: %s", e)
+        return
+
+    if data == "toggle_owner_keys":
+        # Выключатель «⌨️ НИЖНИЕ КНОПКИ» в /adm (2026-10-17, решение Максима):
+        # панель кнопок под полем ввода в личке владельца (panel_keys.py).
+        # Включили — панель ставится сразу, выключили — убирается.
+        from .panel_keys import SETTING_KEY, keys_enabled, remove_owner_keys, send_owner_keys
+        from handlers.admin.panel_main import build_adm_keyboard
+        new_val = "0" if keys_enabled() else "1"
+        set_setting(SETTING_KEY, new_val)
+        state = "включены" if new_val == "1" else "выключены"
+        logger.info("🔧 Админ %s: нижние кнопки %s", user_id, state)
+        _audit(user_id, "owner_keys", 0, f"нижние кнопки {state}")
+        await query.answer(
+            "⌨️ Нижние кнопки включены: панель под полем ввода." if new_val == "1"
+            else "⌨️ Нижние кнопки выключены: панель убрана.")
+        if new_val == "1":
+            await send_owner_keys(context.bot, chat_id, user_id)
+        else:
+            await remove_owner_keys(context.bot, chat_id)
+        try:
+            await query.edit_message_reply_markup(reply_markup=build_adm_keyboard(user_id))
+        except Exception as e:
+            logger.warning("⚠️ Не удалось обновить клавиатуру /adm после нижних кнопок: %s", e)
         return
 
     if data == "toggle_live_thoughts":

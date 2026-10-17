@@ -529,7 +529,17 @@ def _adm_rows():
                 callback_data="adm_autoupdate"),
             InlineKeyboardButton("🔄 ПЕРЕЗАПУСК", callback_data="system_restart"),
         ],
+        # Нижние кнопки владельца под полем ввода (2026-10-17, panel_keys.py).
+        # Владельческая (в _CALLBACK_RULES её нет) — у модератора ряда нет.
+        [_owner_keys_button()],
     ]
+
+
+def _owner_keys_button():
+    """Выключатель «⌨️ НИЖНИЕ КНОПКИ» — надпись следует за настройкой."""
+    from .panel_keys import keys_enabled
+    return InlineKeyboardButton(f"⌨️ НИЖНИЕ КНОПКИ: {_onoff(keys_enabled())}",
+                                callback_data="toggle_owner_keys")
 
 
 def build_adm_keyboard(user_id: int):
@@ -598,3 +608,6 @@ async def cmd_adm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await _end_kb_test(context.bot, update.effective_chat.id, context)  # выход из проверки поиска — с уборкой
     await send_adm_panel(context.bot, update.effective_chat.id, user_id)
+    # Нижние кнопки владельца (2026-10-17): /adm их возвращает, если пропали.
+    from .panel_keys import send_owner_keys
+    await send_owner_keys(context.bot, update.effective_chat.id, user_id)

@@ -373,6 +373,29 @@ async def _handle_proactive_callback(query, user_id, data):
         logger.debug("🔧 Не удалось обновить клавиатуру панели промптов: %s", e)
 
 
+def wipe_conversations(user_id: int) -> str:
+    """
+    Сама очистка РАЗГОВОРОВ — общая для всех кнопок, которые её делают:
+    панели промптов (с подтверждением), /adm и нижней кнопки владельца
+    (handlers/admin/panel_keys.py, 17.10.2026). Возвращает черту времени.
+    Подробности — в докстринге _handle_proactive_wipe ниже.
+    """
+    from database.history import set_proactive_reset_mark
+    from services.proactive import forget_conversations
+    from services import chat_log
+
+    mark = set_proactive_reset_mark()
+    forget_conversations()   # счётчики в памяти — иначе проверка по пустой стенограмме
+    # Этой же чертой подводится итог ЗАПИСИ РАЗГОВОРА (2026-08-16, решение
+    # Максима): текущий файл logs/chat уезжает в архив, дальше пишется новый.
+    # Так запись всегда совпадает с той памятью, которая была у бота. Тихая:
+    # не переложилось — очистка всё равно состоялась.
+    chat_log.close_session()
+    logger.info("🔧 Владелец %s: стенограмма «Сам в разговор» забыта (черта %s UTC)", user_id, mark)
+    _audit(user_id, "proactive_wipe", 0, "бот забыл разговоры во всех группах")
+    return mark
+
+
 async def _handle_proactive_wipe(query, user_id: int, confirmed: bool, from_adm: bool = False):
     """
     Ветки proactive:wipe (спросить) и proactive:wipe_yes (забыть) — кнопка
@@ -412,19 +435,7 @@ async def _handle_proactive_wipe(query, user_id: int, confirmed: bool, from_adm:
             logger.warning("⚠️ Не удалось показать подтверждение очистки стенограммы: %s", e)
         return
 
-    from database.history import set_proactive_reset_mark
-    from services.proactive import forget_conversations
-    from services import chat_log
-
-    mark = set_proactive_reset_mark()
-    forget_conversations()   # счётчики в памяти — иначе проверка по пустой стенограмме
-    # Этой же чертой подводится итог ЗАПИСИ РАЗГОВОРА (2026-08-16, решение
-    # Максима): текущий файл logs/chat уезжает в архив, дальше пишется новый.
-    # Так запись всегда совпадает с той памятью, которая была у бота. Тихая:
-    # не переложилось — очистка всё равно состоялась.
-    chat_log.close_session()
-    logger.info("🔧 Владелец %s: стенограмма «Сам в разговор» забыта (черта %s UTC)", user_id, mark)
-    _audit(user_id, "proactive_wipe", 0, "бот забыл разговоры во всех группах")
+    wipe_conversations(user_id)
     await query.answer("🧹 Готово: бот забыл разговоры во всех группах.", show_alert=True)
 
     # Возвращаем кнопки панели промптов: перед очисткой там стояло

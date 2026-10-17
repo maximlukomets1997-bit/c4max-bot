@@ -392,10 +392,13 @@ async def post_init(application):
     # к работе панель. Второй аргумент send_adm_panel — чьи права: в личке он
     # совпадает с chat_id, но полагаться на это не надо.
     try:
-        from handlers.admin import send_adm_panel
+        from handlers.admin import send_adm_panel, send_owner_keys
         for owner_id in _service_recipients():
             try:
                 await send_adm_panel(application.bot, owner_id, owner_id)
+                # Нижние кнопки владельца (2026-10-17, panel_keys.py) — вместе
+                # с панелью: после каждого запуска они на месте.
+                await send_owner_keys(application.bot, owner_id, owner_id)
             except Exception as e:
                 logger.warning("⚠️ Не удалось показать панель %s: %s", owner_id, _friendly_error(e))
     except Exception as e:
