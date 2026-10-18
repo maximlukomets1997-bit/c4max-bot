@@ -3,8 +3,8 @@
 #  СУТОЧНЫЙ (каждую полночь) и НЕДЕЛЬНЫЙ (понедельник 00:00 по Киеву)
 #
 #  Отчёт показывает ровно те счётчики, что видны в панели управления моделями:
-#  вызовы по каждой модели, расход $ по провайдерам, остаток бесплатной квоты
-#  Qwen и остатки на счетах. Но панель показывает НАКОПЛЕННОЕ, а нужен расход
+#  вызовы по каждой модели, расход $ по провайдерам и остатки на счетах.
+#  Но панель показывает НАКОПЛЕННОЕ, а нужен расход
 #  ЗА СУТКИ — поэтому раз в сутки в полночь по Киеву бот делает «фотографию»
 #  счётчиков (таблица stats_snapshots) и показывает РАЗНИЦУ с прошлой полуночью.
 #  НЕДЕЛЬНЫЙ отчёт — СУММА уже посчитанных суток (копилка в settings), а не
@@ -18,7 +18,7 @@
 #      и «📅 Отчёт за неделю» (last_weekly_text) в панели «📡 Настройки API».
 #
 #  ⚠️ Вызовы за период считаются ПО ВРЕМЕНИ из таблицы api_calls, а расходы —
-#  разницей снимков. Раз в месяц бот сам обнуляет api_calls и копилки Qwen и
+#  разницей снимков. Раз в месяц бот сам обнуляет api_calls и копилку
 #  картинок (jobs/cleanup.py::_monthly_stats_reset) — чтобы отчёт за 1-е число не
 #  занизил цифры, сброс перед обнулением откладывает уничтожаемую часть
 #  в «перенос» (note_monthly_reset ниже), а отчёт её прибавляет.
@@ -42,12 +42,12 @@ _LAST_TEXT_KEY = "daily_report_last_text"
 
 # Ключ settings с «переносом» — тем, что месячный сброс уничтожил внутри
 # ТЕКУЩЕГО (ещё не отчитанного) периода. JSON: {"calls": {модель: N},
-# "qwen_cost": число, "image_cost": число}. Обнуляется при каждом отчёте.
+# "image_cost": число}. Обнуляется при каждом отчёте.
 _CARRY_KEY = "daily_report_carry"
 
 # Недельный отчёт (понедельник 00:00 по Киеву). Копилка — JSON с суммой уже
-# посчитанных суток: {"start_utc", "end_utc", "days", "calls", "burned",
-# "qwen_reset", "<провайдер>_cost", "<провайдер>_manual"} — по реестру PROVIDERS.
+# посчитанных суток: {"start_utc", "end_utc", "days", "calls",
+# "<провайдер>_cost", "<провайдер>_manual"} — по реестру PROVIDERS.
 # Подробности и причина, почему сумма, а не разница снимков, — в разделе
 # «Недельный отчёт» внизу файла.
 _WEEK_KEY = "weekly_report_acc"
@@ -105,7 +105,7 @@ def balance_sync_note(provider: str) -> str:
     Приписка «сверено в 14:05» к остатку на счету (14.09.2026).
 
     Показывается ВЕЗДЕ, где виден остаток: панель «📡 Настройки API», экран
-    «💰 Счета и квоты», суточный отчёт и страница сайта /system. Одна функция
+    «💰 Счета», суточный отчёт и страница сайта /system. Одна функция
     на четыре экрана намеренно — формат времени в копиях однажды поправят в одной.
 
     Сверки не было (провайдер её не умеет, или бот только поднялся и первый
@@ -193,8 +193,7 @@ def _money(key: str) -> float:
 
 def collect_counters() -> dict:
     """Текущие значения всех счётчиков панели «📡 Настройки API»: копилки
-    расходов по каждому провайдеру, остатки на счетах и остаток квоты по каждой
-    модели Qwen.
+    расходов по каждому провайдеру и остатки на счетах.
     Вызовы сюда НЕ входят — они считаются по времени из таблицы api_calls."""
     out = {}
     # Копилки и остатки — по реестру провайдеров (config.PROVIDERS): имена
@@ -205,7 +204,6 @@ def collect_counters() -> dict:
             out[f"{pid}_cost"] = _money(meta["cost_key"])
         if meta["balance_key"]:
             out[f"{pid}_balance"] = _money(meta["balance_key"])
-    out["qwen_tokens"] = hist.get_qwen_tokens()
     return out
 
 
@@ -227,7 +225,7 @@ def _carry_clear() -> None:
 def note_monthly_reset() -> None:
     """Зовётся из jobs/cleanup.py::_monthly_stats_reset ПЕРЕД обнулением счётчиков.
 
-    Месячный сброс стирает таблицу вызовов и копилки Qwen и картинок. Часть
+    Месячный сброс стирает таблицу вызовов и копилку картинок. Часть
     этих цифр относится к ТЕКУЩИМ суткам, за которые отчёт ещё не отправлен, —
     без переноса отчёт за 1-е число показал бы только то, что накапало ПОСЛЕ
     обнуления. Поэтому уничтожаемую часть откладываем в settings, а отчёт её
@@ -245,7 +243,7 @@ def note_monthly_reset() -> None:
         for model_name, cnt in hist.count_api_calls_between(last["taken_at_utc"]):
             calls[model_name] = calls.get(model_name, 0) + cnt
         carry["calls"] = calls
-        # Копилки Qwen и картинок обнуляются целиком — переносим их значение
+        # Копилка картинок обнуляется целиком — переносим её значение
         # ЦЕЛИКОМ: расход периода = (значение на момент сброса − снимок) + то,
         # что накапает после сброса. См. формулу в шапке файла.
         # Переносим ТОЛЬКО те копилки, которые месячный сброс обнуляет
@@ -256,8 +254,8 @@ def note_monthly_reset() -> None:
                 key = f"{pid}_cost"
                 carry[key] = float(carry.get(key, 0.0)) + _money(meta["cost_key"])
         hist.set_setting(_CARRY_KEY, json.dumps(carry, ensure_ascii=False))
-        logger.info("📊 Суточный отчёт: перед месячным сбросом отложено %d моделей вызовов, Qwen $%.6f, картинки $%.6f",
-                    len(calls), carry.get("qwen_cost", 0.0), carry.get("image_cost", 0.0))
+        logger.info("📊 Суточный отчёт: перед месячным сбросом отложено %d моделей вызовов, картинки $%.6f",
+                    len(calls), carry.get("image_cost", 0.0))
     except Exception as e:
         logger.warning("⚠️ Не удалось отложить счётчики перед месячным сбросом: %s", e)
 
@@ -285,7 +283,7 @@ def _spent(current: float, base: float, carried: float = 0.0) -> tuple[float, bo
 
 
 def _calls_by_group(calls: dict) -> dict:
-    """Раскладывает вызовы по блокам панели: gemini / image / qwen / deepseek /
+    """Раскладывает вызовы по блокам панели: gemini / image / deepseek /
     xiaomi и «прочие» (модель удалена из конфига, а вызовы за
     период были). Порядок внутри блока — по числу вызовов, как в панели.
     Блоки берутся из реестра config.PROVIDERS (2026-08-03) — нового провайдера
@@ -313,31 +311,6 @@ def _calls_by_group(calls: dict) -> dict:
     return groups
 
 
-def _qwen_line(model_name: str, cnt: int, burned, cur_left, partial: bool = False) -> str:
-    """Строка модели Qwen: вызовы + сожжённые за период токены + остаток квоты.
-
-    burned  — сожжено за период (None = сравнивать не с чем; отрицательное =
-              остаток ВЫРОС, значит квоту завели заново после смены ключа, и
-              разница бессмысленна);
-    partial — недельный отчёт, внутри которого квоту переставляли: сумма по
-              дням тогда неполная, и врать точной цифрой нельзя.
-    """
-    parts = [f"  • <code>{html.escape(model_name)}</code>: <b>{cnt}</b>"]
-    if burned is not None:
-        if burned > 0:
-            mark = "сожжено ≥" if partial else "сожжено"
-            parts.append(f"{mark} <b>{_fmt_num(burned)}</b>")
-        elif burned < 0:
-            parts.append("<i>квота переставлена вручную</i>")
-    if partial and (burned is None or burned >= 0):
-        parts.append("<i>квоту переставляли</i>")
-    if cur_left is None:
-        parts.append("<i>квота не задана</i>")
-    else:
-        parts.append(f"осталось <b>{_fmt_num(cur_left)}</b>")
-    return " · ".join(parts) + "\n"
-
-
 def _plain_lines(rows: list) -> str:
     """Строки блока без токенов: «  • модель: N». Имя модели экранируется:
     в блок «прочие» оно приходит из базы, и символ «<» сломал бы отправку."""
@@ -348,8 +321,8 @@ def _plain_lines(rows: list) -> str:
 
 def period_totals(start_utc: str, end_utc: str,
                   base: dict, current: dict, carry: dict) -> dict:
-    """Итог периода В ЦИФРАХ: вызовы по моделям, сожжённые токены Qwen и расход
-    по каждому провайдеру. Отдельно от рисования, потому что цифры приходят из ДВУХ разных
+    """Итог периода В ЦИФРАХ: вызовы по моделям и расход по каждому
+    провайдеру. Отдельно от рисования, потому что цифры приходят из ДВУХ разных
     мест: у суточного отчёта — из разницы снимков (эта функция), у недельного —
     сложением уже посчитанных суток из копилки. Рисует их одна и та же
     функция `render` — иначе два отчёта со временем разъехались бы по виду.
@@ -358,22 +331,7 @@ def period_totals(start_utc: str, end_utc: str,
     for name, cnt in (carry.get("calls") or {}).items():
         calls[name] = calls.get(name, 0) + cnt
 
-    # Сожжённые токены Qwen: остаток на начало минус остаток на конец.
-    # Отрицательное значение = квоту завели заново (смена ключа) — оставляем
-    # как есть, строка модели покажет это словами.
-    burned = {}
-    base_tokens = base.get("qwen_tokens") or {}
-    cur_tokens = current.get("qwen_tokens") or {}
-    for model_name, base_left in base_tokens.items():
-        cur_left = cur_tokens.get(model_name)
-        if base_left is not None and cur_left is not None:
-            burned[model_name] = base_left - cur_left
-
-    out = {
-        "calls": calls,
-        "burned": burned,
-        "qwen_reset": [name for name, value in burned.items() if value < 0],
-    }
+    out = {"calls": calls}
     # Расход по каждому провайдеру с копилкой — по реестру. Отложенное
     # (carry) прибавляется только там, где копилку обнуляет месячный сброс:
     # у вечных счётчиков переносить нечего, и carry для них всегда пуст.
@@ -399,7 +357,7 @@ def _proactive_block(start_utc: str, end_utc: str, total_calls: int) -> str:
     была бесплатная Gemini, и стоимость всё равно выходила нулевой. Цифра
     скорее ЗАНИЖЕНА: проактивный запрос длиннее среднего — в нём вся
     стенограмма, статьи базы знаний и инструкция участия. Стоит активной
-    платная модель (Qwen, DeepSeek, Xiaomi) — точный проброс уже имел бы
+    платная модель (DeepSeek, Xiaomi) — точный проброс уже имел бы
     смысл; это отдельная работа, здесь его нет.
 
     Медиа-триггеры считаются отдельно: у них на проверку уходит ДВА запроса
@@ -443,16 +401,13 @@ def render(header: str, period_line: str, note: str,
     note        — предупреждение под подписью (или пустая строка);
     totals      — цифры периода (см. period_totals);
     current     — счётчики на конец периода: отсюда берутся ОСТАТКИ на счетах
-                  и остаток квоты Qwen (они всегда «на сейчас», не за период);
+                  (они всегда «на сейчас», не за период);
     extra       — дополнительные строки в самом низу (средние за день у недели).
     Порядок блоков и подписи повторяют панель «📡 Настройки API», чтобы отчёт
     читался с ней один в один.
     """
     calls = totals.get("calls") or {}
-    burned = totals.get("burned") or {}
-    reset_models = set(totals.get("qwen_reset") or ())
     groups = _calls_by_group(calls)
-    cur_tokens = current.get("qwen_tokens") or {}
 
     def _sum(provider: str) -> int:
         return sum(cnt for _, cnt in groups[provider])
@@ -466,24 +421,15 @@ def render(header: str, period_line: str, note: str,
     # порядком и по тем же правилам, что панель «📡 Настройки API», чтобы
     # отчёт читался с ней один в один. Раньше шесть блоков были выписаны
     # здесь руками, и забытый провайдер молча уезжал в «прочие».
-    # Особенности, заданные полями реестра:
-    #   • quota_tokens — у Qwen вместо простого списка моделей строки с
-    #     остатком бесплатной квоты (_qwen_line);
-    #   • report_approx — «≈» перед суммой: расход Qwen расчётный по прайсу;
+    # Особенность, заданная полем реестра:
     #   • balance_key — есть счёт, значит под расходом идёт строка остатка.
     text = f"{header}\n{period_line}\n{note}───────────────────────────\n"
     for pid, meta in PROVIDERS.items():
         text += f"{meta['icon']} <b>{meta['calls_label']}: {_sum(pid)}</b>\n"
-        if meta["quota_tokens"]:
-            text += "".join(_qwen_line(name, cnt, burned.get(name), cur_tokens.get(name),
-                                       name in reset_models)
-                            for name, cnt in groups[pid])
-        else:
-            text += _plain_lines(groups[pid])
+        text += _plain_lines(groups[pid])
         if meta["cost_key"]:
             spent = totals.get(f"{pid}_cost", 0.0)
-            approx = "≈" if meta["report_approx"] else ""
-            text += (f"💰 <b>{meta['money_label']}:</b> {approx}${spent:.6f}"
+            text += (f"💰 <b>{meta['money_label']}:</b> ${spent:.6f}"
                      f"{manual_note if totals.get(f'{pid}_manual') else ''}\n")
             if meta["balance_key"]:
                 # Приписка «сверено в 14:05» — у кого остаток спрошен
@@ -656,7 +602,7 @@ def last_report_text() -> str | None:
 #  Неделя считается НЕ разницей снимков «неделю назад → сейчас», а СУММОЙ уже
 #  посчитанных суток: каждый суточный отчёт кладёт свои цифры в копилку, а в
 #  понедельник копилка становится отчётом и обнуляется. Причина — месячный
-#  сброс: первого числа бот обнуляет вызовы и копилки Qwen и картинок, и прямая
+#  сброс: первого числа бот обнуляет вызовы и копилку картинок, и прямая
 #  разница за неделю, на которую попало 1-е число, показала бы бессмыслицу.
 #  Сумма семи суточных цифр от сброса не страдает: каждая из них посчитана
 #  с учётом «переноса» (см. note_monthly_reset выше).
@@ -687,7 +633,7 @@ def week_add_day(start_utc: str, end_utc: str, totals: dict) -> None:
     попавших в копилку."""
     acc = _week_read()
     if not acc:
-        acc = {"start_utc": start_utc, "days": 0, "calls": {}, "burned": {}, "qwen_reset": []}
+        acc = {"start_utc": start_utc, "days": 0, "calls": {}}
 
     acc["end_utc"] = end_utc
     acc["days"] = int(acc.get("days") or 0) + 1
@@ -696,19 +642,6 @@ def week_add_day(start_utc: str, end_utc: str, totals: dict) -> None:
     for name, cnt in (totals.get("calls") or {}).items():
         calls[name] = calls.get(name, 0) + cnt
     acc["calls"] = calls
-
-    # Сожжённые токены Qwen складываем только там, где разница осмысленна.
-    # Сутки, в которые квоту заводили заново (остаток ВЫРОС), сумму испортили
-    # бы — такие модели помечаем, и недельная строка честно скажет «≥».
-    burned = acc.get("burned") or {}
-    reset = set(acc.get("qwen_reset") or ())
-    for name, value in (totals.get("burned") or {}).items():
-        if value > 0:
-            burned[name] = burned.get(name, 0) + value
-        elif value < 0:
-            reset.add(name)
-    acc["burned"] = burned
-    acc["qwen_reset"] = sorted(reset)
 
     # Копилка ведётся по реестру: расход и пометка «счётчик правили вручную»
     # у каждого провайдера, у которого есть копилка.
@@ -777,7 +710,7 @@ def weekly_report(header: str = "📅 <b>РАСХОД ЗА НЕДЕЛЮ</b>") ->
     """Собирает недельный отчёт из копилки, сохраняет его текст для кнопки и
     копилку обнуляет. None — копилка пуста (закрытых суток ещё не было).
 
-    Остатки на счетах и остаток квоты Qwen берутся ТЕКУЩИЕ: это не расход за
+    Остатки на счетах берутся ТЕКУЩИЕ: это не расход за
     период, а «сколько есть сейчас» — как в панели «📡 Настройки API».
     """
     acc = _week_read()
@@ -786,11 +719,7 @@ def weekly_report(header: str = "📅 <b>РАСХОД ЗА НЕДЕЛЮ</b>") ->
         return None
 
     current = collect_counters()
-    totals = {
-        "calls": acc.get("calls") or {},
-        "burned": acc.get("burned") or {},
-        "qwen_reset": acc.get("qwen_reset") or [],
-    }
+    totals = {"calls": acc.get("calls") or {}}
     # Расход и пометки — по реестру, как и всё остальное в отчётах.
     for pid, meta in PROVIDERS.items():
         if not meta["cost_key"]:

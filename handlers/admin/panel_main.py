@@ -10,7 +10,7 @@ from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 from config import (AVAILABLE_MODELS, AVAILABLE_IMAGE_MODELS, GEMINI_MODEL, PROVIDERS,
                     BOT_VERSION_HTML, THINKING_LEVELS, THINKING_PHASES)
-from database.history import get_setting, get_bot_stats, get_qwen_tokens
+from database.history import get_setting, get_bot_stats
 from utils import register_and_clean_bot_message, delete_user_message_safe
 
 
@@ -22,56 +22,25 @@ from .panel_rag import _end_kb_test
 
 
 
-# Раскладка кнопок текстовых моделей: 6 рядов, по 2 колонки или одной длинной
+# Раскладка кнопок текстовых моделей: 4 ряда, по 2 колонки или одной длинной
 # кнопкой. Собрана ВРУЧНУЮ
 # по конкретным ключам AVAILABLE_MODELS: добавил модель в config.py — добавь
 # её ключ сюда, иначе кнопка НЕ появится.
-# 2026-07-19: было 6 рядов; модели qwen3.6-max-preview и qwen3.6-plus удалены
-# по решению владельца (не использовались) — ряды Qwen сжаты в один.
-# 2026-07-24: было 5 рядов; удалены gemini-2.5-flash-lite, gemini-2.5-flash
-# и gemma-4-26b-a4b-it, добавлена gemini-3.6-flash. Порядок Gemini задан
-# Максимом «по столбцам»: слева 3 Flash (v3) и 3.1 Flash-Lite, справа
-# 3.5 Flash и 3.6 Flash — в рядах это даёт пары ниже.
-# 2026-07-25: добавлен ряд Xiaomi MiMo (mimo-v2.5 / mimo-v2.5-pro) — стало 5 рядов.
-# 2026-08-01: добавлялась ВРЕМЕННАЯ Ling 3.0 Flash отдельной строкой;
-# 2026-08-04 убрана по решению Максима вместе со всем провайдером OpenRouter,
-# который заводился ради неё одной — «больше не нужна».
-# 2026-08-17: добавлена qwen3.8-max — своей строкой, в конце блока Qwen
-# (решение Максима; до этого пробовали «строго парами» и «новинки первым
-# рядом», обе раскладки он отменил). Ряд из одной кнопки Telegram растягивает
-# на всю ширину — длинная кнопка читается как «самая новая».
-# В тот же день ПЕРЕБРАН НАБОР GEMINI: выведены 3 Flash Preview и 3.1
-# Flash-Lite, добавлена 3.5 Flash-Lite. Четыре оставшиеся Максим разложил
-# СТОЛБЦАМИ: слева 3.5 Flash-Lite и 3.5 Flash, справа 3.6 Flash и 3.7 Flash —
-# в рядах это даёт пары ниже.
-# 2026-09-08: добавлена gemini-3.8-flash — своей строкой сразу под блоком
-# Gemini (выбор Максима из двух показанных раскладок). Тем же приёмом, что и
-# qwen3.8-max тремя неделями раньше в этом же файле: ряд из одной кнопки Telegram
-# растягивает на всю ширину, и новинка читается как новинка. Вторая раскладка
-# ставила её в пару к 3.7 Flash, но тогда ломался порядок «Gemini столбцами»
-# и Qwen переезжал в чужой ряд — отклонена.
-# 2026-09-10: ряд DeepSeek стал одиночным. V4 Flash и V4 Pro сняты самим
-# провайдером (V4 Pro — с 14.09, запросы к нему уводятся на V4.1 Flash по её
-# же цене), на их место пришла одна V4.1 Flash. Та же длинная кнопка во всю
-# ширину, что у 3.8 Flash и qwen3.8-max, и по той же причине.
-# 2026-09-21: добавлена qwen3.8-flash — В ПАРУ к qwen3.8-max (выбор Максима из
-# двух показанных раскладок; вторая ставила новинку отдельной длинной строкой,
-# как делали с Gemini 3.8 Flash). Одиночный ряд Qwen снова стал парным, число
-# рядов не изменилось.
-# 2026-09-28: в ряду Xiaomi MiMo V2.5 / V2.5 Pro заменены на V2.6 Flash / V2.6 Pro
-# (решение Максима) — место ряда и порядок кнопок прежние.
-# 2026-09-29: qwen3.8-max заменена снимком qwen3.8-max-0902 (решение Максима) —
-# та же кнопка на том же месте, в паре с qwen3.8-flash.
-# 2026-10-03: удалены qwen3.7-plus и qwen3.7-max (решение Максима) — их ряд
-# ушёл целиком, остальные ряды и порядок кнопок прежние. Стало 6 рядов.
-# 2026-10-10: удалены gemini-3.5-flash и gemini-3.7-flash (решение Максима):
-# 08.10 Google снял обе и молча переадресует их на 3.6 и 3.8 — кнопки врали
-# бы. Их ряд (нижние клетки «столбцов» Gemini) ушёл целиком, остальное на
-# своих местах. Стало 5 рядов.
+# Правила раскладки — решения Максима (как ряды переставляли по датам — в
+# references/history.md навыка project-map):
+#   • Gemini разложены «по столбцам» — в рядах это даёт пары ниже;
+#   • новинка без пары ставится своей строкой: ряд из одной кнопки Telegram
+#     растягивает на всю ширину, и она читается как «самая новая» (так стоят
+#     Gemini 3.8 Flash и DeepSeek V4.1 Flash; «строго парами» и «новинки
+#     первым рядом» Максим пробовал и отменил);
+#   • удалённая модель уходит вместе со своим рядом, остальные ряды и порядок
+#     кнопок не двигаются.
+# 2026-10-10: удалены gemini-3.5-flash и gemini-3.7-flash (Google снял обе).
+# 2026-10-18: удалён ряд Qwen (qwen3.8-max-0902 / qwen3.8-flash) — из бота
+# убран весь провайдер Alibaba, решение Максима. Стало 4 ряда.
 _MODEL_BUTTON_ROWS = [
     ["gemini-3.5-flash-lite", "gemini-3.6-flash"],
     ["gemini-3.8-flash"],
-    ["qwen3.8-max-0902", "qwen3.8-flash"],
     ["deepseek-flash"],
     ["mimo-v2.6-flash", "mimo-v2.6-pro"],
 ]
@@ -119,12 +88,12 @@ def _thinking_rows():
     """
     Ряды кнопок «<значок провайдера> <имя> <фаза луны> <глубина>» — по одной
     на провайдера (29.08.2026, решение Максима «по кнопке на джемини, квен,
-    дипсик и мимо»). Пример живой надписи: «🐋 DeepSeek 🌔 Высокая».
+    дипсик и мимо»; кнопка Qwen ушла 18.10.2026 вместе с провайдером). Пример
+    живой надписи: «🐋 DeepSeek 🌔 Высокая».
 
     ⚠️ ПОЧЕМУ НЕ ОДНА ОБЩАЯ КНОПКА. Провайдеры умеют разное, замерено живыми
     запросами: у Gemini четыре ступени, у DeepSeek свои три (low/high/max),
-    у Qwen ступеней нет вовсе — есть точный потолок мыслей в токенах, а у MiMo
-    нет и потолка, только «думает / не думает». Общая кнопка на четыре
+    а у MiMo ступеней нет вовсе, только «думает / не думает». Общая кнопка на четыре
     положения обещала бы четыре, а выполняла бы два на MiMo. Подробности и
     числа — config.THINKING_LEVELS.
 
@@ -292,7 +261,7 @@ def _build_api_keyboard(user_id, full: bool = False):
     """
     Клавиатура панели «📡 Настройки API»: кнопки выбора моделей + глубина
     раздумий по провайдерам + переключатели показа и склейка + отчёты о
-    расходах + вход на экран «💰 Счета и квоты» + возврат в /adm.
+    расходах + вход на экран «💰 Счета» + возврат в /adm.
     Вызывается при открытии панели и при обновлении клавиатуры после смены
     модели или глубины.
 
@@ -323,7 +292,7 @@ def _build_api_keyboard(user_id, full: bool = False):
         ]
     rows += [
         list(_REPORT_BUTTON_ROW),
-        [InlineKeyboardButton("💰 СЧЕТА И КВОТЫ", callback_data="bal:panel")],
+        [InlineKeyboardButton("💰 СЧЕТА", callback_data="bal:panel")],
         _adm_back_row(),
     ]
     return InlineKeyboardMarkup(rows)
@@ -432,7 +401,7 @@ async def send_db_backup(bot, chat_id: int, user_id: int) -> None:
         caption=(
             f"💾 <b>Копия базы бота</b>\n"
             f"<code>{html.escape(fname)}</code> · {backup.human_size(size)}\n"
-            f"<i>Сохрани у себя: промпты, настройки, счета и квоты, личные "
+            f"<i>Сохрани у себя: промпты, настройки, счета, личные "
             f"дела, звания и журналы — этого нет на GitHub. "
             f"На сервере хранится копий: {kept}.</i>"
         ),
@@ -473,38 +442,8 @@ async def send_api_panel(bot, chat_id: int, user_id: int):
             provider = "image"
         else:
             provider = AVAILABLE_MODELS.get(model_name, {}).get("provider")
-        if provider in groups and provider != "qwen":
+        if provider in groups:
             groups[provider] += f"  • <code>{model_name}</code>: <b>{cnt}</b>\n"
-
-    # Блок Qwen собирается ОТДЕЛЬНО от остальных провайдеров: вызовы месячные
-    # (обнуляются 1-го числа вместе с api_calls), а ОСТАТОК бесплатной квоты
-    # Alibaba — вечный (ключи qwen_tokens_<модель>, тают в spend_qwen_tokens).
-    # Поэтому строку модели рисуем ВСЕГДА, даже если вызовов в этом месяце ещё
-    # не было: иначе остаток квоты пропадал бы из панели сразу после месячного
-    # сброса. Модели, удалённые из конфига, но с заведённой квотой, дописываются
-    # следом — счёт квоты не должен теряться вместе с моделью.
-    # Ключа в settings нет — пишем «квота не задана», а не 0: ноль означает
-    # «квота кончилась», это разные вещи.
-    qw_tokens = get_qwen_tokens()
-    qw_calls = {m: c for m, c in stats["api_calls_by_model"]}
-    for model_name, meta in AVAILABLE_MODELS.items():
-        if meta.get("provider") != "qwen":
-            continue
-        _left = qw_tokens.pop(model_name, None)
-        if _left is None:
-            _left_str = "квота не задана"
-        else:
-            _left_str = "осталось <b>" + f"{_left:,}".replace(",", " ") + "</b>"
-        # Срок действия квоты, если он вписан (18.09.2026): у Alibaba квота
-        # сгорает по дате, и остаток без срока обманчив.
-        from handlers.admin.panel_balance import _quota_until
-        _left_str += _quota_until(model_name)
-        groups["qwen"] += (f"  • <code>{model_name}</code>: "
-                           f"<b>{qw_calls.get(model_name, 0)}</b> · {_left_str}\n")
-    for model_name, tokens in qw_tokens.items():
-        _tok = f"{tokens:,}".replace(",", " ")
-        groups["qwen"] += (f"  • <code>{html.escape(model_name)}</code> (нет в конфиге): "
-                           f"осталось <b>{_tok}</b>\n")
 
     for provider in groups:
         if not groups[provider]:
@@ -518,8 +457,7 @@ async def send_api_panel(bot, chat_id: int, user_id: int):
     #   • нет `cost_key` — денежной строки нет вовсе (Gemini на бесплатном ключе);
     #   • сумма расхода — ССЫЛКОЙ на кабинет провайдера (превью ссылок гасит
     #     `_send_panel_message`);
-    #   • есть `balance_key` — после «/» дописывается остаток на счету; у Qwen
-    #     его нет намеренно: там бесплатная квота в токенах, а не деньги.
+    #   • есть `balance_key` — после «/» дописывается остаток на счету.
     def _money(key: str) -> float:
         """settings хранит строки — приводим к числу с запасным нулём."""
         try:

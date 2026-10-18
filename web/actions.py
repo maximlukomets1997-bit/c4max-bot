@@ -619,26 +619,25 @@ def quiz_auto_toggle(actor_id: int) -> bool:
 
 def balance_set(actor_id: int, field_id: str, raw: str) -> str:
     """
-    Правка остатка на счету, счётчика «потрачено» или квоты токенов.
+    Правка остатка на счету или счётчика «потрачено».
 
     ⚠️ Разбор числа и описание полей взяты ИЗ ПАНЕЛИ БОТА
     (`panel_balance._balance_field`, `_parse_number`) — второй разборщик
-    «5,32», «$ 5.32» и «1 000 000» разъехался бы с первым.
+    «5,32» и «$ 5.32» разъехался бы с первым.
 
     ⚠️ ПРОЧЕРК УБИРАЕТ ЗНАЧЕНИЕ СОВСЕМ, а не обнуляет. Разница
     принципиальная: пока ключа нет, вычитание расхода его не находит и ничего
     не портит, а с нулём остаток ушёл бы в минус с первого же запроса.
     """
     from handlers.admin.panel_balance import (_balance_field, _money_str,
-                                              _parse_number, _tokens_str,
-                                              _value_str)
+                                              _parse_number, _value_str)
     from database.history import delete_setting
 
     info = _balance_field(field_id)
     if not info:
         raise ActionError(f"неизвестное поле «{field_id}»")
 
-    was = _value_str(info["key"], info["kind"], info["absent"])
+    was = _value_str(info["key"], info["absent"])
     raw = (raw or "").strip()
 
     if raw in ("-", "–", "—"):
@@ -648,13 +647,12 @@ def balance_set(actor_id: int, field_id: str, raw: str) -> str:
                     info["key"], was, actor_id)
         return f"{info['short']}: было {was} → стало «{info['absent']}»"
 
-    value, err = _parse_number(raw, info["kind"])
+    value, err = _parse_number(raw)
     if value is None:
         raise ActionError(err)
 
-    set_setting(info["key"],
-                str(int(value)) if info["kind"] == "tokens" else f"{value:.6f}")
-    shown = _tokens_str(value) if info["kind"] == "tokens" else _money_str(value)
+    set_setting(info["key"], f"{value:.6f}")
+    shown = _money_str(value)
     _staff_audit(actor_id, "balance", 0, f"{info['short']}: стало {shown}")
     logger.info("🌐 Сайт: %s = %s (было %s, админ %s)",
                 info["key"], value, was, actor_id)

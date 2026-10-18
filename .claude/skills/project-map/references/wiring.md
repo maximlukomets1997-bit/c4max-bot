@@ -218,7 +218,7 @@ user_image_calls, user_settings, user_token_usage
 `.env.example` (последние три там закомментированы — необязательные):
 
 ```
-TELEGRAM_TOKEN, GEMINI_API_KEY, GEMINI_IMAGEN_API_KEY, QWEN_API_KEY,
+TELEGRAM_TOKEN, GEMINI_API_KEY, GEMINI_IMAGEN_API_KEY,
 DEEPSEEK_API_KEY, XIAOMI_API_KEY, RAG_ENABLED, RAG_TOP_K,
 RAG_MIN_SIMILARITY, RAG_CHUNK_MODE, RAG_LEX_BOOST, RAG_PEAK_MARGIN,
 RAG_STRONG_SIM, WATCHDOG_URL, WEB_ENABLED, WEB_PUBLIC_URL,
@@ -229,13 +229,13 @@ WEB_HOST, WEB_PORT, IS_DOCKER
 `DB_PATH = "history.db"`, `BACKUP_DIR = "backups"`,
 `RAG_INDEX_FILE = "knowledge/knowledge_base_vectors.json"`,
 `KNOWLEDGE_PENDING_DIR`, `KNOWLEDGE_APPROVED_DIR`,
-`AVAILABLE_MODELS` (8 моделей: 21.09.2026 добавлена Qwen3.8 Flash, 28.09 MiMo V2.5 заменены на V2.6, 29.09 qwen3.8-max — на qwen3.8-max-0902, 03.10 удалены обе Qwen 3.7, 10.10 — Gemini 3.5 Flash и 3.7 Flash, снятые Google 08.10 (молча переадресуются на 3.6 и 3.8); слепых моделей с 03.10 нет; три очереди подстраховки медиа с 10.10 — по три модели: 3.6 Flash → 3.8 Flash → 3.5 Flash-Lite; `FALLBACK_MODEL` с 10.10 — снова 3.6 Flash: 3.8 за 1–9.10 почти всегда отвечала «503»), `PROVIDERS` (5 ключей: gemini, image, qwen, deepseek, xiaomi — «image» это
-не провайдер моделей, а картинки; `preflight` считает четвёрку по
+`AVAILABLE_MODELS` (6 моделей: три Gemini, DeepSeek V4.1 Flash и две MiMo V2.6; 10.10 удалены Gemini 3.5 Flash и 3.7 Flash, снятые Google 08.10 (молча переадресуются на 3.6 и 3.8); 18.10 удалён весь провайдер Qwen (Alibaba) — обе его модели, учёт бесплатной квоты и письма о ней; слепых моделей с 03.10 нет; три очереди подстраховки медиа с 10.10 — по три модели: 3.6 Flash → 3.8 Flash → 3.5 Flash-Lite; `FALLBACK_MODEL` с 10.10 — снова 3.6 Flash: 3.8 за 1–9.10 почти всегда отвечала «503»), `PROVIDERS` (4 ключа: gemini, image, deepseek, xiaomi — «image» это
+не провайдер моделей, а картинки; `preflight` считает тройку по
 `AVAILABLE_MODELS`), `AVAILABLE_IMAGE_MODELS` (2), `QUIZ_RANKS` (20 званий),
 `AUTO_UPDATE_INTERVAL_SEC = 300`, `AUTO_UPDATE_QUIET_SEC = 60`,
 `WATCHDOG_PING_SEC = 60`, `THINKING_LEVELS` (положения кнопок глубины
 раздумий — своя шкала у каждого провайдера, у MiMo их всего два) вместе с
-`THINKING_DEFAULT`, `THINKING_PHASES` и `QWEN_THINKING_BUDGET`; `WEB_ENABLED`, `WEB_HOST`, `WEB_PORT`,
+`THINKING_DEFAULT` и `THINKING_PHASES`; `WEB_ENABLED`, `WEB_HOST`, `WEB_PORT`,
 `WEB_PUBLIC_URL`, `WEB_COOKIE_NAME`, `WEB_SESSION_TTL_SEC`,
 `WEB_AUTH_MAX_AGE_SEC` (веб-админка).
 
@@ -244,12 +244,10 @@ WEB_HOST, WEB_PORT, IS_DOCKER
 
 ⚠️ **СМЕНА ИМЕНИ МОДЕЛИ ЗАДЕВАЕТ БОЕВУЮ БАЗУ, А НЕ ТОЛЬКО КОД.** В settings
 имя модели — часть ключа: `active_model` (выбрана удалённая модель —
-`get_setting` сам сбросит её на заводскую), `qwen_tokens_<модель>` и
-`qwen_quota_until_<модель>` (остаток и срок бесплатной квоты Qwen). Ключи
-старого имени остаются в базе: панель «💰 Счета и квоты» показывает их и даёт
-убрать прочерком (`panel_balance`, поле `qwen:` принимает и удалённую модель),
-но к новому имени квота сама НЕ переедет — её вписывают заново по консоли.
-Расход старого имени до месячного сброса уходит в отчётах в «прочие». Ни
+`get_setting` сам сбросит её на заводскую). Расход старого имени до месячного
+сброса уходит в отчётах в «прочие». (До 18.10.2026 частью ключа имя было ещё
+у квот Qwen — `qwen_tokens_<модель>` и `qwen_quota_until_<модель>`; провайдер
+удалён, ключи стёрты из боевой базы.) Ни
 `preflight`, ни `selftest` этого не видят: они работают на пустой базе.
 
 ## Веб-админка (сайт) — с 30.08.2026
@@ -347,7 +345,7 @@ WEB_HOST, WEB_PORT, IS_DOCKER
   ⚠️ Загруженная вручную статья ложится СРАЗУ В ОДОБРЕННЫЕ (так же, как
   кнопка «➕ Добавить RAG»): в очереди ждут только новости, принесённые ботом.
   Чтобы статья заработала в поиске, указатель надо пересобрать.
-- **Обслуживание (этап 5, `/system` и `/download`).** Счета, квоты и счётчики
+- **Обслуживание (этап 5, `/system` и `/download`).** Счета и счётчики
   «потрачено»; отчёты за сутки и неделю; логи; история обновлений; дайджест;
   копия базы; очистка разговоров; перезапуск.
   ⚠️ Разбор числа для счетов берётся из `panel_balance._parse_number` — второй

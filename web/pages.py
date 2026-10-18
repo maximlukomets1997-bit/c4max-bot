@@ -547,15 +547,14 @@ def _sysform(csrf: str, fields: dict, inner: str, cls: str = "ctl") -> str:
 
 def _money_block(csrf: str) -> str:
     """
-    Счета, счётчики «потрачено» и квоты токенов — каждое поле своим окошком.
+    Счета и счётчики «потрачено» — каждое поле своим окошком.
 
     ⚠️ Поля и разбор числа берутся из панели бота
-    (`panel_balance._balance_field`): второй разборщик «5,32» и «1 000 000»
+    (`panel_balance._balance_field`): второй разборщик «5,32» и «$ 5.32»
     разъехался бы с первым.
     """
     from handlers.admin.panel_balance import (_BALANCE_FIELDS, _COST_FIELDS,
-                                              _balance_field, _qwen_model_keys,
-                                              _value_str)
+                                              _balance_field, _value_str)
 
     # ⚠️ 14.09.2026, ПОЧИНЕНО В ТОТ ЖЕ ДЕНЬ. Сначала отсюда убрали строку
     # DeepSeek целиком — вместе с формой правки исчез и САМ ПОКАЗ остатка, а
@@ -568,7 +567,6 @@ def _money_block(csrf: str) -> str:
 
     ids = list(_BALANCE_FIELDS)
     ids += [f"cost:{pid}" for pid in _COST_FIELDS]
-    ids += [f"qwen:{m}" for m in _qwen_model_keys()]
 
     items = []
     for field_id in ids:
@@ -576,7 +574,7 @@ def _money_block(csrf: str) -> str:
         if not info:
             continue
         # Разметку Telegram из значения убираем — здесь она не к месту.
-        now = plain(_value_str(info["key"], info["kind"], info["absent"]))
+        now = plain(_value_str(info["key"], info["absent"]))
         editable = _BALANCE_FIELDS.get(field_id, {}).get("btn", True)
         if editable:
             control = _sysform(
@@ -592,7 +590,7 @@ def _money_block(csrf: str) -> str:
             hint = (f'сверяется с платформой автоматически · {note}'
                     if note else 'сверяется с платформой автоматически')
         items.append((info["title"].title(), hint, control))
-    return "<h2>💰 Счета и квоты</h2>" + _rows(items)
+    return "<h2>💰 Счета</h2>" + _rows(items)
 
 
 def page_system(application, csrf: str = "", confirm: str = "",

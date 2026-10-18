@@ -48,7 +48,7 @@ def session() -> requests.Session:
     if s is None:
         s = requests.Session()
         # pool_maxsize с запасом: бот ходит к нескольким хостам (Google,
-        # Alibaba, DeepSeek, Xiaomi, api.telegram.org, wtmobile.com).
+        # DeepSeek, Xiaomi, api.telegram.org, wtmobile.com).
         adapter = HTTPAdapter(pool_connections=8, pool_maxsize=8, max_retries=0)
         s.mount("https://", adapter)
         s.mount("http://", adapter)

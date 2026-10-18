@@ -11,7 +11,7 @@
 #  Этот файл отвечает на второй вопрос. Он берёт функции, где ошибка ДОРОГА и
 #  НЕЗАМЕТНА, и сверяет их ответы с ожидаемыми:
 #
-#    • ДЕНЬГИ — стоимость запросов к четырём провайдерам. Ошибка всплывёт
+#    • ДЕНЬГИ — стоимость запросов к трём провайдерам. Ошибка всплывёт
 #      суточным отчётом на следующий день, а до тех пор счёт будет врать тихо.
 #    • ПОМЕТКА МУТА — разбор [МУТ:секунды] из ответа модели. Ошибка либо
 #      наказывает невиновного, либо оставляет пометку висеть в чате.
@@ -71,8 +71,8 @@ def check_money():
     выдумка: поле приходит от провайдера, и если однажды оно окажется больше
     prompt_tokens, наивный расчёт уйдёт в МИНУС и тихо уменьшит суточный счёт.
     """
-    from config import QWEN_PRICES, DEEPSEEK_PRICES, XIAOMI_PRICES, IMAGE_PRICES
-    from services.gemini import (_qwen_cost, _deepseek_cost, _xiaomi_cost, _image_cost,
+    from config import DEEPSEEK_PRICES, XIAOMI_PRICES, IMAGE_PRICES
+    from services.gemini import (_deepseek_cost, _xiaomi_cost, _image_cost,
                                  _deepseek_peak_now)
 
     problems = []
@@ -84,37 +84,6 @@ def check_money():
         if not _same_money(got, want):
             problems.append(f"{title}: ожидалось ${want:.8f}, получилось "
                             f"${got if got is not None else 0:.8f}")
-
-    # ── Qwen: вход частично из кэша ──
-    model = "qwen3.8-max-0902"
-    p = QWEN_PRICES[model]
-    usage = {"prompt_tokens": 1000, "completion_tokens": 500,
-             "prompt_tokens_details": {"cached_tokens": 400}}
-    want = (400 * p["cache_hit"] + 600 * p["cache_miss"] + 500 * p["output"]) / 1_000_000
-    expect("Qwen, вход частично из кэша", _qwen_cost(model, usage), want)
-
-    # ── Qwen: кэш-поля нет → весь вход по ПОЛНОЙ цене (не занижаем расход) ──
-    usage = {"prompt_tokens": 1000, "completion_tokens": 500}
-    want = (1000 * p["cache_miss"] + 500 * p["output"]) / 1_000_000
-    expect("Qwen, кэш-поля нет", _qwen_cost(model, usage), want)
-
-    # ── Qwen: кэша БОЛЬШЕ, чем всего входа (кривой ответ API) ──
-    # Ожидание: лишнее обрезается, в минус не уходим.
-    usage = {"prompt_tokens": 100, "completion_tokens": 0,
-             "prompt_tokens_details": {"cached_tokens": 900}}
-    want = (100 * p["cache_hit"]) / 1_000_000
-    got = _qwen_cost(model, usage)
-    expect("Qwen, кэша больше чем входа", got, want)
-    done += 1
-    if got is not None and got < 0:
-        problems.append("Qwen: стоимость получилась ОТРИЦАТЕЛЬНОЙ — "
-                        "такой запрос уменьшит суточный счёт")
-
-    # ── Неизвестная модель → None, а не ноль и не падение ──
-    done += 1
-    if _qwen_cost("такой-модели-нет", {"prompt_tokens": 10}) is not None:
-        problems.append("Qwen: у неизвестной модели должна быть цена None, "
-                        "иначе расход посчитается как ноль и незаметно потеряется")
 
     # ── DeepSeek: пик и вне пика — РАЗНЫЕ суммы, пик дороже ──
     model = "deepseek-flash"
@@ -192,6 +161,25 @@ def check_money():
     want = (800 * p["cache_miss"] + 300 * p["output"]) / 1_000_000
     expect("Xiaomi, кэш-поля нет", _xiaomi_cost(model, usage), want)
 
+    # ── Xiaomi: кэша БОЛЬШЕ, чем всего входа (кривой ответ API) ──
+    # Ожидание: лишнее обрезается, в минус не уходим. (До 18.10.2026 этот
+    # случай гонялся на Qwen — формула у Xiaomi та же.)
+    usage = {"prompt_tokens": 100, "completion_tokens": 0,
+             "prompt_tokens_details": {"cached_tokens": 900}}
+    want = (100 * p["cache_hit"]) / 1_000_000
+    got = _xiaomi_cost(model, usage)
+    expect("Xiaomi, кэша больше чем входа", got, want)
+    done += 1
+    if got is not None and got < 0:
+        problems.append("Xiaomi: стоимость получилась ОТРИЦАТЕЛЬНОЙ — "
+                        "такой запрос уменьшит суточный счёт")
+
+    # ── Неизвестная модель → None, а не ноль и не падение ──
+    done += 1
+    if _xiaomi_cost("такой-модели-нет", {"prompt_tokens": 10}) is not None:
+        problems.append("Xiaomi: у неизвестной модели должна быть цена None, "
+                        "иначе расход посчитается как ноль и незаметно потеряется")
+
     # ── Картинки: считаются по МОДАЛЬНОСТЯМ, картинка дороже текста ──
     model = "gemini-3.1-flash-image"
     p = IMAGE_PRICES[model]
@@ -209,9 +197,9 @@ def check_money():
 
     # ── Нули не должны падать: на бесплатных вариантах приходят именно они ──
     done += 1
-    zero = _qwen_cost("qwen3.8-max-0902", {"prompt_tokens": 0, "completion_tokens": 0})
+    zero = _xiaomi_cost("mimo-v2.6-flash", {"prompt_tokens": 0, "completion_tokens": 0})
     if zero != 0.0:
-        problems.append(f"Qwen: пустой запрос должен стоить ровно 0, вышло {zero}")
+        problems.append(f"Xiaomi: пустой запрос должен стоить ровно 0, вышло {zero}")
 
     # ── СВЕРКА ОСТАТКА С ПЛАТФОРМОЙ (14.09.2026) ──────────────────────
     #
@@ -276,35 +264,36 @@ def check_money():
     finally:
         _bal._providers, _hist.sync_provider_balance = saved_providers, saved_sync
 
-    return problems, (f"{done} проверок: Qwen, DeepSeek, Xiaomi, картинки, "
+    return problems, (f"{done} проверок: DeepSeek, Xiaomi, картинки, "
                       f"сверка остатка с платформой")
 
 
-def check_qwen_quota():
+def check_stream_break():
     """
-    Квота Qwen: оборванный ответ списывается ОЦЕНОЧНО, срок квоты виден,
-    переход остатка через черту приносит владельцу ОДНО письмо (19.09.2026).
+    Поток DeepSeek и Xiaomi: оборванный ответ — это ОТКАЗ модели, а не ответ
+    (с 18.10.2026 отдельная группа; до этого те же проверки жили в группе
+    «квота Qwen» рядом с квотой удалённого провайдера).
 
-    ⚠️ РАДИ ЧЕГО. Обычный расход бот берёт из отчёта провайдера и тот точен до
-    токена, но при обрыве потока отчёта нет вовсе, а Alibaba токены уже вычла.
-    Сверка с консолью 18.09.2026: остаток в панели был завышен на 92 тысячи
-    токенов у qwen3.7-plus и на 81 тысячу у qwen3.8-max — ровно там, где в логе
-    были обрывы. Ошибка тихая: бот работает, счётчик просто врёт всё сильнее.
+    ⚠️ ЧТО СТОРОЖИТСЯ. Отчёт о токенах (usage) провайдер шлёт последним
+    куском каждого нормального ответа. Нет его — связь оборвали посреди
+    ответа: 04.10.2026 модель прислала 8 секунд мыслей и замолчала, а бот
+    отдал человеку одни свёрнутые «Мысли» без ответа. Отсюда три правила:
+      • поток провис дольше потолка GEMINI_STREAM_DEADLINE — таймаут, и
+        цепочка подстраховки сразу идёт к запасной;
+      • поток кончился без отчёта — отказ (НЕ таймаут: та же модель получает
+        вторую попытку), и в причине видно, что провайдер прислал напоследок;
+      • обычный ответ с отчётом принимается как есть.
 
     ⚠️ ГОНЯЕТСЯ НАСТОЯЩИЙ ПОТОК `_openai_stream_request` на поддельных часах и
-    поддельной сети: проверять `_charge_broken_stream` отдельно значило бы не
-    заметить, что её забыли позвать из обрыва, — а это и есть та поломка.
-
-    ⚠️ ТРИ ГРАНИЦЫ, без которых оценка вредит: не списывать дважды (отчёт уже
-    пришёл), не трогать чужих провайдеров (у DeepSeek свой путь — сверка счёта),
-    не списывать пустоту.
+    поддельной сети, а последний случай — через ВСЮ очередь
+    `_gemini_chat_request`: проверять поток отдельно значило бы не заметить,
+    что очередь перестала давать модели вторую попытку.
     """
     import json as _json
     import requests
     import config as c
     from services import gemini as g
     from database import history as hist
-    from handlers.admin.panel_balance import _split_quota_input, _quota_until, _build_balance_panel
 
     problems = []
     done = 0
@@ -315,12 +304,13 @@ def check_qwen_quota():
         if not ok:
             problems.append(title)
 
-    QWEN = next((m for m, meta in c.AVAILABLE_MODELS.items()
-                 if meta.get("provider") == "qwen"), None)
-    OTHER = next((m for m, meta in c.AVAILABLE_MODELS.items()
-                  if meta.get("provider") == "deepseek"), None)
-    if not QWEN or not OTHER:
-        return ["в реестре не нашлось модели Qwen или DeepSeek — проверять нечего"], "пропущено"
+    def model_of(provider):
+        return next((m for m, meta in c.AVAILABLE_MODELS.items()
+                     if meta.get("provider") == provider), None)
+
+    DEEPSEEK, XIAOMI = model_of("deepseek"), model_of("xiaomi")
+    if not DEEPSEEK or not XIAOMI:
+        return ["в реестре не нашлось модели DeepSeek или Xiaomi — проверять нечего"], "пропущено"
 
     class Clock:
         def __init__(self): self.t = 1000.0
@@ -330,40 +320,51 @@ def check_qwen_quota():
         def time(self): return 1700000000.0
 
     clock = Clock()
-    SENT = "запрос на сорок знаков ровно, без хвостов!"      # 41 знак
-    THINK = "мысли модели" * 10                              # 120 знаков
-    ANSWER = "кусок ответа" * 10                             # 120 знаков
+    SENT = "запрос на сорок знаков ровно, без хвостов!"
+    THINK = "мысли модели" * 10
+    ANSWER = "кусок ответа" * 10
 
     def sse(obj):
         return ("data: " + _json.dumps(obj, ensure_ascii=False)).encode()
 
-    class FakeResponse:
+    class HangingResponse:
         """Поток, который шлёт куски и «зависает»: часы уезжают за потолок."""
-        def __init__(self, with_usage=False):
-            self.with_usage = with_usage
         def raise_for_status(self): pass
         def close(self): pass
         def iter_lines(self):
             yield sse({"choices": [{"delta": {"reasoning_content": THINK}}]})
             yield sse({"choices": [{"delta": {"content": ANSWER}}]})
-            if self.with_usage:
-                yield sse({"usage": {"prompt_tokens": 10, "completion_tokens": 20,
-                                     "total_tokens": 30}, "choices": []})
             clock.t += c.GEMINI_STREAM_DEADLINE + 1      # провисли дольше потолка
             yield sse({"choices": [{"delta": {"content": "хвост"}}]})
 
-    saved_time, saved_http = g.time, g._http
+    class ListResponse:
+        """Поток из готовых строк, без зависания: часы не трогает."""
+        def __init__(self, lines): self.lines = lines
+        def raise_for_status(self): pass
+        def close(self): pass
+        def iter_lines(self): yield from self.lines
+
+    cut = [sse({"choices": [{"delta": {"reasoning_content": THINK}}]}),
+           sse({"error": {"code": "data_inspection_failed"}})]
+    full = [sse({"choices": [{"delta": {"reasoning_content": THINK}}]}),
+            sse({"choices": [{"delta": {"content": ANSWER}, "finish_reason": "stop"}]}),
+            sse({"usage": {"prompt_tokens": 10, "completion_tokens": 20,
+                           "total_tokens": 30}, "choices": []}),
+            b"data: [DONE]"]
+
+    def net(make):
+        """Подставная сеть: каждый POST отдаёт make()."""
+        return lambda: type("H", (), {"post": lambda self, *a, **kw: make()})()
+
+    saved_time, saved_http, saved_notify = g.time, g._http, g._notify_admins
+    saved_active = hist.get_setting("active_model", "")
     g.time = clock
+    # Отказ первой попытки будит письмо владельцу — настоящее ушло бы в Telegram.
+    g._notify_admins = lambda text: None
     try:
-        for model, with_usage, want_charge, title in (
-            (QWEN, False, True, "Qwen, поток оборван"),
-            (QWEN, True, False, "Qwen, отчёт о токенах уже пришёл"),
-            (OTHER, False, False, "DeepSeek, поток оборван"),
-        ):
-            key = f"qwen_tokens_{QWEN}"
-            hist.set_setting(key, "100000")
-            g._http = lambda wu=with_usage: type("H", (), {
-                "post": lambda self, *a, **kw: FakeResponse(wu)})()
+        # ── Провис дольше потолка — таймаут ──
+        for model in (DEEPSEEK, XIAOMI):
+            g._http = net(HangingResponse)
             clock.t = 1000.0
             try:
                 g._openai_stream_request(model, [{"role": "user", "content": SENT}],
@@ -373,80 +374,16 @@ def check_qwen_quota():
                 broke = True
             except Exception as e:
                 broke = False
-                problems.append(f"{title}: вместо таймаута вылетело {type(e).__name__}: {e}")
-            expect(f"{title}: обрыв не превратился в таймаут — цепочка подстраховки не сработает",
-                   broke)
+                problems.append(f"{model}, поток провис: вместо таймаута вылетело "
+                                f"{type(e).__name__}: {e}")
+            expect(f"{model}, поток провис: обрыв не превратился в таймаут — "
+                   f"цепочка подстраховки не сработает", broke)
 
-            left = int(hist.get_setting(key, "0") or 0)
-            spent = 100000 - left
-            want = int((len(SENT) + len(THINK) + len(ANSWER)) / c.QWEN_CHARS_PER_TOKEN) if want_charge else 0
-            expect(f"{title}: из квоты списано {spent} токенов, а ждали {want}", spent == want)
-
-        # ⚠️ ЧУЖОЙ ПРОВАЙДЕР — ПРОВЕРЯЕМ ВОЗВРАТ, А НЕ ОСТАТОК QWEN. Первая
-        # версия этой проверки смотрела только на ключ Qwen и на снятой защите
-        # НЕ КРАСНЕЛА: списание уходило в несуществующий ключ
-        # qwen_tokens_deepseek-… и молча ничего не меняло.
-        expect("DeepSeek: оценка вообще не должна считаться — у него сверка счёта",
-               g._charge_broken_stream(OTHER, [{"role": "user", "content": SENT}],
-                                       [THINK], [ANSWER]) == 0)
-        expect("DeepSeek: в настройках завёлся лишний ключ квоты",
-               hist.get_setting(f"qwen_tokens_{OTHER}", "") in ("", None))
-
-        # Пустой обрыв (не пришло ничего, кроме запроса) всё равно списывает
-        # отправленное: провайдер контекст уже прочитал.
-        hist.set_setting(f"qwen_tokens_{QWEN}", "100000")
-        spent = g._charge_broken_stream(QWEN, [{"role": "user", "content": SENT}], [], [])
-        expect(f"пустой обрыв: списано {spent}, а ждали {int(len(SENT) / c.QWEN_CHARS_PER_TOKEN)}",
-               spent == int(len(SENT) / c.QWEN_CHARS_PER_TOKEN))
-        expect("обрыв без текста вообще: списывать нечего",
-               g._charge_broken_stream(QWEN, [], [], []) == 0)
-
-        # ⚠️ ФОТО — НЕ ТЕКСТ (05.10.2026). Картинка едет строкой base64, и
-        # прежняя оценка мерила её знаками: 04.10 одно фото списало 66 тысяч
-        # токенов вместо ~15. Знаки картинки не считаются, за каждую — твёрдая
-        # цена config.QWEN_IMAGE_TOKENS. Строка base64 нарочно длинная: вернись
-        # счёт знаками — разница выйдет в десятки тысяч, а не в единицы.
-        PIC = {"type": "image_url",
-               "image_url": {"url": "data:image/jpeg;base64," + "A" * 150_000}}
-        for pics, title in ((1, "обрыв с фото"), (2, "обрыв с альбомом из двух фото")):
-            hist.set_setting(f"qwen_tokens_{QWEN}", "100000")
-            content = [{"type": "text", "text": SENT}] + [PIC] * pics
-            spent = g._charge_broken_stream(QWEN, [{"role": "user", "content": content}],
-                                            [], [ANSWER])
-            want = int((len(SENT) + len(ANSWER)) / c.QWEN_CHARS_PER_TOKEN) + pics * c.QWEN_IMAGE_TOKENS
-            why = ("картинку посчитали знаками?" if spent > want
-                   else "картинку не посчитали вовсе?")
-            expect(f"{title}: списано {spent}, а ждали {want} — {why}", spent == want)
-            left = int(hist.get_setting(f"qwen_tokens_{QWEN}", "0") or 0)
-            expect(f"{title}: функция вернула {spent}, а из квоты ушло {100000 - left}",
-                   100000 - left == spent)
-
-        # ⚠️ ПОТОК КОНЧИЛСЯ БЕЗ ОТЧЁТА О ТОКЕНАХ — ЭТО ОБРЫВ (05.10.2026).
-        # 04.10 Qwen прислал мысли и замолчал без ошибки и без отчёта, а бот
-        # отдал человеку одни свёрнутые «Мысли». Поток здесь доходит до конца
-        # БЕЗ потолка ожидания — ловится именно отсутствие отчёта. Ошибка
-        # провайдера в потоке (кусок без choices) обязана попасть в причину.
-        cut = [sse({"choices": [{"delta": {"reasoning_content": THINK}}]}),
-               sse({"error": {"code": "data_inspection_failed"}})]
-        full = [sse({"choices": [{"delta": {"reasoning_content": THINK}}]}),
-                sse({"choices": [{"delta": {"content": ANSWER}, "finish_reason": "stop"}]}),
-                sse({"usage": {"prompt_tokens": 10, "completion_tokens": 20,
-                               "total_tokens": 30}, "choices": []}),
-                b"data: [DONE]"]
-
-        class ListResponse:
-            """Поток из готовых строк, без зависания: часы не трогает."""
-            def __init__(self, lines): self.lines = lines
-            def raise_for_status(self): pass
-            def close(self): pass
-            def iter_lines(self): yield from self.lines
-
-        for model, lines, title in ((QWEN, cut, "Qwen, поток без отчёта"),
-                                    (OTHER, cut, "DeepSeek, поток без отчёта"),
-                                    (QWEN, full, "Qwen, обычный ответ с отчётом")):
-            hist.set_setting(f"qwen_tokens_{QWEN}", "100000")
-            g._http = lambda ls=lines: type("H", (), {
-                "post": lambda self, *a, **kw: ListResponse(ls)})()
+        # ── Поток кончился без отчёта — отказ; с отчётом — ответ ──
+        for model, lines, title in ((DEEPSEEK, cut, "DeepSeek, поток без отчёта"),
+                                    (XIAOMI, cut, "Xiaomi, поток без отчёта"),
+                                    (DEEPSEEK, full, "DeepSeek, обычный ответ с отчётом")):
+            g._http = net(lambda ls=lines: ListResponse(ls))
             clock.t = 1000.0
             try:
                 got = g._openai_stream_request(model, [{"role": "user", "content": SENT}],
@@ -454,7 +391,6 @@ def check_qwen_quota():
                 err = None
             except Exception as e:
                 got, err = None, e
-            spent = 100000 - int(hist.get_setting(f"qwen_tokens_{QWEN}", "0") or 0)
             if lines is cut:
                 expect(f"{title}: ответ из одних мыслей принят как готовый — человек "
                        f"получит «Мысли» без ответа", err is not None)
@@ -462,183 +398,34 @@ def check_qwen_quota():
                        not isinstance(err, requests.exceptions.Timeout))
                 expect(f"{title}: в причине отказа не видно, что прислал провайдер: {err}",
                        err is not None and "data_inspection_failed" in str(err))
-                want = int((len(SENT) + len(THINK)) / c.QWEN_CHARS_PER_TOKEN) if model == QWEN else 0
-                expect(f"{title}: из квоты списано {spent}, а ждали {want}", spent == want)
             else:
                 expect(f"{title}: нормальный ответ принят за обрыв: {err}",
                        err is None and got is not None
                        and ANSWER in got["choices"][0]["message"]["content"])
-                expect(f"{title}: поток сам списал {spent} — расход посчитается дважды",
-                       spent == 0)
-    finally:
-        g.time, g._http = saved_time, saved_http
 
-    # ── Срок квоты: разбор ввода и показ на экране ──
-    for raw, want_num, want_date in (
-        ("66614 19.10.2026", "66614", "19.10.2026"),
-        ("66614 19.10.2026 ", "66614", "19.10.2026"),
-        ("66614 9.1.2027", "66614", "09.01.2027"),
-        ("66614", "66614", ""),
-        ("66614 завтра", "66614 завтра", ""),
-        ("66614 19.10.26", "66614 19.10.26", ""),
-    ):
-        got_num, got_date = _split_quota_input(raw)
-        expect(f"разбор «{raw}»: вышло число «{got_num}» и срок «{got_date}», "
-               f"а ждали «{want_num}» и «{want_date}»",
-               got_num.strip() == want_num.strip() and got_date == want_date)
-
-    hist.set_setting(f"qwen_quota_until_{QWEN}", "19.10.2026")
-    hist.set_setting(f"qwen_tokens_{QWEN}", "66614")
-    expect("срок квоты не попал в приписку", "19.10.2026" in _quota_until(QWEN))
-    text, _ = _build_balance_panel()
-    expect("на экране «Счета и квоты» не видно остатка квоты", "66 614" in text)
-    expect("на экране «Счета и квоты» не видно срока квоты", "квота до 19.10.2026" in text)
-    hist.delete_setting(f"qwen_quota_until_{QWEN}")
-    expect("срок убрали, а приписка осталась", _quota_until(QWEN) == "")
-
-    # ── Письма владельцу о квоте (19.09.2026) ──
-    # ⚠️ ПОВОД — ПЕРЕХОД ЧЕРЕЗ ЧЕРТУ, а не «остаток ниже черты»: иначе письмо
-    # уходило бы на каждый ответ в минусе. Поэтому главное здесь — не «письмо
-    # есть», а «письмо ОДНО»: второй ответ за чертой обязан промолчать.
-    # ⚠️ Письмо ловится подменой _notify_admins: настоящее ушло бы владельцу
-    # в Telegram, а selftest гоняется на сервере при каждой выкатке.
-    WARN = c.QWEN_QUOTA_WARN_TOKENS
-    key = f"qwen_tokens_{QWEN}"
-    others = [m for m, meta in c.AVAILABLE_MODELS.items()
-              if meta.get("provider") == "qwen" and m != QWEN]
-
-    def num(n):
-        return f"{n:,}".replace(",", " ")
-
-    letters = []
-    saved_notify, saved_request = g._notify_admins, g._qwen_chat_request
-    saved_active = hist.get_setting("active_model", "")
-    g._notify_admins = letters.append
-    try:
-        def spend(before, tokens):
-            """Ставит остаток (None — квоты нет), списывает и отдаёт письма."""
-            if before is None:
-                hist.delete_setting(key)
-            else:
-                hist.set_setting(key, str(before))
-            letters.clear()
-            g._spend_qwen_quota(QWEN, tokens)
-            return list(letters)
-
-        # Пара «было → стало» — на ней держится всё остальное.
-        hist.set_setting(key, "100")
-        got = hist.spend_qwen_tokens(QWEN, 30)
-        expect(f"списание вернуло {got}, а ждали пару (100, 70)", got == (100, 70))
-        hist.delete_setting(key)
-        got = hist.spend_qwen_tokens(QWEN, 30)
-        expect(f"квоты нет, а списание вернуло {got} вместо пустоты", got is None)
-
-        hist.set_setting("active_model", OTHER)
-        got = spend(5000, 8000)
-        expect(f"квота перешла ноль: писем {len(got)}, а ждали одно", len(got) == 1)
-        text = got[0] if got else ""
-        expect("письмо «кончилась»: нет заголовка", "Кончилась бесплатная квота" in text)
-        expect("письмо «кончилась»: нет имени модели",
-               c.AVAILABLE_MODELS[QWEN]["name"] in text)
-        expect("письмо «кончилась»: нет остатка -3 000", "Остаток по счёту бота: -3 000" in text)
-        price = c.QWEN_PRICES.get(QWEN)
-        if price:
-            expect("письмо «кончилась»: нет цен из прайса",
-                   f"${price['cache_miss']:g} за миллион входа" in text
-                   and f"${price['output']:g} за миллион ответа" in text)
-        expect("письмо «кончилась»: модель не активная, а написано «активная»",
-               "активная модель" not in text)
-        expect("письмо «кончилась»: в списке других моделей не все Qwen",
-               all(f"• {m} — " in text for m in others))
-        expect("письмо «кончилась»: модель попала в список «других»",
-               f"• {QWEN} — " not in text)
-
-        got = spend(-3000, 8000)
-        expect(f"квота уже в минусе: ушло писем {len(got)}, а ждали ни одного", not got)
-
-        got = spend(WARN + 1000, 5000)
-        expect(f"остаток опустился ниже порога: писем {len(got)}, а ждали одно", len(got) == 1)
-        text = got[0] if got else ""
-        expect("письмо «на исходе»: нет заголовка", "на исходе" in text)
-        left = WARN - 4000
-        expect(f"письмо «на исходе»: нет остатка {num(left)}", f"Осталось {num(left)}" in text)
-        n = left // 5000
-        expect(f"письмо «на исходе»: нет «примерно на {n} ответов»",
-               f"примерно на {n} " in text)
-
-        got = spend(WARN - 4000, 5000)
-        expect(f"ниже порога, но выше нуля: писем {len(got)}, а ждали ни одного", not got)
-
-        # Границы: ровно дошли до черты — перешли; уже стояли на черте — нет.
-        got = spend(WARN + 1, 1)
-        expect(f"остаток ровно дошёл до порога: писем {len(got)}, а ждали одно", len(got) == 1)
-        got = spend(WARN, 1)
-        expect(f"остаток уже стоял на пороге: писем {len(got)}, а ждали ни одного", not got)
-        got = spend(100, 100)
-        expect(f"остаток ровно дошёл до нуля: писем {len(got)}, а ждали одно «кончилась»",
-               len(got) == 1 and "Кончилась" in got[0])
-        got = spend(WARN + 10, WARN + 20)
-        expect(f"проскочили порог и ноль разом: писем {len(got)}, а ждали одно «кончилась»",
-               len(got) == 1 and "Кончилась" in got[0])
-        got = spend(None, 8000)
-        expect(f"квота не задана: писем {len(got)}, а ждали ни одного", not got)
-
-        # Оборванный ответ ведёт через ту же дверь: оценка тоже будит письмо.
-        hist.set_setting(key, "10")
-        letters.clear()
-        g._charge_broken_stream(QWEN, [{"role": "user", "content": SENT}], [THINK], [ANSWER])
-        expect(f"оборванный ответ увёл квоту в минус: писем {len(letters)}, а ждали одно",
-               len(letters) == 1)
-
-        # Обычный ответ — через НАСТОЯЩУЮ очередь _gemini_chat_request:
-        # проверяй мы одну _spend_qwen_quota, никто не заметил бы, что главный
-        # путь списывает мимо неё и молчит.
-        hist.set_setting("active_model", QWEN)
-        hist.set_setting(key, "5000")
-        letters.clear()
-        g._qwen_chat_request = lambda *a, **kw: {
-            "choices": [{"message": {"content": "ответ"}}],
-            "usage": {"prompt_tokens": 7000, "completion_tokens": 1000, "total_tokens": 8000}}
-        data, used = g._gemini_chat_request([{"role": "user", "content": "вопрос"}])
-        expect(f"обычный ответ: ответила {used}, а ждали {QWEN}", data is not None and used == QWEN)
-        now_left = hist.get_setting(key, "")
-        expect(f"обычный ответ: остаток {now_left}, а ждали -3000", str(now_left) == "-3000")
-        expect(f"обычный ответ увёл квоту в минус: писем {len(letters)}, а ждали одно",
-               len(letters) == 1)
-        expect("письмо об активной модели: нет строки «Это активная модель»",
-               bool(letters) and "Это активная модель" in letters[0])
-
-        # Обрыв без отчёта — через ВСЮ очередь (05.10.2026): первая попытка
-        # Qwen кончается одними мыслями, вторая отвечает полностью. Человек
-        # обязан получить ответ второй, а не «Мысли» первой.
-        g._qwen_chat_request = saved_request
+        # ── Обрыв без отчёта — через ВСЮ очередь (05.10.2026) ──
+        # Первая попытка активной кончается одними мыслями, вторая отвечает
+        # полностью. Человек обязан получить ответ второй, а не «Мысли» первой.
+        hist.set_setting("active_model", DEEPSEEK)
         replies = [cut, full]
-        g._http = lambda: type("H", (), {
-            "post": lambda self, *a, **kw: ListResponse(replies.pop(0))})()
-        g.time = clock
-        hist.set_setting(key, "100000")
-        try:
-            data, used = g._gemini_chat_request([{"role": "user", "content": "вопрос"}])
-        finally:
-            g.time, g._http = saved_time, saved_http
+        g._http = net(lambda: ListResponse(replies.pop(0)))
+        clock.t = 1000.0
+        data, used = g._gemini_chat_request([{"role": "user", "content": "вопрос"}])
         text_got = (data or {}).get("choices", [{}])[0].get("message", {}).get("content", "")
         expect(f"обрыв без отчёта в очереди: человек получил «{text_got[:60]}» вместо ответа "
-               f"второй попытки", ANSWER in text_got and used == QWEN)
+               f"второй попытки", ANSWER in text_got and used == DEEPSEEK)
         expect(f"обрыв без отчёта в очереди: попыток ушло {2 - len(replies)}, а ждали две",
                not replies)
     finally:
-        g._notify_admins, g._qwen_chat_request = saved_notify, saved_request
+        g.time, g._http, g._notify_admins = saved_time, saved_http, saved_notify
         if saved_active:
             hist.set_setting("active_model", saved_active)
         else:
             hist.delete_setting("active_model")
-        hist.delete_setting(key)
 
-    return problems, (f"{done} проверок: оценка на обрыве (фото — твёрдой ценой, не знаками), "
-                      f"поток без отчёта о токенах — обрыв, а не ответ из одних мыслей, "
-                      f"отчёт не списывается дважды, "
-                      f"чужие провайдеры не задеты, разбор срока и показ на экране, "
-                      f"письма «на исходе» и «кончилась» — по одному на переход через черту")
+    return problems, (f"{done} проверок: провис дольше потолка — таймаут, поток без "
+                      f"отчёта о токенах — отказ с причиной, а не ответ из одних мыслей, "
+                      f"обычный ответ принимается; в очереди обрыв ведёт ко второй попытке")
 
 
 # ───────────────────────────────────────────────
@@ -965,8 +752,8 @@ def check_permissions():
 #  ⚠️ ЗАЧЕМ ОТДЕЛЬНАЯ ПРОВЕРКА, если стоимость уже проверяется выше.
 #  Потому что та проверка ловит ошибку в РАСЧЁТЕ, но слепа к самим ЦЕНАМ:
 #  она берёт их из config — значит, меняются обе стороны сразу и всё
-#  «сходится». Убедился живым опытом 28.08.2026: нарочно занизил цену Qwen
-#  вдвое, и 54 проверки бодро позеленели. Такая правка — опечатка в прайсе,
+#  «сходится». Убедился живым опытом 28.08.2026: нарочно занизил цену одной
+#  модели вдвое, и 54 проверки бодро позеленели. Такая правка — опечатка в прайсе,
 #  случайный откат, чужая рука — прошла бы насквозь, а суточный счёт тихо
 #  врал бы вдвое.
 #
@@ -976,10 +763,6 @@ def check_permissions():
 #  Списывать сюда значения из config автоматически НЕЛЬЗЯ — это вернёт ровно
 #  ту слепоту, ради устранения которой список и заведён.
 _PRICES_EXPECTED = {
-    "QWEN_PRICES": {
-        "qwen3.8-flash": {"cache_hit": 0.016, "cache_miss": 0.15, "output": 0.47},
-        "qwen3.8-max-0902": {"cache_hit": 0.25, "cache_miss": 2.00, "output": 6.00},
-    },
     "XIAOMI_PRICES": {
         "mimo-v2.6-flash": {"cache_hit": 0.0028, "cache_miss": 0.14,  "output": 0.28},
         "mimo-v2.6-pro":   {"cache_hit": 0.0036, "cache_miss": 0.435, "output": 0.87},
@@ -2938,12 +2721,11 @@ def check_report_render():
                 break
     calls["выдуманная-модель-из-прошлого"] = 4
 
-    totals = {"calls": calls, "burned": {}, "qwen_reset": ()}
+    totals = {"calls": calls}
     for pid, meta in PROVIDERS.items():
         if meta["cost_key"]:
             totals[f"{pid}_cost"] = 0.5
     current = {f"{pid}_balance": 9.0 for pid in PROVIDERS}
-    current["qwen_tokens"] = {}
 
     text = rep.render("📊 <b>РАСХОД</b>", "за сутки", "", totals, current)
 
@@ -2958,18 +2740,13 @@ def check_report_render():
             expect(f"у провайдера «{pid}» пропал остаток на счету",
                    "Остаток на счету" in text)
 
-    # ── 2. Особенности реестра доезжают до текста ──
-    approx = [pid for pid, m in PROVIDERS.items() if m["report_approx"]]
-    expect(f"расход {approx} расчётный по прайсу, но знака «≈» в отчёте нет — "
-           f"цифра читается как точная", not approx or "≈$" in text)
-
-    # ── 3. Модель вне реестра не теряется ──
+    # ── 2. Модель вне реестра не теряется ──
     expect("вызовы модели, которой нет в реестре, пропали из отчёта — "
            "деньги за них никуда не попадут", "Прочие вызовы" in text)
     expect("модель вне реестра не названа по имени",
            "выдуманная-модель-из-прошлого" in text)
 
-    # ── 4. Пометка «счётчик правили вручную» ──
+    # ── 3. Пометка «счётчик правили вручную» ──
     paid = next((pid for pid, m in PROVIDERS.items() if m["cost_key"]), None)
     if paid:
         manual = dict(totals)
@@ -2980,8 +2757,8 @@ def check_report_render():
         expect("пометка «правили вручную» стоит там, где счётчик не правили",
                "правили вручную" not in text)
 
-    # ── 5. Пустой период не притворяется работой ──
-    zero = rep.render("📊", "за сутки", "", {"calls": {}, "burned": {}}, current)
+    # ── 4. Пустой период не притворяется работой ──
+    zero = rep.render("📊", "за сутки", "", {"calls": {}}, current)
     expect("на пустом периоде отчёт не собрался вовсе", bool(zero.strip()))
     expect("на пустом периоде появился блок «Прочие вызовы»",
            "Прочие вызовы" not in zero)
@@ -3642,7 +3419,7 @@ def check_daily_report():
     и тогда о перерасходе узнаешь по пустому счёту у провайдера.
 
     ⚠️ «Отложенное» — не выдумка: первого числа месяца бот обнуляет вызовы и
-    копилки Qwen и картинок, часть которых относится к ТЕКУЩИМ, ещё не
+    копилку картинок, часть которых относится к ТЕКУЩИМ, ещё не
     отчитанным суткам. Уничтожаемую часть откладывают в settings, и отчёт
     обязан её прибавить, иначе отчёт за 1-е число покажет только то, что
     накапало после обнуления.
@@ -3684,18 +3461,18 @@ def check_daily_report():
     from config import AVAILABLE_MODELS, AVAILABLE_IMAGE_MODELS
 
     some_gemini = next(m for m, v in AVAILABLE_MODELS.items() if v["provider"] == "gemini")
-    some_qwen = next(m for m, v in AVAILABLE_MODELS.items() if v["provider"] == "qwen")
+    some_deepseek = next(m for m, v in AVAILABLE_MODELS.items() if v["provider"] == "deepseek")
     some_image = next(iter(AVAILABLE_IMAGE_MODELS))
 
-    calls = {some_gemini: 7, some_qwen: 3, some_image: 2, "модель-которой-нет": 5}
+    calls = {some_gemini: 7, some_deepseek: 3, some_image: 2, "модель-которой-нет": 5}
     groups = dr._calls_by_group(calls)
 
     done += 1
     if dict(groups.get("gemini") or {}).get(some_gemini) != 7:
         problems.append(f"вызовы {some_gemini} не попали в блок Gemini")
     done += 1
-    if dict(groups.get("qwen") or {}).get(some_qwen) != 3:
-        problems.append(f"вызовы {some_qwen} не попали в блок Qwen")
+    if dict(groups.get("deepseek") or {}).get(some_deepseek) != 3:
+        problems.append(f"вызовы {some_deepseek} не попали в блок DeepSeek")
     done += 1
     if dict(groups.get("image") or {}).get(some_image) != 2:
         problems.append(f"вызовы {some_image} не попали в блок картинок")
@@ -3725,37 +3502,29 @@ def check_daily_report():
     try:
         dr._week_clear()
         dr.week_add_day("2026-08-25 21:00:00", "2026-08-26 21:00:00",
-                        {"calls": {some_qwen: 4}, "burned": {some_qwen: 1000}})
+                        {"calls": {some_deepseek: 4}, "deepseek_cost": 0.1})
         dr.week_add_day("2026-08-26 21:00:00", "2026-08-27 21:00:00",
-                        {"calls": {some_qwen: 6}, "burned": {some_qwen: 2000}})
+                        {"calls": {some_deepseek: 6}, "deepseek_cost": 0.2,
+                         "deepseek_manual": True})
         acc = dr._week_read()
 
         done += 1
         if int(acc.get("days") or 0) != 2:
             problems.append(f"в недельной копилке {acc.get('days')} суток вместо 2")
         done += 1
-        if (acc.get("calls") or {}).get(some_qwen) != 10:
+        if (acc.get("calls") or {}).get(some_deepseek) != 10:
             problems.append(f"вызовы за неделю сложились неверно: "
-                            f"{(acc.get('calls') or {}).get(some_qwen)} вместо 10")
+                            f"{(acc.get('calls') or {}).get(some_deepseek)} вместо 10")
         done += 1
-        if (acc.get("burned") or {}).get(some_qwen) != 3000:
-            problems.append(f"сожжённые токены за неделю сложились неверно: "
-                            f"{(acc.get('burned') or {}).get(some_qwen)} вместо 3000")
-
-        # ⚠️ Сутки, в которые квоту ЗАВЕЛИ ЗАНОВО (остаток вырос, разница
-        # отрицательная), в сумму идти не должны — иначе недельная строка
-        # соврёт. Такие модели помечаются, и отчёт честно скажет «≥».
-        dr.week_add_day("2026-08-27 21:00:00", "2026-08-28 21:00:00",
-                        {"calls": {}, "burned": {some_qwen: -5000}})
-        acc = dr._week_read()
+        if not _same_money(acc.get("deepseek_cost"), 0.3):
+            problems.append(f"расход DeepSeek за неделю сложился неверно: "
+                            f"{acc.get('deepseek_cost')} вместо 0.3")
+        # ⚠️ Пометка «счётчик правили вручную» хоть в одних сутках — пометка
+        # на всю неделю: иначе недельная сумма выглядела бы измеренной.
         done += 1
-        if (acc.get("burned") or {}).get(some_qwen) != 3000:
-            problems.append("заведение новой квоты испортило недельную сумму "
-                            "сожжённых токенов")
-        done += 1
-        if some_qwen not in (acc.get("qwen_reset") or []):
-            problems.append("сутки с заведением квоты не помечены — "
-                            "недельный отчёт покажет точное число вместо «≥»")
+        if not acc.get("deepseek_manual"):
+            problems.append("ручная правка счётчика в одних сутках потерялась "
+                            "в недельной копилке")
     finally:
         dr._week_clear()
 
@@ -4313,7 +4082,7 @@ def check_web_pages():
 
     # ── обслуживание: все разделы на месте ──
     sys_html = pages.page_system(None, "подпись")
-    for title in ("Счета и квоты", "Отчёты", "Логи", "Обновления",
+    for title in ("💰 Счета", "Отчёты", "Логи", "Обновления",
                   "Дайджест недели", "Копия базы", "Опасное"):
         expect(f"на странице обслуживания нет раздела «{title}»",
                title in sys_html)
@@ -5069,11 +4838,11 @@ def check_web_wiring():
             continue
         done += 2
         if f"остаток на счету: {_meta['title']}".lower() not in money_html:
-            problems.append(f"остаток {_meta['title']} пропал со страницы «Счета и квоты» "
+            problems.append(f"остаток {_meta['title']} пропал со страницы «Счета» "
                             f"на сайте — правку убрать можно, показ нельзя")
         block = next((b for b in bot_blocks if _meta["title"] in b), "")
         if "Остаток на счету" not in block:
-            problems.append(f"остаток {_meta['title']} пропал с экрана «Счета и квоты» "
+            problems.append(f"остаток {_meta['title']} пропал с экрана «Счета» "
                             f"в боте — правку убрать можно, показ нельзя")
 
     return problems, (f"{done} проверок: порядок копий, "
@@ -6022,10 +5791,9 @@ def check_photo_route():
                 tried.append((json or {}).get("model"))
                 return _Resp()
 
-        saved = (g._qwen_chat_request, g._deepseek_chat_request,
+        saved = (g._deepseek_chat_request,
                  g._xiaomi_chat_request, g._http, g._notify_models_failed, g.time)
         try:
-            g._qwen_chat_request = _fake_provider
             g._deepseek_chat_request = _fake_provider
             g._xiaomi_chat_request = _fake_provider
             g._http = lambda: _Session()
@@ -6037,7 +5805,7 @@ def check_photo_route():
             hist.set_setting("active_model", active)
             g._gemini_chat_request(MSG, kind="проверка", has_image=has_image)
         finally:
-            (g._qwen_chat_request, g._deepseek_chat_request,
+            (g._deepseek_chat_request,
              g._xiaomi_chat_request, g._http, g._notify_models_failed, g.time) = saved
         # Активную пробуют дважды — в списке она встретится подряд, схлопываем.
         out = []
@@ -6051,27 +5819,22 @@ def check_photo_route():
                 if not cfg.AVAILABLE_MODELS.get(m, {}).get("vision", False)]
 
     # ⚠️ СЛЕПАЯ МОДЕЛЬ — ПОДСТАВНАЯ (03.10.2026). Настоящих слепых в наборе
-    # больше нет: последней была qwen3.7-max, удалённая вместе со всем
-    # поколением 3.7 (решение Максима). А путь для слепой в боте остался —
-    # вернётся такая модель, заработает сам, — и проверять его надо, пока он
-    # есть. Поэтому на время проверки в реестр вписывается запись Qwen без
-    # "vision", какой была 3.7 Max, а в finally убирается.
-    BLIND = "проверка-слепая-qwen"
+    # больше нет. А путь для слепой в боте остался — вернётся такая модель,
+    # заработает сам, — и проверять его надо, пока он есть. Поэтому на время
+    # проверки в реестр вписывается запись провайдера DeepSeek без "vision"
+    # (до 18.10.2026 — Qwen, удалённого из бота), а в finally убирается.
+    BLIND = "проверка-слепая-deepseek"
     saved_active = hist.get_setting("active_model", "")
-    cfg.AVAILABLE_MODELS[BLIND] = {"name": "Подставная слепая", "provider": "qwen",
+    cfg.AVAILABLE_MODELS[BLIND] = {"name": "Подставная слепая", "provider": "deepseek",
                                    "thinking": True, "vision": False}
     try:
         # ── 1. Активные ЗРЯЧИЕ не-Gemini: фото должна получить сама активная ──
         # ⚠️ Все перечислены поимённо НАМЕРЕННО. Каждая проверена живыми
-        # запросами на игровых скриншотах и включена по прямой просьбе
-        # Максима: Qwen 3.8 Max 04.09.2026 (переписала панель ТТХ и верно
-        # назвала флаг страны; снимок 0902 — так же, 29.09), deepseek-flash —
-        # 10.09.2026 (12 значений из 12 за 13 с, страну назвала сама). Вернёт
+        # запросами: deepseek-flash — 10.09.2026 на игровых скриншотах (12
+        # значений из 12 за 13 с, страну назвала сама), обе MiMo V2.6 —
+        # 28.09.2026 (цвета двух половин картинки названы верно). Вернёт
         # любая из них пометку «слепая» — эта строка обязана покраснеть.
-        # qwen3.8-flash добавлена 21.09.2026: две панели ТТХ переписаны без
-        # ошибок за 10 с, флаг Китая назван верно (флаг Омана — нет, но решение
-        # Максима «активная модель отвечает сама» от этого не меняется).
-        for seeing in ("qwen3.8-max-0902", "qwen3.8-flash", "deepseek-flash"):
+        for seeing in ("deepseek-flash", "mimo-v2.6-flash", "mimo-v2.6-pro"):
             chain = route(seeing, has_image=True)
             done += 3
             if not chain or chain[0] != seeing:
@@ -6119,17 +5882,17 @@ def check_photo_route():
             return {"choices": [{"message": {"content": "ответ"}}],
                     "usage": {"prompt_tokens": 1, "total_tokens": 2}}
 
-        saved2 = (g._qwen_chat_request, g._describe_image, g._http,
+        saved2 = (g._deepseek_chat_request, g._describe_image, g._http,
                   g.RAG_ENABLED, g._rag_block)
         try:
-            g._qwen_chat_request = _seeing_provider
+            g._deepseek_chat_request = _seeing_provider
             g._describe_image = lambda *a, **kw: shown
             g._http = lambda: type("S", (), {"post": staticmethod(lambda *a, **kw: _Resp2)})
             g.RAG_ENABLED = False
             hist.set_setting("active_model", BLIND)
             g.ask_gemini(1, 1, "что это?", image_base64="QQ")
         finally:
-            (g._qwen_chat_request, g._describe_image, g._http,
+            (g._deepseek_chat_request, g._describe_image, g._http,
              g.RAG_ENABLED, g._rag_block) = saved2
 
         sent = str(seen_photo.get("messages") or "")
@@ -6152,11 +5915,16 @@ def check_photo_route():
 
         # ── 4. Активная Gemini: фото остаётся у неё ──
         chain = route(cfg.FALLBACK_MODEL, has_image=True)
-        done += 2
+        done += 3
         if not chain or chain[0] != cfg.FALLBACK_MODEL:
             problems.append(f"фото при активной Gemini ушло мимо неё: {chain}")
         if blind(chain):
             problems.append(f"в запасе у активной Gemini есть слепые: {blind(chain)}")
+        # Последний рубеж — ДРУГОЙ провайдер (с 18.10.2026 DeepSeek V4.1 Flash,
+        # решение Максима): упадёт весь Google — человек всё равно получит ответ.
+        if not any(g._provider_of(m) != "gemini" for m in chain):
+            problems.append(f"у активной Gemini в запасе одни Gemini ({chain}) — "
+                            f"падение всего Google оставит человека без ответа")
     finally:
         cfg.AVAILABLE_MODELS.pop(BLIND, None)
         hist.set_setting("active_model", saved_active)
@@ -6385,7 +6153,7 @@ def check_stopwatch():
                      if info.get("provider", "gemini") == provider), None)
 
     # Медленная активная — любая не-Gemini: у неё запасные из Gemini, как в жизни.
-    slow = model_of("deepseek") or model_of("qwen") or model_of("xiaomi") or cfg.FALLBACK_MODEL
+    slow = model_of("deepseek") or model_of("xiaomi") or cfg.FALLBACK_MODEL
     slow_provider = g._provider_of(slow)
 
     def fallback_script(first_sec, first_outcome, answer_sec):
@@ -6398,18 +6166,17 @@ def check_stopwatch():
             script["gemini"] = [(answer_sec, "ok")]
 
     saved = {name: getattr(g, name) for name in (
-        "time", "logger", "_http", "_qwen_chat_request", "_deepseek_chat_request",
+        "time", "logger", "_http", "_deepseek_chat_request",
         "_xiaomi_chat_request", "_notify_models_failed", "_notify_chain_dead",
         "_build_proactive_parts", "RAG_ENABLED")}
     saved_hist = {name: getattr(hist, name) for name in (
-        "register_api_call", "add_provider_cost", "spend_qwen_tokens", "add_messages")}
+        "register_api_call", "add_provider_cost", "add_messages")}
     saved_write = chat_log._write
     saved_active = hist.get_setting("active_model", "")
     try:
         g.time = clock
         g.logger = log
         g._http = lambda: _Session()
-        g._qwen_chat_request = _provider_request("qwen")
         g._deepseek_chat_request = _provider_request("deepseek")
         g._xiaomi_chat_request = _provider_request("xiaomi")
         g._notify_models_failed = _notify
@@ -6422,8 +6189,8 @@ def check_stopwatch():
         chat_log._write = written.append
 
         # ── 1. Ответила сама активная: время прежнее, скобок нет ──
-        # Каждый провайдер пишет СВОЮ строку лога — проверяются все четыре.
-        for provider in ("deepseek", "qwen", "xiaomi", "gemini"):
+        # Каждый провайдер пишет СВОЮ строку лога — проверяются все три.
+        for provider in ("deepseek", "xiaomi", "gemini"):
             model = cfg.FALLBACK_MODEL if provider == "gemini" else model_of(provider)
             if not model:
                 continue
@@ -6762,8 +6529,8 @@ def check_media_twins():
             g._describe_video = lambda *a, **kw: HEARD
 
             # Модель, которая НЕ принимает ни аудио, ни видео: первая такая в
-            # реестре (сегодня это Qwen или DeepSeek — они и стоят активными
-            # у Максима). Нет такой вовсе — половину проверки пропускаем, а не
+            # реестре (сегодня это DeepSeek — она и стоит активной у
+            # Максима). Нет такой вовсе — половину проверки пропускаем, а не
             # выдумываем модель: проверять надо то, что бывает в жизни.
             deaf = next((m for m in cfg.AVAILABLE_MODELS
                          if m not in cfg.AUDIO_FALLBACK_CHAIN
@@ -7127,9 +6894,9 @@ def check_proactive_media_route():
     модель, которую выбрал Максим кнопкой).
 
     Сверяется ТРИ развилки:
-      • активная зрячая, но НЕ Gemini (сегодня Qwen) — запрос уходит ей и
+      • активная зрячая, но НЕ Gemini (сегодня DeepSeek) — запрос уходит ей и
         OpenAI-совместимым форматом, с файлом внутри;
-      • активная тип НЕ принимает (голосовое у Qwen) — запроса нет ВОВСЕ, а
+      • активная тип НЕ принимает (голосовое у DeepSeek) — запроса нет ВОВСЕ, а
         функция возвращает None, чтобы вызывающий ушёл на стенограмму;
       • активная Gemini — native-путь, и первой пробуют ИМЕННО ЕЁ, а не
         первую модель цепочки разбора.
@@ -7172,7 +6939,7 @@ def check_proactive_media_route():
         debug = info = warning = error = exception = _skip
 
     saved = {name: getattr(g, name) for name in (
-        "_http", "logger", "_qwen_chat_request", "_deepseek_chat_request",
+        "_http", "logger", "_deepseek_chat_request",
         "_xiaomi_chat_request", "_build_proactive_parts", "_notify_models_failed")}
     saved_register = hist.register_api_call
     saved_write = chat_log._write
@@ -7180,7 +6947,6 @@ def check_proactive_media_route():
     try:
         g._http = lambda: _Session()
         g.logger = Silent()
-        g._qwen_chat_request = _provider_answer
         g._deepseek_chat_request = _provider_answer
         g._xiaomi_chat_request = _provider_answer
         g._notify_models_failed = lambda *a, **kw: None
@@ -7972,8 +7738,8 @@ def check_cleanup():
     сравнение «число меньше строки» в SQLite истинно ВСЕГДА: журнал стирался
     бы целиком.
 
-    Месячный сброс: месячные копилки обнуляются, вечные (DeepSeek, Xiaomi),
-    остатки счетов и квота Qwen — нет; обмены «вопрос-ответ» обнуляются, но
+    Месячный сброс: месячная копилка (картинки) обнуляется, вечные (DeepSeek,
+    Xiaomi) и остатки счетов — нет; обмены «вопрос-ответ» обнуляются, но
     строки остаются; итоги уходят каждому владельцу; в тот же месяц второй
     круг ничего не сбрасывает.
     """
@@ -7995,11 +7761,9 @@ def check_cleanup():
 
     CHAT = -999_000_555      # метка «наших» строк: чужие проверки их не пишут
     UID = 999_000_555
-    QWEN_KEY = "qwen_tokens_selftest-model"
-    UNTIL_KEY = "qwen_quota_until_selftest-model"
-    money = {"qwen_cost_usd": "1.5", "image_cost_usd": "2.5", "deepseek_cost_usd": "3.5",
+    money = {"image_cost_usd": "2.5", "deepseek_cost_usd": "3.5",
              "xiaomi_cost_usd": "4.5", "deepseek_balance_usd": "9.25",
-             "xiaomi_balance_usd": "7.75", QWEN_KEY: "123456", UNTIL_KEY: "24.11.2026"}
+             "xiaomi_balance_usd": "7.75"}
     saved_settings = _setting_snapshot(hist, list(money) + ["stats_reset_month"])
     saved_admins, saved_asyncio = c.ADMIN_IDS, cleanup.asyncio
     now = _time.time()
@@ -8163,12 +7927,12 @@ def check_cleanup():
         expect(f"вызовов моделей после сброса {api_left}, а ждали ноль", api_left == 0)
         expect(f"обмены «вопрос-ответ» после сброса {tuple(usage) if usage else 'строка удалена'}, "
                f"а ждали (0, 0) и строку на месте", usage is not None and tuple(usage) == (0, 0))
-        for key in ("qwen_cost_usd", "image_cost_usd"):
+        for key in ("image_cost_usd",):
             got = hist.get_setting(key, "")
             expect(f"месячная копилка {key} после сброса «{got}», а ждали 0",
                    float(got or -1) == 0)
         for key in ("deepseek_cost_usd", "xiaomi_cost_usd", "deepseek_balance_usd",
-                    "xiaomi_balance_usd", QWEN_KEY, UNTIL_KEY):
+                    "xiaomi_balance_usd"):
             got = hist.get_setting(key, "")
             expect(f"месячный сброс тронул {key}: «{got}», а было «{money[key]}»",
                    got == money[key])
@@ -8179,10 +7943,10 @@ def check_cleanup():
                and all("Итоги месяца" in text for _, text in letters))
 
         # ── Второй круг в том же месяце ничего не сбрасывает ──
-        hist.set_setting("qwen_cost_usd", "1.5")
+        hist.set_setting("image_cost_usd", "1.5")
         run_circle()
-        expect(f"второй круг в том же месяце снова обнулил копилку: «{hist.get_setting('qwen_cost_usd', '')}»",
-               hist.get_setting("qwen_cost_usd", "") == "1.5")
+        expect(f"второй круг в том же месяце снова обнулил копилку: «{hist.get_setting('image_cost_usd', '')}»",
+               hist.get_setting("image_cost_usd", "") == "1.5")
         expect(f"второй круг в том же месяце снова слал итоги: {len(letters)} писем", not letters)
 
         # ── Снимки суточного отчёта: последний не удаляется никогда ──
@@ -8228,7 +7992,7 @@ def check_cleanup():
     return problems, (f"{done} проверок: в каждом журнале старая запись уходит, свежая "
                       f"остаётся; улики — вместе с записью модерации; вечные таблицы не "
                       f"тронуты; последний снимок отчёта живёт всегда; месячный сброс "
-                      f"обнуляет только месячное, квоту и вечные счёта не трогает, в тот "
+                      f"обнуляет только месячное, вечные счёта не трогает, в тот "
                       f"же месяц не повторяется")
 
 
@@ -8473,9 +8237,14 @@ def check_live_answer():
                 hist.set_setting(k, v)
 
     # ─── цепочка: новая попытка обнуляет черновик ───
-    QWEN = next((m for m, meta in c.AVAILABLE_MODELS.items()
-                 if meta.get("provider") == "qwen"), None)
-    if QWEN:
+    # Потоковая модель — DeepSeek (до 18.10.2026 здесь стоял Qwen; без
+    # потоковой модели в реестре блок выпадал бы молча, поэтому её отсутствие
+    # — поломка, а не пропуск).
+    STREAMER = next((m for m, meta in c.AVAILABLE_MODELS.items()
+                     if meta.get("provider") == "deepseek"), None)
+    expect("в реестре нет модели DeepSeek — проверка черновика на потоке не гонялась",
+           STREAMER is not None)
+    if STREAMER:
         calls = []
 
         def fake_provider(model, messages):
@@ -8486,21 +8255,21 @@ def check_live_answer():
             g._live_call("feed", "текст новой попытки")
             return {"choices": [{"message": {"content": "текст новой попытки"}}], "usage": {}}
 
-        saved = (g._qwen_chat_request, g._deepseek_chat_request, g._xiaomi_chat_request,
+        saved = (g._deepseek_chat_request, g._xiaomi_chat_request,
                  g._notify_models_failed, g.time)
         saved_active = hist.get_setting("active_model", "")
         d = la.LiveDraft(1, 1)
         try:
-            g._qwen_chat_request = g._deepseek_chat_request = g._xiaomi_chat_request = fake_provider
+            g._deepseek_chat_request = g._xiaomi_chat_request = fake_provider
             g._notify_models_failed = lambda *a, **kw: None
             g.time = types.SimpleNamespace(sleep=lambda *_: None, perf_counter=_time.perf_counter,
                                            monotonic=_time.monotonic, time=_time.time)
-            hist.set_setting("active_model", QWEN)
+            hist.set_setting("active_model", STREAMER)
             g._live.progress = d
             g._gemini_chat_request([{"role": "user", "content": "q"}], kind="проверка")
         finally:
             g._live.progress = None
-            (g._qwen_chat_request, g._deepseek_chat_request, g._xiaomi_chat_request,
+            (g._deepseek_chat_request, g._xiaomi_chat_request,
              g._notify_models_failed, g.time) = saved
             hist.set_setting("active_model", saved_active)
         expect("повтор запроса не стёр в черновике текст сбившейся попытки",
@@ -8555,8 +8324,8 @@ def check_live_answer():
         g.ask_gemini = fake_answer
         g._describe_for_answer = lambda *a, **kw: "расшифровка"
         g._supports_video = lambda *a, **kw: False
-        if QWEN:
-            hist.set_setting("active_model", QWEN)
+        if STREAMER:
+            hist.set_setting("active_model", STREAMER)
         d = la.LiveDraft(1, 1, "🎧 Слушаю голосовое…")
         g.ask_gemini_audio(1, 1, "QQ", progress=d)
         expect("голосовое: показ не доехал до ответа по расшифровке", passed.get("progress") is d)
@@ -10392,7 +10161,7 @@ def check_owner_keys():
         bot, gone, _ = press(OWNER, "привет, как дела")
         expect("обычное сообщение владельца не дошло до модели",
                not opened and asked == ["привет, как дела"])
-        bot, gone, ctx = press(OWNER, "📡 Настройки API", user_data={"balance_edit": "qwen"})
+        bot, gone, ctx = press(OWNER, "📡 Настройки API", user_data={"balance_edit": "xiaomi"})
         expect("нажатие нижней кнопки не сняло ожидание числа, как это делает команда",
                opened == ["api"] and "balance_edit" not in ctx.user_data)
 
@@ -11030,7 +10799,7 @@ def check_owner_keys():
 
 CHECKS = (
     ("деньги — расчёт стоимости запросов", check_money),
-    ("квота Qwen — оборванный ответ, срок и письма", check_qwen_quota),
+    ("обрыв потока DeepSeek и Xiaomi — отказ, а не ответ", check_stream_break),
     ("деньги — сам прайс не менялся", check_price_list),
     ("пометка мута — разбор ответа модели", check_mute_tag),
     ("мут от бота подписан человеком, а не номером", check_ai_mute_name),
