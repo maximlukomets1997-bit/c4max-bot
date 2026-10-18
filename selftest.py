@@ -10293,6 +10293,54 @@ def check_owner_keys():
         expect("выключатель нижних кнопок виден модератору",
                not any(b.callback_data == "toggle_owner_keys"
                        for row in pm.build_adm_keyboard(MOD).inline_keyboard for b in row))
+
+        # ═══ 7. Короткий /adm у владельца с нижними кнопками (18.10.2026) ═══
+        # Все разделы стоят внизу — в /adm один выключатель. Выключил нижние
+        # кнопки — /adm снова полный: без разделов владелец не остаётся.
+        def datas_of(markup):
+            return [b.callback_data for row in (markup.inline_keyboard if markup else [])
+                    for b in row]
+
+        hist.set_setting(pk.SETTING_KEY, "1")
+        text, markup = pm.adm_view(OWNER)
+        expect(f"нижние кнопки включены, а /adm владельца не из одного выключателя: "
+               f"{datas_of(markup)}",
+               datas_of(markup) == ["toggle_owner_keys"] and "нижних кнопках" in text)
+        hist.set_setting(pk.SETTING_KEY, "0")
+        text, markup = pm.adm_view(OWNER)
+        expect("нижние кнопки выключены, а /adm не полный — владелец остался бы без разделов",
+               {"adm_open_stats", "system_restart", "toggle_owner_keys"} <= set(datas_of(markup))
+               and "Выберите раздел" in text)
+        hist.set_setting(pk.SETTING_KEY, "1")
+        text, markup = pm.adm_view(MOD)
+        expect("у модератора /adm стал коротким — нижней панели у него нет",
+               "adm_open_mod" in datas_of(markup) and "toggle_owner_keys" not in datas_of(markup))
+        # Настоящая отправка /adm (в этой группе её подменяет записная книжка).
+        bot = Bot()
+        asyncio.run(saved_targets["adm"](bot, OWNER, OWNER))
+        sent = [e for e in bot.events if e[0] == "send"]
+        expect("/adm владельца с нижними кнопками пришёл не коротким",
+               bool(sent) and datas_of(sent[-1][3]) == ["toggle_owner_keys"])
+        # Перерисовка после выключателя: текст И кнопки, короткий ↔ полный.
+        edits = []
+
+        async def _edit(text, **kw):
+            edits.append((text, kw.get("reply_markup")))
+        q = types.SimpleNamespace(edit_message_text=_edit)
+        hist.set_setting(pk.SETTING_KEY, "0")
+        asyncio.run(pm.redraw_adm(q, OWNER))
+        expect("после выключения нижних кнопок /adm не стал полным (текст и кнопки)",
+               bool(edits) and "Выберите раздел" in edits[-1][0]
+               and "adm_open_stats" in datas_of(edits[-1][1]))
+        hist.set_setting(pk.SETTING_KEY, "1")
+        asyncio.run(pm.redraw_adm(q, OWNER))
+        expect("после включения нижних кнопок /adm не стал коротким (текст и кнопки)",
+               "нижних кнопках" in edits[-1][0] and datas_of(edits[-1][1]) == ["toggle_owner_keys"])
+        for name in ('if data == "toggle_owner_keys"', 'if data == "adm_autoupdate"'):
+            branch = router_src[router_src.find(name):]
+            branch = branch[:branch.find("\n    if data", 10)]
+            expect(f"ветка «{name}» перерисовывает /adm одними кнопками — текст разошёлся бы "
+                   f"с видом панели", "redraw_adm(" in branch)
     finally:
         roles.ADMIN_IDS, cache, roles._loaded = saved_roles
         roles._cache.clear()

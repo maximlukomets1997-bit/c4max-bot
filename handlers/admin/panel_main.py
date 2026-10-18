@@ -570,31 +570,40 @@ def _owner_keys_button():
 
 
 def build_adm_keyboard(user_id: int):
-    """Клавиатура /adm по правам смотрящего — для веток, которые возвращают
-    панель на место после действия."""
+    """
+    ПОЛНАЯ клавиатура /adm по правам смотрящего. Её меряет preflight (самый
+    полный вариант панели) и сторожат проверки поведения. Что /adm показывает
+    на самом деле — решает adm_view: у владельца с включёнными нижними
+    кнопками там один выключатель.
+    """
     return InlineKeyboardMarkup(_filter_keyboard(_adm_rows(), user_id))
 
 
-async def send_adm_panel(bot, chat_id: int, user_id: int | None = None):
+def adm_view(user_id: int):
     """
-    Главная панель — единая точка входа во все разделы управления ботом.
+    Что показывает /adm этому человеку: (текст, клавиатура или None).
 
-    Собирается ПО ПРАВАМ смотрящего: список разделов один на всех, а лишнее
-    отсекает фильтр по таблице прав (services/roles.py). Владельческие разделы
-    в таблице не значатся вовсе — им достаётся запрет по умолчанию.
-    user_id по умолчанию = chat_id: панель всегда открывается в личке, где
-    это одно и то же число.
+    ⚠️ У ВЛАДЕЛЬЦА С ВКЛЮЧЁННЫМИ НИЖНИМИ КНОПКАМИ — ОДИН ВЫКЛЮЧАТЕЛЬ (2026-10-18,
+    решение Максима): все разделы и так стоят внизу под полем ввода
+    (panel_keys.py). Выключил нижние кнопки — /adm снова полный: без разделов
+    владелец не остаётся ни при каком положении выключателя, и это же —
+    откат без выкатки. Модераторов это не касается: нижней панели у них нет.
+
+    Версия в заголовке — способ увидеть, какая сборка РЕАЛЬНО работает (на
+    сервере она меняется только после того, как он забрал правки). Синей
+    ссылкой на код этой версии — обычный текст в Телеграме покрасить нельзя,
+    синим рисуются только ссылки.
     """
     from services import roles
-    uid = chat_id if user_id is None else user_id
-    owner = roles.is_owner(uid)
+    from .panel_keys import keys_enabled
+    owner = roles.is_owner(user_id)
+    if owner and keys_enabled():
+        return ((f"🎛 <b>АДМИН-ПАНЕЛЬ</b> · {BOT_VERSION_HTML}\n"
+                 "───────────────────────────\n"
+                 "<i>Разделы — в нижних кнопках под полем ввода.</i>"),
+                InlineKeyboardMarkup([[_owner_keys_button()]]))
 
-    keyboard = _filter_keyboard(_adm_rows(), uid)
-
-    # Версия в заголовке — способ увидеть, какая сборка РЕАЛЬНО работает
-    # (на сервере она меняется только после того, как он забрал правки).
-    # Синей ссылкой на код этой версии — обычный текст в Телеграме покрасить
-    # нельзя, синим рисуются только ссылки.
+    keyboard = _filter_keyboard(_adm_rows(), user_id)
     if owner:
         text = (f"🎛 <b>АДМИН-ПАНЕЛЬ</b> · {BOT_VERSION_HTML}\n"
                 "───────────────────────────\n"
@@ -609,12 +618,42 @@ async def send_adm_panel(bot, chat_id: int, user_id: int | None = None):
         text = (f"🛡 <b>ПАНЕЛЬ МОДЕРАТОРА</b> · {BOT_VERSION_HTML}\n"
                 "───────────────────────────\n"
                 "<i>Прав пока не выдано — обратись к владельцу бота.</i>")
+    return text, (InlineKeyboardMarkup(keyboard) if keyboard else None)
 
+
+async def redraw_adm(query, user_id: int) -> None:
+    """
+    Перерисовать /adm на месте после нажатия в нём (тумблеры самообновления и
+    нижних кнопок): текст И кнопки, по adm_view. Одних кнопок мало — после
+    переключения нижних кнопок /adm меняет вид целиком (короткий ↔ полный).
+    """
+    text, markup = adm_view(user_id)
+    try:
+        await query.edit_message_text(
+            text, parse_mode=ParseMode.HTML, reply_markup=markup,
+            link_preview_options=LinkPreviewOptions(is_disabled=True))
+    except Exception as e:
+        logger.warning("⚠️ Не удалось перерисовать /adm: %s", e)
+
+
+async def send_adm_panel(bot, chat_id: int, user_id: int | None = None):
+    """
+    Главная панель — единая точка входа во все разделы управления ботом.
+
+    Собирается ПО ПРАВАМ смотрящего: список разделов один на всех, а лишнее
+    отсекает фильтр по таблице прав (services/roles.py). Владельческие разделы
+    в таблице не значатся вовсе — им достаётся запрет по умолчанию. Вид — по
+    adm_view (у владельца с нижними кнопками — короткий).
+    user_id по умолчанию = chat_id: панель всегда открывается в личке, где
+    это одно и то же число.
+    """
+    uid = chat_id if user_id is None else user_id
+    text, markup = adm_view(uid)
     sent_msg = await bot.send_message(
         chat_id=chat_id, text=text, parse_mode=ParseMode.HTML,
         # Без этого под панелью развернётся карточка GitHub со ссылки версии.
         link_preview_options=LinkPreviewOptions(is_disabled=True),
-        reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None,
+        reply_markup=markup,
     )
     if sent_msg:
         await register_and_clean_bot_message(bot, chat_id, sent_msg.message_id)

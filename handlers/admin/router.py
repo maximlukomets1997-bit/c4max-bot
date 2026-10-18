@@ -593,13 +593,10 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     if data == "adm_autoupdate":
         # Само переключение — общий шаг с нижней кнопкой владельца
         # (panel_main.flip_autoupdate, 2026-10-18).
-        from handlers.admin.panel_main import autoupdate_notice, build_adm_keyboard, flip_autoupdate
+        from handlers.admin.panel_main import autoupdate_notice, flip_autoupdate, redraw_adm
         now_on = flip_autoupdate(user_id)
         await query.answer(autoupdate_notice(now_on), show_alert=True)
-        try:
-            await query.edit_message_reply_markup(reply_markup=build_adm_keyboard(user_id))
-        except Exception as e:
-            logger.warning("⚠️ Не удалось перерисовать панель после тумблера самообновления: %s", e)
+        await redraw_adm(query, user_id)
         # На нижней кнопке «⬇️ ОБНОВЛЕНИЕ» тоже видно состояние, а свою надпись
         # она сама не меняет — присылаем панель заново (прежнее сообщение уберётся).
         from .panel_keys import send_owner_keys
@@ -782,7 +779,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         # панель кнопок под полем ввода в личке владельца (panel_keys.py).
         # Включили — панель ставится сразу, выключили — убирается.
         from .panel_keys import SETTING_KEY, keys_enabled, remove_owner_keys, send_owner_keys
-        from handlers.admin.panel_main import build_adm_keyboard
+        from handlers.admin.panel_main import redraw_adm
         new_val = "0" if keys_enabled() else "1"
         set_setting(SETTING_KEY, new_val)
         state = "включены" if new_val == "1" else "выключены"
@@ -795,10 +792,9 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             await send_owner_keys(context.bot, chat_id, user_id)
         else:
             await remove_owner_keys(context.bot, chat_id)
-        try:
-            await query.edit_message_reply_markup(reply_markup=build_adm_keyboard(user_id))
-        except Exception as e:
-            logger.warning("⚠️ Не удалось обновить клавиатуру /adm после нижних кнопок: %s", e)
+        # /adm меняет вид целиком (2026-10-18): нижние кнопки включены — один
+        # выключатель, выключены — полная панель (panel_main.adm_view).
+        await redraw_adm(query, user_id)
         return
 
     if data == "toggle_live_thoughts":
