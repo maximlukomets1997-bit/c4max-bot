@@ -329,12 +329,13 @@ def _build_api_keyboard(user_id, full: bool = False):
     return InlineKeyboardMarkup(rows)
 
 
-async def send_stats_panel(bot, chat_id: int, user_id: int):
-    """Панель «💬 СТАТИСТИКА»: три сводные цифры (кнопка в /adm и команда /stats)."""
+def stats_lines() -> str:
+    """
+    Три сводные цифры — одни в сообщении с версией у владельца
+    (panel_keys.carrier_text, с 18.10.2026) и в панели статистики.
+    """
     stats = get_bot_stats()
-    text = (
-        f"💬 <b>СТАТИСТИКА</b>\n"
-        f"───────────────────────────\n"
+    return (
         # «за этот месяц» — user_token_usage обнуляется месячным сбросом
         # (jobs/cleanup.py::_monthly_stats_reset); уберёшь сброс — верни «за всё время».
         f"💬 <b>Обменов «вопрос-ответ» за этот месяц: {stats['lifetime_requests']}</b>\n"
@@ -343,6 +344,38 @@ async def send_stats_panel(bot, chat_id: int, user_id: int):
         # меняешь срок там — поменяй подпись здесь.
         f"📝 <b>Архив группы за последние 10 дней: {stats['group_msg_count']}</b>"
     )
+
+
+async def send_stats_panel(bot, chat_id: int, user_id: int):
+    """
+    «💬 СТАТИСТИКА»: три сводные цифры и кнопки обновлений, дайджеста и копии
+    базы (команда /stats, нижняя «🎛 Админ-панель», «⬅️ Назад» с экранов
+    обновлений и дайджеста, тумблер дайджеста).
+
+    ⚠️ У ВЛАДЕЛЬЦА В ЛИЧКЕ — СООБЩЕНИЕ С ВЕРСИЕЙ (18.10.2026, решение Максима,
+    вариант Б: «🎛 Админ-панель» и «💬 Статистика» — одно). Цифры — в нём
+    (panel_keys.carrier_text), кнопки этой панели — внизу, подменю service;
+    открытый раздел убирается, как у /adm. Прежняя панель ниже — для всех
+    остальных случаев; на деле статистика владельческая и туда никто не
+    попадает, но её кнопки сверяет с роутером preflight.
+    """
+    from services import roles
+    if chat_id == user_id and roles.is_owner(user_id):
+        from utils import clean_bot_messages
+        from .panel_keys import send_owner_keys
+        await send_owner_keys(bot, chat_id, user_id, menu="service")
+        await clean_bot_messages(bot, chat_id)
+        return
+    text = (
+        f"💬 <b>СТАТИСТИКА</b>\n"
+        f"───────────────────────────\n"
+        + stats_lines()
+    )
+    await _send_panel_message(bot, chat_id, text, _stats_keyboard())
+
+
+def _stats_keyboard():
+    """Кнопки прежней панели статистики — те же, что в подменю «🎛 Админ-панель»."""
     # 📊 Недельный дайджест группы (2026-08-04) живёт ИМЕННО ЗДЕСЬ, а не в
     # /mod: он про жизнь чата, а не про наказания, и собирается ровно из тех
     # данных, о которых эта панель и рассказывает.
@@ -352,19 +385,76 @@ async def send_stats_panel(bot, chat_id: int, user_id: int):
     # 💾 «Копия базы» (2026-08-10, просьба Максима) переехала СЮДА из главной
     # панели /adm — снимает копию прямо сейчас и присылает файлом. Кнопка
     # владельческая (в _CALLBACK_RULES её нет), как и вся эта панель, поэтому
-    # отбор по правам ей не нужен. Обработчик нажатия при переезде НЕ менялся —
-    # он один, ветка `adm_backup` в router.py.
-    from services import group_digest
+    # отбор по правам ей не нужен. Снимает копию send_db_backup ниже — она же
+    # у нижней кнопки «💾 Копия базы» владельца.
+    # Надпись тумблера дайджеста — panel_digest.digest_toggle_text, одна с
+    # нижней кнопкой.
+    from .panel_digest import digest_toggle_text
     keyboard = [
         [InlineKeyboardButton("⬇️ Обновления", callback_data="upd:list")],
         [InlineKeyboardButton("📊 Дайджест недели", callback_data="dig:show")],
-        [InlineKeyboardButton(
-            f"📰 Дайджест по понедельникам: {_onoff(group_digest.is_enabled())}",
-            callback_data="dig:toggle")],
+        [InlineKeyboardButton(digest_toggle_text(), callback_data="dig:toggle")],
         [InlineKeyboardButton("💾 Копия базы", callback_data="adm_backup")],
         _adm_back_row(),
     ]
-    await _send_panel_message(bot, chat_id, text, InlineKeyboardMarkup(keyboard))
+    return InlineKeyboardMarkup(keyboard)
+
+
+async def send_db_backup(bot, chat_id: int, user_id: int) -> None:
+    """
+    Снять копию базы прямо сейчас и прислать файлом, следом — архив статей
+    базы знаний. Общая для кнопки «💾 Копия базы» под панелью (router.py,
+    ветка adm_backup) и нижней кнопки владельца (18.10.2026, panel_keys.py).
+    """
+    import asyncio
+    import os
+    from services import backup
+    loop = asyncio.get_running_loop()
+    try:
+        path, size = await loop.run_in_executor(None, backup.make_backup)
+    except Exception as e:
+        logger.error("⚠️ Копия базы по кнопке не сделана: %s", e)
+        await bot.send_message(
+            chat_id=chat_id,
+            text=f"⚠️ Не удалось сделать копию базы: <code>{html.escape(str(e))}</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    logger.info("🔧 Админ %s сделал копию базы вручную", user_id)
+    with open(path, "rb") as f:
+        blob = f.read()
+    fname = os.path.basename(path)
+    kept = len(backup.list_backups())
+    await bot.send_document(
+        chat_id=chat_id,
+        document=blob,
+        filename=fname,
+        caption=(
+            f"💾 <b>Копия базы бота</b>\n"
+            f"<code>{html.escape(fname)}</code> · {backup.human_size(size)}\n"
+            f"<i>Сохрани у себя: промпты, настройки, счета и квоты, личные "
+            f"дела, звания и журналы — этого нет на GitHub. "
+            f"На сервере хранится копий: {kept}.</i>"
+        ),
+        parse_mode=ParseMode.HTML,
+    )
+    # Статьи базы знаний — вторым файлом (2026-08-12), как и ночью.
+    # Под своим try: копия базы уже у владельца, и сорвавшийся архив
+    # статей не должен превратить удачное нажатие в сообщение об ошибке.
+    try:
+        kb_path, kb_size, kb_ok, kb_wait = await loop.run_in_executor(None, backup.make_kb_backup)
+        with open(kb_path, "rb") as f:
+            kb_blob = f.read()
+        kb_name = os.path.basename(kb_path)
+        await bot.send_document(
+            chat_id=chat_id,
+            document=kb_blob,
+            filename=kb_name,
+            caption=backup.kb_caption(kb_name, kb_size, kb_ok, kb_wait),
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception as e:
+        logger.error("⚠️ Архив статей базы знаний по кнопке не сделан: %s", e)
 
 
 async def send_api_panel(bot, chat_id: int, user_id: int):
@@ -646,8 +736,8 @@ def adm_view(user_id: int):
     """
     from services import roles
     if roles.is_owner(user_id):
-        from .panel_keys import CARRIER_TEXT
-        return CARRIER_TEXT, None
+        from .panel_keys import carrier_text
+        return carrier_text(), None
 
     keyboard = _filter_keyboard(_adm_rows(), user_id)
     if keyboard:

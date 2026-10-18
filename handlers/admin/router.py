@@ -529,55 +529,11 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     # от логов: это последняя копия базы, она обязана остаться в переписке.
     if data == "adm_backup":
         # Отвечаем ДО работы: у Telegram ~15 секунд на ответ callback, а тут
-        # диск — снимок базы и сжатие.
+        # диск — снимок базы и сжатие. Сама копия — общая с нижней кнопкой
+        # владельца «💾 Копия базы» (panel_main.send_db_backup, 18.10.2026).
         await query.answer("⏳ Делаю копию базы…")
-        from services import backup
-        loop = asyncio.get_running_loop()
-        try:
-            path, size = await loop.run_in_executor(None, backup.make_backup)
-        except Exception as e:
-            logger.error("⚠️ Копия базы по кнопке не сделана: %s", e)
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=f"⚠️ Не удалось сделать копию базы: <code>{html.escape(str(e))}</code>",
-                parse_mode=ParseMode.HTML,
-            )
-            return
-        logger.info("🔧 Админ %s сделал копию базы вручную", user_id)
-        with open(path, "rb") as f:
-            blob = f.read()
-        fname = os.path.basename(path)
-        kept = len(backup.list_backups())
-        await context.bot.send_document(
-            chat_id=chat_id,
-            document=blob,
-            filename=fname,
-            caption=(
-                f"💾 <b>Копия базы бота</b>\n"
-                f"<code>{html.escape(fname)}</code> · {backup.human_size(size)}\n"
-                f"<i>Сохрани у себя: промпты, настройки, счета и квоты, личные "
-                f"дела, звания и журналы — этого нет на GitHub. "
-                f"На сервере хранится копий: {kept}.</i>"
-            ),
-            parse_mode=ParseMode.HTML,
-        )
-        # Статьи базы знаний — вторым файлом (2026-08-12), как и ночью.
-        # Под своим try: копия базы уже у владельца, и сорвавшийся архив
-        # статей не должен превратить удачное нажатие в сообщение об ошибке.
-        try:
-            kb_path, kb_size, kb_ok, kb_wait = await loop.run_in_executor(None, backup.make_kb_backup)
-            with open(kb_path, "rb") as f:
-                kb_blob = f.read()
-            kb_name = os.path.basename(kb_path)
-            await context.bot.send_document(
-                chat_id=chat_id,
-                document=kb_blob,
-                filename=kb_name,
-                caption=backup.kb_caption(kb_name, kb_size, kb_ok, kb_wait),
-                parse_mode=ParseMode.HTML,
-            )
-        except Exception as e:
-            logger.error("⚠️ Архив статей базы знаний по кнопке не сделан: %s", e)
+        from .panel_main import send_db_backup
+        await send_db_backup(context.bot, chat_id, user_id)
         return
 
     # ── Панель базы знаний: карточка статьи и действия ──────────────────

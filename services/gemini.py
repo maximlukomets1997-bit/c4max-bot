@@ -1,5 +1,5 @@
 # ───────────────────────────────────────────────
-#  gemini.py — запросы к нейросетям: Gemini, Qwen, DeepSeek, Xiaomi MiMo
+#  gemini.py — запросы к нейросетям: Gemini, DeepSeek, Xiaomi MiMo
 #
 #  Содержит:
 #    _gemini_chat_request()    — устойчивый запрос: 2 попытки + авто-фолбэк
@@ -45,11 +45,6 @@ from config import (
     GEMINI_STREAM_DEADLINE,
     GEMINI_API_KEY,
     GEMINI_IMAGEN_API_KEY,
-    QWEN_API_URL,
-    QWEN_API_KEY,
-    QWEN_CHARS_PER_TOKEN,
-    QWEN_IMAGE_TOKENS,
-    QWEN_QUOTA_WARN_TOKENS,
     DEEPSEEK_API_URL,
     DEEPSEEK_API_KEY,
     DEEPSEEK_PRICES,
@@ -59,7 +54,6 @@ from config import (
     XIAOMI_API_URL,
     XIAOMI_API_KEY,
     XIAOMI_PRICES,
-    QWEN_PRICES,
     IMAGE_PRICES,
     FALLBACK_MODEL,
     AUDIO_FALLBACK_CHAIN,
@@ -78,7 +72,6 @@ from config import (
     THINKING_LEVELS,
     THINKING_DEFAULT,
     THINKING_SETTING_PREFIX,
-    QWEN_THINKING_BUDGET,
 )
 import database.history as hist
 # Соединения к моделям и сайтам переиспользуются (2026-07-27): «рукопожатие»
@@ -132,8 +125,8 @@ def compress_newlines(text: str) -> str:
 #  Захочешь ограничение обратно — это одна проверка времени здесь.
 #
 #  ⚠️ ПОВОД — САМ ФАКТ ОТКАЗА, а не то, каким путём пошёл запрос. Раньше
-#  уведомление глушилось целиком, когда фото уходило в обход «слепой» Qwen или
-#  DeepSeek (vision-reroute), — вместе с настоящими отказами внутри той же
+#  уведомление глушилось целиком, когда фото уходило в обход «слепой» модели
+#  (vision-reroute), — вместе с настоящими отказами внутри той же
 #  цепочки. Теперь нет отказов — нет и сообщения, особый случай не нужен.
 
 
@@ -144,8 +137,7 @@ def _notify_admins(text: str) -> None:
         try:
             _http().post(url, json={"chat_id": admin_id, "text": text}, timeout=10)
         except Exception as e:
-            # Текст без «о сбое модели»: с 19.09.2026 сюда же идут письма
-            # о квоте Qwen, и лог не должен называть их сбоем.
+            # Текст без «о сбое модели»: письмо может быть и не о сбое.
             logger.warning("⚠️ Не удалось отправить письмо админу %s: %s", admin_id, e)
 
 
@@ -155,7 +147,7 @@ def _model_title(model_name: str) -> str:
 
 
 def _failed_list(failures: list) -> str:
-    """«Gemini 3.8 Flash (код 503), Qwen3.8 Flash (таймаут)» — кто и почему."""
+    """«Gemini 3.8 Flash (код 503), DeepSeek V4.1 Flash (таймаут)» — кто и почему."""
     return ", ".join(f"{_model_title(m)} ({why})" for m, why in failures) or "—"
 
 
@@ -241,14 +233,14 @@ def _notify_chain_dead(what: str, failures: list,
 # ───────────────────────────────────────────────
 
 def _provider_of(model_name: str) -> str:
-    """Какому сервису принадлежит модель: 'gemini' (по умолчанию), 'qwen',
+    """Какому сервису принадлежит модель: 'gemini' (по умолчанию),
     'deepseek' или 'xiaomi'."""
     return AVAILABLE_MODELS.get(model_name, {}).get("provider", "gemini")
 
 
 def _icon_of(model_name: str) -> str:
     """
-    Смысловой значок для строк лога: ♊️ Gemini, 🐪 Qwen, 🐋 DeepSeek, 🍚 Xiaomi
+    Смысловой значок для строк лога: ♊️ Gemini, 🐋 DeepSeek, 🍚 Xiaomi
     (список — PROVIDER_ICONS в config.py). Неизвестная модель (нет в конфиге) —
     запасной 🤖, как было до 2026-07-19 у всех нейросетей разом.
 
@@ -369,7 +361,7 @@ def _supports_vision(model_name: str) -> bool:
 
 def _supports_video(model_name: str) -> bool:
     """True, если модель принимает ВИДЕО (поле video в AVAILABLE_MODELS, 2026-07-24).
-    Стоит у всех Gemini; у Qwen, DeepSeek и Xiaomi поля нет — видео им не отправляем."""
+    Стоит у всех Gemini; у DeepSeek и Xiaomi поля нет — видео им не отправляем."""
     return bool(AVAILABLE_MODELS.get(model_name, {}).get("video", False))
 
 
@@ -1022,180 +1014,6 @@ def _describe_video(video_base64: str, mime_type: str = "video/mp4",
     return ""
 
 
-# ───────────────────────────────────────────────
-#  Квота Qwen: списание и письмо владельцу (19.09.2026, просьба Максима)
-# ───────────────────────────────────────────────
-#
-#  Остаток бесплатной квоты уходит в минус молча — так задумано (минус = расход
-#  пошёл за деньги, см. database/money.py::spend_qwen_tokens), но узнать об этом
-#  можно было, только открыв «Счета и квоты». 18.09.2026 квота qwen3.7-plus
-#  кончилась посреди живого разговора в группе, и десять ответов подряд ушли
-#  за деньги незаметно.
-#
-#  Писем два: «на исходе» — остаток опустился до QWEN_QUOTA_WARN_TOKENS, и
-#  «кончилась» — дошёл до нуля.
-#  ⚠️ ПОВОД — ПЕРЕХОД ЧЕРЕЗ ЧЕРТУ, а не «остаток ниже черты»: иначе письмо
-#  уходило бы на каждый ответ в минусе. Помнить, что письмо уже ушло, НЕ НУЖНО:
-#  остаток только тает и переходит черту один раз, пока его не впишут заново
-#  кнопкой. Поэтому ни перезапуск бота, ни два потока разом второго письма не
-#  дают. Обратная сторона: вписали остаток уже ниже порога — письма «на исходе»
-#  не будет, только «кончилась».
-#  ⚠️ Списывать квоту — ТОЛЬКО через _spend_qwen_quota (обычный ответ и
-#  оборванный, _charge_broken_stream). Позовёшь hist.spend_qwen_tokens мимо —
-#  квота растает молча, без письма.
-
-
-def _tokens_num(value: int) -> str:
-    """Токены с пробелами по три разряда — как на экране «Счета и квоты»."""
-    return f"{int(value):,}".replace(",", " ")
-
-
-def _answers_left(left: int, per_answer: int) -> str:
-    """«примерно на 5 ответов» — сколько ещё влезет ответов того же размера,
-    что последний."""
-    n = left // per_answer if per_answer > 0 else 0
-    if n < 1:
-        return "меньше чем на один ответ"
-    if n % 10 == 1 and n % 100 != 11:
-        word = "ответ"
-    elif 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
-        word = "ответа"
-    else:
-        word = "ответов"
-    return f"примерно на {n} {word}"
-
-
-def _quota_letter(model_name: str, tokens: int, spent) -> str:
-    """
-    Текст письма о квоте Qwen — или пустая строка, если остаток черту не
-    перешагнул (см. шапку раздела).
-
-    spent — пара (было, стало) из spend_qwen_tokens. None — квота не заведена,
-    следить не за чем. ⚠️ Проверка на пару — не перестраховка: проверки
-    selftest подменяют списание пустышкой, и письмо обязано это пережить.
-    """
-    if not isinstance(spent, tuple) or len(spent) != 2:
-        return ""
-    before, after = spent
-    title = _model_title(model_name)
-    price = QWEN_PRICES.get(model_name) or {}
-    price_str = (f"${price['cache_miss']:g} за миллион входа, "
-                 f"${price['output']:g} за миллион ответа") if price else ""
-
-    if before > 0 >= after:
-        lines = [f"🎫 Кончилась бесплатная квота {title}",
-                 f"Остаток по счёту бота: {_tokens_num(after)}",
-                 f"Дальше ответы этой модели платные: {price_str}" if price_str
-                 else "Дальше ответы этой модели платные.",
-                 "(или Alibaba будет отказывать, если в консоли включена остановка)."]
-    elif before > QWEN_QUOTA_WARN_TOKENS >= after:
-        lines = [f"🎫 Квота {title} на исходе",
-                 f"Осталось {_tokens_num(after)} — {_answers_left(after, tokens)}.",
-                 f"Потом ответы этой модели пойдут за деньги: {price_str}." if price_str
-                 else "Потом ответы этой модели пойдут за деньги."]
-    else:
-        return ""
-
-    if hist.get_setting("active_model", GEMINI_MODEL) == model_name:
-        lines.append("Это активная модель — на ней идут все ответы бота.")
-
-    # Остатки остальных моделей — чтобы сразу было видно, на кого переключаться.
-    left = hist.get_qwen_tokens()
-    others = [f"• {m} — {_tokens_num(left[m]) if m in left else 'квота не задана'}"
-              for m, meta in AVAILABLE_MODELS.items()
-              if meta.get("provider") == "qwen" and m != model_name]
-    if others:
-        lines += ["", "Квота других Qwen:"] + others
-    return "\n".join(lines)
-
-
-def _spend_qwen_quota(model_name: str, tokens: int) -> None:
-    """
-    Списывает токены из бесплатной квоты Qwen и, если остаток перешагнул черту,
-    пишет владельцу (см. шапку раздела).
-
-    Ошибку СПИСАНИЯ не глушит — у каждого звонящего на неё своя строка в логе.
-    Ошибку ПИСЬМА глушит: сорвавшееся письмо не должно выглядеть в логе как
-    несписанные токены.
-    """
-    spent = hist.spend_qwen_tokens(model_name, tokens)
-    try:
-        text = _quota_letter(model_name, tokens, spent)
-        if text:
-            logger.warning("🎫 Квота %s перешла черту: было %s, стало %s — пишу владельцу",
-                           model_name, spent[0], spent[1])
-            _notify_admins(text)
-    except Exception as e:
-        logger.warning("⚠️ Не удалось написать владельцу о квоте %s: %s", model_name, e)
-
-
-def _sent_size(messages: list) -> tuple[int, int]:
-    """
-    Сколько отправлено модели: (знаков текста, картинок) — для оценки
-    оборванного ответа (05.10.2026).
-
-    Содержимое сообщения бывает строкой или списком частей OpenAI-формата:
-    {"type": "text", "text": …} и {"type": "image_url", …}. Текстовые части
-    меряются знаками, любая другая часть — это файл, и он считается штукой.
-
-    ⚠️ ЗНАКИ КАРТИНКИ НЕ СЧИТАТЬ. Раньше всё содержимое шло через str(), и base64
-    фото попадал в знаки: 04.10.2026 одно фото дало 190 тысяч знаков и списало
-    66 тысяч токенов вместо примерно 15. Цена картинки — config.QWEN_IMAGE_TOKENS.
-    """
-    chars = images = 0
-    for m in messages or []:
-        if not isinstance(m, dict):
-            continue
-        content = m.get("content") or ""
-        if isinstance(content, list):
-            for part in content:
-                if isinstance(part, dict) and part.get("type") == "text":
-                    chars += len(str(part.get("text") or ""))
-                else:
-                    images += 1
-        else:
-            chars += len(str(content))
-    return chars, images
-
-
-def _charge_broken_stream(model_name: str, messages: list,
-                          reasoning_parts: list, answer_parts: list) -> int:
-    """
-    Списывает ОЦЕНКУ токенов из бесплатной квоты Qwen за ОБОРВАННЫЙ ответ
-    (18.09.2026). Возвращает списанное число (0 — не списывали).
-
-    ⚠️ ЗАЧЕМ. Обычный расход берётся из отчёта провайдера в конце ответа и точен
-    до токена. Оборвался поток (потолок GEMINI_STREAM_DEADLINE, разрыв связи) —
-    отчёта нет, а Alibaba токены из квоты уже вычла. Сверка с консолью Model
-    Studio 18.09.2026: у qwen3.7-plus бот показывал на 92 тысячи токенов больше
-    правды, у qwen3.8-max — на 81 тысячу, и ровно у этих двух моделей в логе были
-    обрывы; у qwen3.7-max без обрывов цифры сошлись.
-
-    ⚠️ ТОЛЬКО QWEN. У DeepSeek та же беда чинится иначе — сверкой остатка счёта
-    с платформой (jobs/balance.py), у Xiaomi ни того, ни другого пока нет.
-
-    ⚠️ ЕСЛИ ОТЧЁТ ВСЁ-ТАКИ ПРИШЁЛ, оценку не списываем: звонящий передаёт сюда
-    пустые списки только в том случае, когда usage не получен, — иначе расход
-    спишется дважды.
-    """
-    if _provider_of(model_name) != "qwen":
-        return 0
-    sent, images = _sent_size(messages)
-    got = sum(len(p) for p in (reasoning_parts or [])) + sum(len(p) for p in (answer_parts or []))
-    tokens = int((sent + got) / QWEN_CHARS_PER_TOKEN) + images * QWEN_IMAGE_TOKENS
-    if tokens <= 0:
-        return 0
-    try:
-        _spend_qwen_quota(model_name, tokens)
-    except Exception as e:
-        logger.warning("⚠️ Не удалось списать оценку токенов %s: %s", model_name, e)
-        return 0
-    pics = f" и картинок {images}" if images else ""
-    logger.warning("⚠️ Ответ %s оборван — из квоты списано ОЦЕНОЧНО %d токенов "
-                   "(отправлено %d знаков%s, получено %d)", model_name, tokens, sent, pics, got)
-    return tokens
-
-
 # ── Черновик «ответ на глазах» (08.10.2026) ──────────────────────────────
 # Куда отдавать текст ответа ПО ХОДУ: объект services/live_answer.LiveDraft
 # или None. Ставит его ask_gemini — ТОЛЬКО вокруг основного запроса к модели
@@ -1223,7 +1041,7 @@ def _live_call(method: str, *args) -> None:
 def _openai_stream_request(model_name: str, messages: list, api_url: str,
                            api_key: str, extra_payload: dict):
     """
-    Общий потоковый запрос к OpenAI-совместимому эндпоинту (Qwen, DeepSeek, Xiaomi).
+    Общий потоковый запрос к OpenAI-совместимому эндпоинту (DeepSeek, Xiaomi).
 
     Рассуждающие модели этих провайдеров работают в потоковом режиме: ответ
     приходит кусочками. «Мысли» приходят в отдельном поле reasoning_content,
@@ -1237,7 +1055,7 @@ def _openai_stream_request(model_name: str, messages: list, api_url: str,
     у Gemini). В БД <thought> вырезается выше по стеку, в ask_gemini.
 
     extra_payload — специфичные для провайдера параметры (включение рассуждений
-    у каждого называется по-своему, см. _qwen_chat_request/_deepseek_chat_request).
+    у каждого называется по-своему, см. _deepseek_chat_request/_xiaomi_chat_request).
 
     Возвращает dict (как у Gemini) или None при пустом/неуспешном ответе.
     Обрыв потока — превышен потолок ожидания или поток кончился без отчёта
@@ -1301,7 +1119,7 @@ def _openai_stream_request(model_name: str, messages: list, api_url: str,
                 if choice.get("finish_reason"):
                     finish_reasons.append(str(choice["finish_reason"]))
                 delta = choice.get("delta") or {}
-                # Мысли называются по-разному: Qwen, DeepSeek и Xiaomi шлют их
+                # Мысли называются по-разному: DeepSeek и Xiaomi шлют их
                 # в reasoning_content. Второе поле, reasoning, оставлено
                 # НАМЕРЕННО, хотя сейчас его никто не шлёт: так звали мысли
                 # у OpenRouter (провайдер убран 2026-08-04), и любой следующий
@@ -1321,15 +1139,15 @@ def _openai_stream_request(model_name: str, messages: list, api_url: str,
                     _live_call("feed", c)   # черновик «ответ на глазах»: текст ответа
         # ⚠️ ПОТОК КОНЧИЛСЯ БЕЗ ОТЧЁТА О ТОКЕНАХ — ЭТО ОБРЫВ, А НЕ ОТВЕТ
         # (05.10.2026). Отчёт (usage) провайдер шлёт последним куском, и все
-        # трое шлют его в КАЖДОМ нормальном ответе — сверено живыми запросами
-        # 05.10.2026 к qwen3.8-flash, deepseek-flash и mimo-v2.6-flash. Нет
-        # отчёта — значит, связь оборвали посреди ответа, хоть и без ошибки.
-        # 04.10.2026 так Qwen прислал 8 секунд мыслей и замолчал: бот отдал
-        # человеку одни свёрнутые «Мысли» без ответа, расход не учёл, а в
-        # память записал пустую реплику. Теперь это отказ, как на потолке
-        # ожидания: квота Qwen списывается оценкой (ветка ниже), _try_model
-        # повторяет запрос и уходит к запасной. В строку отказа идёт то, что
-        # провайдер прислал напоследок, — по ней видно, почему он замолчал.
+        # оба шлют его в КАЖДОМ нормальном ответе — сверено живыми запросами
+        # 05.10.2026 к deepseek-flash и mimo-v2.6-flash. Нет отчёта — значит,
+        # связь оборвали посреди ответа, хоть и без ошибки. 04.10.2026 так
+        # модель прислала 8 секунд мыслей и замолчала: бот отдал человеку
+        # одни свёрнутые «Мысли» без ответа, расход не учёл, а в память
+        # записал пустую реплику. Теперь это отказ, как на потолке ожидания:
+        # _try_model повторяет запрос и уходит к запасной. В строку отказа идёт
+        # то, что провайдер прислал напоследок, — по ней видно, почему он
+        # замолчал.
         if not usage:
             tail = "; ".join(oddities[-3:]) or "ничего необычного"
             raise ValueError(
@@ -1337,16 +1155,6 @@ def _openai_stream_request(model_name: str, messages: list, api_url: str,
                 f"(причина остановки: {', '.join(finish_reasons) or 'не названа'}; "
                 f"напоследок пришло: {tail})"
             )
-    except Exception:
-        # Поток оборвался (потолок ожидания, разрыв связи, конец без отчёта —
-        # см. выше) — отчёта о токенах не будет, а провайдер их уже списал. У Qwen это съедает бесплатную
-        # квоту молча, поэтому списываем оценку по знакам и картинкам
-        # (_charge_broken_stream).
-        # Если отчёт УЖЕ пришёл (usage не пуст), оценка не нужна — расход
-        # посчитает обычный путь.
-        if not usage:
-            _charge_broken_stream(model_name, messages, reasoning_parts, answer_parts)
-        raise
     finally:
         response.close()
 
@@ -1357,28 +1165,6 @@ def _openai_stream_request(model_name: str, messages: list, api_url: str,
 
     content = f"<thought>{reasoning}</thought>\n{answer}" if reasoning else answer
     return {"choices": [{"message": {"content": content}}], "usage": usage}
-
-
-def _qwen_chat_request(model_name: str, messages: list):
-    """Запрос к Qwen (Alibaba Cloud Model Studio).
-    enable_thinking — нестандартный параметр Qwen: включает цепочку рассуждений.
-
-    ⚠️ СТУПЕНЕЙ У QWEN НЕТ, ЕСТЬ ПОТОЛОК (29.08.2026). thinking_budget —
-    предел размышлений в токенах, и он ТОЧНЫЙ: замер 28.08 — просишь 100,
-    получаешь ровно 100 у всех трёх тогдашних моделей Qwen. Управилась раньше — потратит
-    меньше (потолок 500 дал 145 токенов у qwen3.8-max). Поэтому ступени кнопки
-    собраны из потолков (config.QWEN_THINKING_BUDGET), а верхняя ступень —
-    это ОТСУТСТВИЕ потолка, а не большое число.
-    """
-    on = _is_thinking(model_name)
-    extra = {"enable_thinking": on}
-    if on:
-        budget = QWEN_THINKING_BUDGET.get(thinking_level("qwen"))
-        if budget:
-            extra["thinking_budget"] = budget
-    return _openai_stream_request(
-        model_name, messages, QWEN_API_URL, QWEN_API_KEY, extra,
-    )
 
 
 def _deepseek_chat_request(model_name: str, messages: list):
@@ -1436,9 +1222,8 @@ def _xiaomi_chat_request(model_name: str, messages: list):
 
     ⚠️⚠️ СТУПЕНЕЙ У MiMo НЕТ — ПРОВЕРЕНО И ПО БУМАГЕ, И ЖИВЬЁМ (29.08.2026).
     Официальная документация Xiaomi (mimo.mi.com, совместимость с OpenAI API)
-    знает ровно один параметр — thinking.type. Alibaba, где MiMo раздаётся
-    тоже, пишет прямо: mimo-v2.5-pro НЕ поддерживает reasoning_effort и
-    thinking_budget. Живой замер (6 прогонов на ступень) это подтвердил:
+    знает ровно один параметр — thinking.type. Живой замер (6 прогонов на
+    ступень) это подтвердил:
     у mimo-v2.5-pro любая ступень даёт 109–128 токенов мыслей, у mimo-v2.5 —
     чистый шум без порядка.
 
@@ -1462,8 +1247,8 @@ def _xiaomi_chat_request(model_name: str, messages: list):
 
 def _xiaomi_cost(model_name: str, usage: dict):
     """Точная стоимость запроса Xiaomi MiMo по ценам XIAOMI_PRICES.
-    Кэшированный вход приходит в prompt_tokens_details.cached_tokens (как у
-    Qwen — проверено живым запросом: cached_tokens=192). Рассуждения уже входят
+    Кэшированный вход приходит в prompt_tokens_details.cached_tokens
+    (проверено живым запросом: cached_tokens=192). Рассуждения уже входят
     в completion_tokens и оплачиваются как выход. Кэш-поле не пришло — весь вход
     по полной цене (оценка сверху, расход не занижаем).
     None — модели нет в таблице цен."""
@@ -1572,24 +1357,6 @@ def fetch_deepseek_balance() -> float | None:
     return None
 
 
-def _qwen_cost(model_name: str, usage: dict):
-    """Точная стоимость запроса Qwen в долларах по ценам QWEN_PRICES.
-    Кэшированный вход приходит в prompt_tokens_details.cached_tokens (неявный
-    кэш Alibaba; на практике часто 0 — кэш у них «без гарантий»). Рассуждения
-    уже входят в completion_tokens и оплачиваются как выход. Если кэш-поле
-    не пришло — весь вход по полной цене (оценка сверху, расход не занижаем).
-    None — модели нет в таблице цен."""
-    prices = QWEN_PRICES.get(model_name)
-    if not prices:
-        return None
-    pt = usage.get("prompt_tokens", 0) or 0
-    cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0) or 0
-    cached = min(cached, pt)
-    miss = pt - cached
-    out = usage.get("completion_tokens", 0) or 0
-    return (cached * prices["cache_hit"] + miss * prices["cache_miss"] + out * prices["output"]) / 1_000_000
-
-
 def _err_code(exc) -> str:
     """Код HTTP-ошибки из исключения requests (если есть) — для логов."""
     code = getattr(getattr(exc, "response", None), "status_code", None)
@@ -1601,7 +1368,7 @@ def _err_body(exc) -> str:
     Тело ответа сервера при HTTP-ошибке — САМОЕ ценное для разбора сбоя:
     код 400 сам по себе не говорит ничего, а причина («фильтр контента»,
     «квота исчерпана», «неверный параметр») приходит именно в теле.
-    Наступили 2026-07-19: три отказа qwen3.7-max с кодом 400, причину
+    Наступили 2026-07-19: три отказа модели с кодом 400, причину
     установить по логу не удалось — тело выбрасывалось.
 
     Обрезаем до 500 символов (тело бывает многословным). Пустая строка,
@@ -1727,9 +1494,9 @@ def _gemini_chat_request(messages: list, kind: str = "текст", has_image: bo
     пользователю, принимает вызывающий код (мягкое сообщение, без деталей ошибки).
 
     Маршрутизация по провайдеру: модели Gemini идут на GEMINI_API_URL с ключом
-    GEMINI_API_KEY (нестриминговый JSON), модели Qwen, DeepSeek, Xiaomi — каждая
-    на свой адрес со своим ключом (_qwen_chat_request, _deepseek_chat_request,
-    _xiaomi_chat_request; общий потоковый запрос — в _openai_stream_request).
+    GEMINI_API_KEY (нестриминговый JSON), модели DeepSeek и Xiaomi — каждая
+    на свой адрес со своим ключом (_deepseek_chat_request, _xiaomi_chat_request;
+    общий потоковый запрос — в _openai_stream_request).
     Цепочка фолбэка может смешивать провайдеров: каждая модель сама знает свой
     адрес и ключ.
 
@@ -1752,11 +1519,6 @@ def _gemini_chat_request(messages: list, kind: str = "текст", has_image: bo
             # Новая попытка — текст прошлой в черновике больше не годится.
             _live_call("attempt")
             try:
-                if provider == "qwen":
-                    data = _qwen_chat_request(model_name, messages)
-                    if data is None:
-                        raise ValueError("пустой ответ Qwen")
-                    return data
                 if provider == "deepseek":
                     data = _deepseek_chat_request(model_name, messages)
                     if data is None:
@@ -1874,10 +1636,11 @@ def _gemini_chat_request(messages: list, kind: str = "текст", has_image: bo
         # Принцип: запас уходит на ДРУГОГО провайдера / на быструю бесплатную Gemini-lite,
         # чтобы пережить сбой целого сервиса и не жечь зря токены думающих моделей.
         #   • активная Gemini        → FALLBACK_MODEL, Gemini-lite, и в самом
-        #     конце Qwen (последний рубеж на случай падения всего Google;
-        #     с 03.10.2026 это qwen3.8-flash — прежняя qwen3.7-plus удалена
-        #     вместе со всем поколением 3.7, решение Максима);
-        #   • активная Qwen/DeepSeek/Xiaomi → FALLBACK_MODEL и Gemini-lite
+        #     конце DeepSeek V4.1 Flash — последний рубеж на случай падения
+        #     всего Google (с 18.10.2026, решение Максима).
+        #     ⚠️ Это настоящие деньги со счёта DeepSeek — но только когда у
+        #     Google отказало всё;
+        #   • активная DeepSeek/Xiaomi → FALLBACK_MODEL и Gemini-lite
         #     (другой провайдер).
         # Модели Xiaomi MiMo сами в подстраховку НЕ ставятся (решение Максима
         # 2026-07-25 — сначала посмотреть их в деле), но подстраховываются как все.
@@ -1899,8 +1662,8 @@ def _gemini_chat_request(messages: list, kind: str = "текст", has_image: bo
         # ⚠️ Все запасные обязаны быть ЗРЯЧИМИ ("vision": True): при отказе
         # активной фото уходит им же. Ставишь сюда другую модель — проверь поле.
         if _provider_of(active_model) == "gemini":
-            fallback_candidates = [FALLBACK_MODEL, "gemini-3.5-flash-lite", "qwen3.8-flash"]
-        else:  # активная — Qwen, DeepSeek или Xiaomi
+            fallback_candidates = [FALLBACK_MODEL, "gemini-3.5-flash-lite", "deepseek-flash"]
+        else:  # активная — DeepSeek или Xiaomi
             fallback_candidates = [FALLBACK_MODEL, "gemini-3.5-flash-lite"]
 
         chain = [active_model]
@@ -1954,7 +1717,7 @@ def _gemini_chat_request(messages: list, kind: str = "текст", has_image: bo
             # контекст=вход, ответ=видимый текст, размышления=скрытые токены «думающих»
             # моделей, всего=полный расход. Размышления считаются двумя способами:
             #   • Gemini: их нет в completion_tokens → вычитание (всего − контекст − ответ);
-            #   • Qwen: они УЖЕ включены в completion_tokens (вычитание даёт 0), зато
+            #   • DeepSeek и Xiaomi: они УЖЕ включены в completion_tokens (вычитание даёт 0), зато
             #     настоящее число приходит во вложенном поле
             #     completion_tokens_details.reasoning_tokens — берём его и вычитаем
             #     из «ответа», чтобы графы значили то же самое для всех провайдеров.
@@ -1998,30 +1761,6 @@ def _gemini_chat_request(messages: list, kind: str = "текст", has_image: bo
                         hist.add_provider_cost("xiaomi", _cost)
                     except Exception as e:
                         logger.warning("⚠️ Не удалось записать расход Xiaomi в БД: %s", e)
-                _cached = (_u.get("prompt_tokens_details") or {}).get("cached_tokens", 0) or 0
-                logger.info("%s Ответ от %s за %s | контекст=%s (из кэша %s) | ответ=%s | размышления=%s | всего=%s | ≈$%.6f",
-                            _icon_of(model_name), model_name, took, _pt, _cached, _ct, _think, _tt, _cost or 0.0)
-            elif _provider_of(model_name) == "qwen":
-                # Qwen: точная стоимость по QWEN_PRICES (кэш из prompt_tokens_details,
-                # рассуждения оплачиваются как выход) — копим в settings для панели API.
-                # Для стоимости берём СЫРОЙ completion_tokens из usage: в графе «ответ»
-                # выше рассуждения уже вычтены, а Alibaba биллит их в составе выхода.
-                _cost = _qwen_cost(model_name, _u)
-                if _cost is not None:
-                    try:
-                        hist.add_provider_cost("qwen", _cost)
-                    except Exception as e:
-                        logger.warning("⚠️ Не удалось записать расход Qwen в БД: %s", e)
-                # Израсходованные токены вычитаем из ОСТАТКА бесплатной квоты
-                # Alibaba по КАЖДОЙ модели отдельно (вечный ключ settings
-                # qwen_tokens_<модель>) — в панели API это число «осталось».
-                # Берём «всего» (_tt): вход, ответ и размышления, ровно как
-                # в строке лога ниже. Перешёл остаток черту — владельцу уйдёт
-                # письмо (19.09.2026, _spend_qwen_quota).
-                try:
-                    _spend_qwen_quota(model_name, _tt)
-                except Exception as e:
-                    logger.warning("⚠️ Не удалось списать токены Qwen в БД: %s", e)
                 _cached = (_u.get("prompt_tokens_details") or {}).get("cached_tokens", 0) or 0
                 logger.info("%s Ответ от %s за %s | контекст=%s (из кэша %s) | ответ=%s | размышления=%s | всего=%s | ≈$%.6f",
                             _icon_of(model_name), model_name, took, _pt, _cached, _ct, _think, _tt, _cost or 0.0)
@@ -2530,7 +2269,7 @@ def ask_gemini_audio(chat_id: int, user_id: int, audio_base64: str, progress=Non
     него отвечать, ей объясняет характер бота. Не возвращать без его просьбы.
 
     ⚠️ С 21.09.2026 ЭТОТ ПУТЬ — НЕ ЕДИНСТВЕННЫЙ: если активная модель звук не
-    принимает (Qwen, DeepSeek, Xiaomi), голосовое к ней и не пойдёт — она получит
+    принимает (DeepSeek, Xiaomi), голосовое к ней и не пойдёт — она получит
     дословную расшифровку как сообщение человека (см. блок «Файл — активной
     модели, которая его НЕ понимает»). Сюда попадают случаи, когда активная
     слушает сама, и страховкой — когда расшифровка не удалась.
@@ -2572,7 +2311,7 @@ def ask_gemini_video(chat_id: int, user_id: int, video_base64: str,
     ВИДЕО человека — модели. Весь путь общий с голосовым
     (`_ask_native_media`), здесь только отличия видео, и их по существу три:
       • своя очередь VIDEO_FALLBACK_CHAIN (видео принимают только Gemini,
-        поле "video" в AVAILABLE_MODELS; у Qwen, DeepSeek и Xiaomi его нет);
+        поле "video" в AVAILABLE_MODELS; у DeepSeek и Xiaomi его нет);
       • свой потолок VIDEO_TIMEOUT — разбор ролика дольше расшифровки речи;
       • у видео БЫВАЕТ подпись (caption), у голосового её не бывает, — поэтому
         текст пользователя идёт в тот же запрос отдельной частью, а в память
@@ -2800,7 +2539,7 @@ def ask_gemini(chat_id: int, user_id: int, user_text: str, image_base64: str = N
         почти всегда и вымыл бы оттуда настоящие вопросы людей.
     :param progress: черновик «ответ на глазах» (services/live_answer.LiveDraft)
         или None. Получает текст ответа по ходу — только от потоковых моделей
-        (Qwen, DeepSeek, Xiaomi) и только из основного запроса. На то, что
+        (DeepSeek, Xiaomi) и только из основного запроса. На то, что
         функция вернёт и запишет, не влияет никак.
     """
     # ── Фото, а активная модель слепая: спрашиваем не её глаза, а разбор ──
@@ -3046,7 +2785,7 @@ def format_news_as_colonel(title: str, description: str, tag: str, article_text:
             answer = data["choices"][0]["message"]["content"]
             # ⚠️ СРЕЗАЕМ РАЗМЫШЛЕНИЯ. Думающая модель возвращает ответ вместе с
             # блоком <thought>…</thought> впереди (его ставит _openai_stream_request
-            # у Qwen/DeepSeek/Xiaomi и просит include_thoughts у Gemini). Дальше
+            # у DeepSeek/Xiaomi и просит include_thoughts у Gemini). Дальше
             # новость уходит подписчикам, и короткая — через convert_md, который
             # мыслей НЕ разбирает: без этой строки в рассылку уезжали бы черновые
             # рассуждения модели прямо со служебными тегами. Тем же текстом
@@ -3435,7 +3174,7 @@ def ask_group_proactive_media(chat_id: int, bot_id: int, trigger_text: str,
     Максим решил: «пусть отвечает модель-разбиратель», и реплику стала писать
     Gemini из `PROACTIVE_MEDIA_CHAIN`. 21.09.2026 решение уточнено: отвечать
     должна та модель, которую он выбрал кнопкой, — и файл уходит ей, если она
-    его понимает. Не понимает (Qwen со звуком, DeepSeek с видео) — сюда дело
+    его понимает. Не понимает (DeepSeek со звуком или видео) — сюда дело
     вовсе не доходит: `services/proactive.py` зовёт обычный
     `ask_group_proactive`, и активная отвечает по стенограмме, где разбор уже
     лежит строкой участника. Довод 11.08 закрыт иначе: у разборщика появилось
@@ -3448,7 +3187,7 @@ def ask_group_proactive_media(chat_id: int, bot_id: int, trigger_text: str,
 
     ⚠️ ДВА ПУТИ ЗАПРОСА, И ВЫБИРАЕТ ИХ ПРОВАЙДЕР АКТИВНОЙ МОДЕЛИ. Gemini
     понимает native generateContent (и только он принимает голосовое и видео);
-    зрячие Qwen, DeepSeek и Xiaomi ходят OpenAI-совместимым запросом — им файл
+    зрячие DeepSeek и Xiaomi ходят OpenAI-совместимым запросом — им файл
     уходит через `_gemini_chat_request`, тем же путём, что фото в личке.
 
     ⚠️ РАЗБОР МЕДИА ПРИ ЭТОМ НЕ ОТМЕНЯЕТСЯ (services/proactive.py). Он нужен не
@@ -3534,7 +3273,7 @@ def ask_group_proactive_media(chat_id: int, bot_id: int, trigger_text: str,
                               "\n\n".join(log_parts))
 
     # ── Активная не из семейства Gemini: свой формат запроса ──
-    # Зрячие Qwen, DeepSeek и Xiaomi native generateContent не понимают, но
+    # Зрячие DeepSeek и Xiaomi native generateContent не понимают, но
     # картинку принимают OpenAI-совместимым запросом. Отдаём файл им тем же
     # помощником, что и фото в личке: он сам знает адрес и ключ провайдера, а
     # при отказе подстрахует цепочкой. Голосовое и видео сюда не попадают —
@@ -3685,7 +3424,7 @@ def ask_group_proactive(chat_id: int, bot_id: int, trigger_text: str,
     # ровно то же самое уже написано в конце инструкции участия, которую
     # владелец правит сам. Две причины держать стенограмму именно тут:
     #   • без единого сообщения от человека Gemini отбивает запрос ошибкой 400
-    #     (проверено живыми запросами 16.08; Qwen, DeepSeek и Xiaomi терпят), а
+    #     (проверено живыми запросами 16.08; DeepSeek и Xiaomi терпят), а
     #     модели Gemini стоят в цепочке подстраховки у любой активной модели;
     #   • переписка — это данные, а не правила бота, и её место не в системной
     #     части.

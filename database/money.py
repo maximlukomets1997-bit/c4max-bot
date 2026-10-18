@@ -5,16 +5,13 @@
 #
 #    add_provider_cost   — прибавить стоимость запроса к копилке провайдера и
 #                          на ту же сумму уменьшить остаток на его счету
-#    spend_qwen_tokens / get_qwen_tokens — отдельный учёт БЕСПЛАТНОЙ КВОТЫ
-#                          Qwen: она считается не в деньгах, а в токенах на
-#                          каждую модель
 #    register_api_call   — +1 обращение к модели (таблица api_calls)
 #    clear_api_calls / clear_user_token_usage — месячный сброс
 #    register_image_call / unregister_image_call / get_remaining_image_calls —
 #                          суточный лимит картинок на человека
 #
 #  ⚠️ ОДНА ФУНКЦИЯ НА ВСЕХ ПРОВАЙДЕРОВ (2026-08-03). Раньше их было пять —
-#  add_deepseek_cost, add_xiaomi_cost, add_qwen_cost и прочие, — и различались
+#  add_deepseek_cost, add_xiaomi_cost, add_image_cost и прочие, — и различались
 #  они только именами ключей. Теперь имена берутся из реестра
 #  `config.PROVIDERS` (`cost_key`, `balance_key`): новый провайдер добавляется
 #  в реестр, а не сюда.
@@ -31,11 +28,9 @@
 #  ⚠️ ЗДЕСЬ ТОЛЬКО КОПИЛКИ, А НЕ АРИФМЕТИКА ЦЕНЫ. Сколько стоит конкретный
 #  запрос, считает services/gemini.py по прайсам из config, и вот ЭТО как раз
 #  покрыто selftest (группы «деньги — расчёт стоимости» и «деньги — сам прайс
-#  не менялся»). Из этого файла selftest видит четыре функции:
-#  plan_balance_sync (группа «деньги»), spend_qwen_tokens (группа «квота
-#  Qwen», 19.09.2026 — от её пары «было → стало» зависят письма о квоте) и
-#  месячные clear_api_calls / clear_user_token_usage (группа «чистка и
-#  сброс», 05.10.2026). Сами копилки (add_provider_cost) и счётчик обращений
+#  не менялся»). Из этого файла selftest видит три функции:
+#  plan_balance_sync (группа «деньги») и месячные clear_api_calls /
+#  clear_user_token_usage (группа «чистка и сброс», 05.10.2026). Сами копилки (add_provider_cost) и счётчик обращений
 #  (register_api_call) проверки либо подменяют, либо зовут, не сверяя
 #  результат, — их правка проверяется руками.
 # ───────────────────────────────────────────────
@@ -54,12 +49,11 @@ def add_provider_cost(provider: str, delta_usd: float):
     Прибавляет стоимость одного запроса к копилке расхода провайдера и на ту же
     сумму уменьшает остаток на его счету. ОДНА функция на всех (2026-08-03):
     раньше их было пять — add_deepseek_cost / add_xiaomi_cost /
-    add_openrouter_cost / add_qwen_cost / add_image_cost, — и различались они
+    add_openrouter_cost / add_image_cost и другие, — и различались они
     только именами ключей.
 
     Имена ключей берутся из реестра `config.PROVIDERS`: `cost_key` (копилка,
-    есть у всех, кто тратит деньги) и `balance_key` (остаток, есть не у всех —
-    у Qwen вместо денег бесплатная квота в токенах, см. spend_qwen_tokens).
+    есть у всех, кто тратит деньги) и `balance_key` (остаток на счету).
     Провайдер без копилки — молча ничего не делаем: у Gemini бесплатный ключ,
     и считать там нечего.
 
@@ -182,70 +176,6 @@ def sync_provider_balance(provider: str, real_usd: float, epsilon: float) -> tup
         conn.commit()
 
     return new_balance, add_cost, reason
-
-
-def spend_qwen_tokens(model_name: str, tokens: int):
-    """Вычитает израсходованные токены из ОСТАТКА бесплатной квоты Alibaba
-    по КАЖДОЙ модели Qwen отдельно (ключ settings qwen_tokens_<имя модели>) —
-    в панели «📡 Настройки API» это число «осталось».
-    Устроено как остаток баланса DeepSeek: квота заводится в settings РУКАМИ
-    (при смене ключа или рабочего пространства), дальше тает сама. Ключа
-    в settings нет — вычитать нечего, UPDATE молча не найдёт строку.
-    Остаток ВЕЧНЫЙ: месячный сброс (_monthly_stats_reset) его не трогает —
-    квота Alibaba даётся не помесячно, а объёмом токенов на модель.
-    Число берётся из usage.total_tokens — это «всего» из строки лога
-    (вход + ответ + размышления), сверено с консолью Model Studio 2026-07-05.
-    Уходит в МИНУС при исчерпанной квоте — честный сигнал, что расход пошёл
-    за деньги; не «чинить» ограничением снизу.
-    Вычитание атомарно в SQL — без гонки между потоками.
-
-    Возвращает пару (было, стало) — остаток до и после списания — или None,
-    если списывать было нечего (квота не заведена, ноль токенов). По этой паре
-    services/gemini.py::_spend_qwen_quota решает, перешагнул ли остаток черту и
-    пора ли писать владельцу (19.09.2026).
-    ⚠️ «Стало» ЧИТАЕТСЯ ИЗ БАЗЫ под тем же замком, что и вычитание, а «было»
-    выводится из него: так пара совпадает с тем, что посчитал SQL, и два потока
-    не могут увидеть один и тот же переход через черту — письмо уйдёт одно."""
-    if not model_name or not tokens or tokens <= 0:
-        return None
-    key = f"qwen_tokens_{model_name}"
-    row = None
-    with _lock:
-        conn = _get_connection()
-        cur = conn.execute(
-            "UPDATE settings SET value = CAST(value AS INTEGER) - ? WHERE key = ?",
-            (int(tokens), key),
-        )
-        if cur.rowcount:
-            row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
-        conn.commit()
-    if row is None:
-        return None
-    try:
-        after = int(float(row[0]))
-    except (TypeError, ValueError):
-        return None
-    return after + int(tokens), after
-
-
-def get_qwen_tokens() -> dict:
-    """ОСТАТОК бесплатной квоты по каждой модели Qwen: {имя модели: токенов}.
-    Читает все ключи settings вида qwen_tokens_<модель> (их уменьшает
-    spend_qwen_tokens). Показывается в панели «📡 Настройки API».
-    Значение может быть отрицательным — квота исчерпана, пошёл платный расход."""
-    prefix = "qwen_tokens_"
-    with _lock:
-        conn = _get_connection()
-        rows = conn.execute(
-            "SELECT key, value FROM settings WHERE key LIKE ?", (prefix + "%",)
-        ).fetchall()
-    out = {}
-    for row in rows:
-        try:
-            out[row["key"][len(prefix):]] = int(float(row["value"] or 0))
-        except (TypeError, ValueError):
-            out[row["key"][len(prefix):]] = 0
-    return out
 
 
 def register_api_call(model_name: str):

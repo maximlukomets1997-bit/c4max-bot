@@ -148,7 +148,7 @@ def _create_schema(conn):
         --                  (тот же формат, что called_at — по нему считаются
         --                  вызовы за период);
         --   kyiv_label   — тот же момент по Киеву «ГГГГ-ММ-ДД ЧЧ:ММ» (подпись);
-        --   data         — JSON со значениями копилок и остатков квоты Qwen.
+        --   data         — JSON со значениями копилок и остатков на счетах.
         CREATE TABLE IF NOT EXISTS stats_snapshots (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
             taken_at_utc TEXT NOT NULL,

@@ -19,8 +19,11 @@
 #     Telegram; новое пришло, старое удалено — панель на месте.
 #     ⚠️ ЭТО СООБЩЕНИЕ И ЕСТЬ /adm ВЛАДЕЛЬЦА (18.10.2026, решение Максима: два
 #     одинаковых сообщения — одно). Его текст — заголовок админ-панели с
-#     версией (CARRIER_TEXT); /adm, нижняя «🎛 Админ-панель» и «⬅️ Админ-панель»
-#     присылают его заново (panel_main.send_adm_panel), прежнее удаляется.
+#     версией и три сводные цифры (carrier_text; цифры — с 18.10.2026, когда
+#     «💬 Статистика» стала частью «🎛 Админ-панель»). /adm и «⬅️ Админ-панель»
+#     присылают его заново с разделами внизу (panel_main.send_adm_panel),
+#     нижняя «🎛 Админ-панель» и /stats — с кнопками бывшей статистики
+#     (panel_main.send_stats_panel, подменю SERVICE_ROWS); прежнее удаляется.
 #     ⚠️ В гигиену панелей (register_and_clean_bot_message) его НЕ класть:
 #     открытие любого раздела стёрло бы его, а с ним и нижние кнопки.
 #     Пропала (сообщение удалили руками) — её вернут /start и /adm.
@@ -35,9 +38,10 @@
 #   • Номер сообщения с панелью — в settings 'owner_keys_msg_<номер владельца>':
 #     по нему удаляется предыдущее. ⚠️ Telegram не даёт ботам удалять сообщения
 #     старше двух суток — тогда старое остаётся, и в чате их два.
-#   • Подменю «📡 Настройки API» (18.10.2026, пилот) — API_ROWS, и «⚙️ PROMPTы»
-#     (18.10.2026) — PROMPTS_ROWS: та же панель, другие кнопки; сообщение с ним —
-#     тот же один в чате. Подробности — у API_ROWS и PROMPTS_ROWS.
+#   • Подменю «📡 Настройки API» (18.10.2026, пилот) — API_ROWS, «⚙️ PROMPTы»
+#     (18.10.2026) — PROMPTS_ROWS и «🎛 Админ-панель» (18.10.2026) —
+#     SERVICE_ROWS: та же панель, другие кнопки; сообщение с ним — тот же один
+#     в чате. Подробности — у самих раскладок.
 #
 #  ⚠️ «🌐 Сайт» — НЕ кнопка-мини-приложение (проба 17.10.2026): открытый с
 #  нижней кнопки сайт не получает от Telegram, кто его открыл, и пишет «Вход
@@ -63,20 +67,42 @@ logger = logging.getLogger(__name__)
 
 # Номер сообщения, с которым стоит панель: owner_keys_msg_<номер владельца>.
 MSG_KEY_PREFIX = "owner_keys_msg_"
-# Текст сообщения с главной панелью — он же /adm владельца (18.10.2026,
-# надпись утверждена Максимом): заголовок с версией синей ссылкой и черта.
-# До этого дня здесь было отдельное «⌨️ Панель управления — кнопки внизу…»,
-# а /adm приходил вторым сообщением с тем же смыслом.
-CARRIER_TEXT = (f"🎛 <b>АДМИН-ПАНЕЛЬ</b> · {BOT_VERSION_HTML}\n"
+# Заголовок сообщения с главной панелью — оно же /adm владельца (18.10.2026,
+# надпись утверждена Максимом): версия синей ссылкой и черта. До этого дня
+# здесь было отдельное «⌨️ Панель управления — кнопки внизу…», а /adm
+# приходил вторым сообщением с тем же смыслом.
+CARRIER_HEAD = (f"🎛 <b>АДМИН-ПАНЕЛЬ</b> · {BOT_VERSION_HTML}\n"
                 "───────────────────────────")
 
-# Надпись кнопки → код действия. Порядок — раскладка: по две кнопки в ряд
-# (утверждена Максимом на пробе 17.10.2026), нечётная последняя — во всю
-# ширину. Надпись и есть то, что Telegram
-# пришлёт текстом при нажатии, — менять её значит менять и распознавание.
+
+def carrier_text() -> str:
+    """
+    Текст сообщения с главной панелью: заголовок с версией и три сводные
+    цифры (18.10.2026, решение Максима: «🎛 Админ-панель» и «💬 Статистика» —
+    одно). Цифры — те же, что в панели статистики (panel_main.stats_lines),
+    свежие на момент отправки; сами не обновляются. Подсчёт сорвался —
+    сообщение уходит с одной версией: из-за цифр нижние кнопки пропасть не
+    должны.
+    """
+    try:
+        from .panel_main import stats_lines
+        return f"{CARRIER_HEAD}\n{stats_lines()}"
+    except Exception as e:
+        logger.warning("⚠️ Цифры для сообщения с версией не посчитались: %s", e)
+        return CARRIER_HEAD
+
+
+# Надпись кнопки → код действия. Порядок — раскладка: первая — во всю ширину,
+# остальные по две в ряд (по две — утверждено Максимом на пробе 17.10.2026;
+# «🎛 Админ-панель» одна сверху — 18.10.2026, когда ушла «💬 Статистика»: так
+# все остальные кнопки остались на своих местах). Надпись и есть то, что
+# Telegram пришлёт текстом при нажатии, — менять её значит менять и
+# распознавание.
 KEYS = (
+    # «🎛 Админ-панель» с 18.10.2026 — и статистика: присылает сообщение с
+    # версией и цифрами, а внизу ставит кнопки бывшей панели статистики
+    # (подменю SERVICE_ROWS). Разделы возвращает «⬅️ Назад» или /adm.
     ("🎛 Админ-панель", "adm"),
-    ("💬 Статистика", "stats"),
     ("⚙️ PROMPTы", "prompts"),
     ("📡 Настройки API", "api"),
     ("🛠 DDoS-Guard", "mod"),
@@ -137,12 +163,31 @@ PROMPTS_ROWS = (
 )
 PROMPTS_KEYS = tuple(key for row in PROMPTS_ROWS for key in row)
 
-# Подменю: раскладка и текст сообщения, с которым оно стоит. None — текстом
-# служит сама панель раздела (send_owner_keys собирает её в момент отправки).
-_MENUS = {"api": (API_ROWS, API_CARRIER_TEXT), "prompts": (PROMPTS_ROWS, None)}
+# Подменю «🎛 Админ-панель» (18.10.2026, решение Максима, вариант Б): кнопки
+# бывшей панели «💬 СТАТИСТИКА». Стоит на том же сообщении с версией и
+# цифрами (carrier_text), что и главная. Каждая — то же, что кнопка под
+# прежней панелью: экран обновлений, копия базы файлом, экран дайджеста и
+# тумблер понедельничного дайджеста (panel_digest.flip_digest_auto).
+SERVICE_ROWS = (
+    (("⬇️ Обновления", "s_updates"), ("💾 Копия базы", "s_backup")),
+    (("📊 Дайджест недели", "s_digest"),),
+    (("📰 Дайджест по понедельникам", "s_digest_auto"),),
+    (("⬅️ Назад", "back"),),
+)
+SERVICE_KEYS = tuple(key for row in SERVICE_ROWS for key in row)
 
-_ALL_KEYS = KEYS + API_KEYS + PROMPTS_KEYS
-_BY_LABEL = {label: code for label, code in _ALL_KEYS}
+# Подменю: раскладка и текст сообщения, с которым оно стоит. None — текст
+# собирается в момент отправки: у prompts — сама панель раздела, у service —
+# сообщение с версией и цифрами.
+_MENUS = {"api": (API_ROWS, API_CARRIER_TEXT), "prompts": (PROMPTS_ROWS, None),
+          "service": (SERVICE_ROWS, None)}
+
+_ALL_KEYS = KEYS + API_KEYS + PROMPTS_KEYS + SERVICE_KEYS
+# «💬 Статистика» ушла из панели 18.10.2026; если её кнопка осталась на
+# экране от прежней панели, нажатие — то же, что «🎛 Админ-панель», а не
+# вопрос модели.
+_LEGACY_LABELS = (("💬 Статистика", "adm"),)
+_BY_LABEL = {label: code for label, code in _ALL_KEYS + _LEGACY_LABELS}
 # У этих кнопок в надписи состояние или число («…: 🟢ВКЛ», «…: 3 с»,
 # «💬 3 сообщ.») — надпись целиком собирает тот же шаг, что у кнопки под
 # панелью, а узнаётся она по образцу при ЛЮБОМ состоянии.
@@ -157,6 +202,7 @@ _STATEFUL = {
     "p_hands": r"🤚 РУКИ \(мут\): .+",
     "p_mm_info": r"💬 \d+ сообщ\.",
     "p_ctx_info": r"📜 \d+ сообщ\.",
+    "s_digest_auto": "📰 Дайджест по понедельникам: .+",
 }
 _STATEFUL_RX = {code: re.compile(pattern) for code, pattern in _STATEFUL.items()}
 
@@ -175,6 +221,9 @@ def _shown(label: str, code: str, user_id: int | None = None) -> str:
     if code.startswith("p_") and code in _STATEFUL:
         from .panel_prompts import prompts_toggle_text
         return prompts_toggle_text(code[2:].removesuffix("_info"), user_id)
+    if code == "s_digest_auto":
+        from .panel_digest import digest_toggle_text
+        return digest_toggle_text()
     if code in _STATEFUL:
         from .panel_main import api_toggle_text
         return api_toggle_text(code)
@@ -200,13 +249,14 @@ def _code_of(text: str) -> str | None:
 
 def owner_keyboard(menu: str = "main", user_id: int | None = None) -> ReplyKeyboardMarkup:
     """
-    Сама панель, компактная, не сворачивается сама. main — разделы по две
-    кнопки в ряд; api и prompts — подменю разделов по своим рядам.
+    Сама панель, компактная, не сворачивается сама. main — «🎛 Админ-панель»
+    во всю ширину, остальные разделы по две кнопки в ряд; api, prompts и
+    service — подменю по своим рядам.
     """
     if menu in _MENUS:
         layout = _MENUS[menu][0]
     else:
-        layout = [KEYS[i:i + 2] for i in range(0, len(KEYS), 2)]
+        layout = [KEYS[:1]] + [KEYS[i:i + 2] for i in range(1, len(KEYS), 2)]
     rows = [[KeyboardButton(_shown(label, code, user_id)) for label, code in row]
             for row in layout]
     return ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True)
@@ -289,7 +339,8 @@ async def send_owner_keys(bot, chat_id: int, user_id: int | None = None,
                 return
         await clean_bot_messages(bot, chat_id)
         return
-    text = _MENUS[menu][1] if menu in _MENUS else CARRIER_TEXT
+    # Главная и подменю «🎛 Админ-панель» стоят на сообщении с версией и цифрами.
+    text = (_MENUS[menu][1] if menu in _MENUS else None) or carrier_text()
     try:
         await _post(bot, chat_id, text, keyboard)
     except Exception as e:
@@ -311,11 +362,27 @@ async def _run(code: str, context, chat_id: int, user_id: int) -> None:
     """
     bot = context.bot
     if code == "adm":
-        from .panel_main import send_adm_panel
-        await send_adm_panel(bot, chat_id, user_id)
-    elif code == "stats":
+        # «🎛 Админ-панель» с 18.10.2026 — и статистика: у владельца
+        # send_stats_panel присылает сообщение с версией и цифрами и ставит
+        # внизу кнопки бывшей статистики (подменю service), открытый раздел
+        # убирает. Та же функция у /stats и у «⬅️ Назад» с экранов
+        # обновлений и дайджеста.
         from .panel_main import send_stats_panel
         await send_stats_panel(bot, chat_id, user_id)
+    elif code == "s_updates":
+        from .panel_updates import send_updates_panel
+        await send_updates_panel(bot, chat_id, user_id, 0)
+    elif code == "s_backup":
+        from .panel_main import send_db_backup
+        await _notice(bot, chat_id, "⏳ Делаю копию базы…")
+        await send_db_backup(bot, chat_id, user_id)
+    elif code == "s_digest":
+        from .panel_digest import send_digest_panel
+        await send_digest_panel(bot, chat_id, user_id)
+    elif code == "s_digest_auto":
+        from .panel_digest import flip_digest_auto
+        await _notice(bot, chat_id, flip_digest_auto(user_id))
+        await send_owner_keys(bot, chat_id, user_id, menu="service")
     elif code == "prompts":
         # Панель раздела — сама с нижними кнопками подменю (send_prompts_panel
         # у владельца зовёт send_owner_keys(menu="prompts")). Второй раз

@@ -10060,7 +10060,9 @@ def check_owner_keys():
     # Последний ряд — с 18.10.2026: «🧹 Очистить ПАМЯТЬ» (слиты «Очистить
     # РАЗГОВОРЫ» и «Очистить мой диалог») и перезапуск, копия кнопки /adm.
     # Тумблера «⬇️ ОБНОВЛЕНИЕ» больше нет — самообновление включено всегда.
-    WANT = ["🎛 Админ-панель", "💬 Статистика", "⚙️ PROMPTы", "📡 Настройки API",
+    # «💬 Статистика» ушла 18.10.2026: её цифры — в сообщении с версией, её
+    # кнопки — в подменю «🎛 Админ-панель» (раздел 10).
+    WANT = ["🎛 Админ-панель", "⚙️ PROMPTы", "📡 Настройки API",
             "🛠 DDoS-Guard", "👥 Пользователи", "📚 База знаний", "🎮 Викторина",
             "📜 Логи бота", "🌐 Сайт", "🧹 Очистить ПАМЯТЬ", "🔄 ПЕРЕЗАПУСК"]
 
@@ -10125,6 +10127,10 @@ def check_owner_keys():
                        uf.THOUGHTS_SETTING_KEY, la.THOUGHTS_SETTING_KEY, mb.SETTING_KEY)
                       + PROMPT_KEYS}
     saved_pp = (pp.get_known_chats, pp.send_prompt_files)
+    from handlers.admin import panel_digest as pd, panel_updates as pu
+    from services import group_digest
+    saved_dig = hist.get_setting(group_digest.ENABLED_KEY, "")
+    saved_svc = (pd.send_digest_panel, pu.send_updates_panel, pm.send_db_backup, pm.get_bot_stats)
     targets = {
         "adm": (pm, "send_adm_panel"), "stats": (pm, "send_stats_panel"),
         "prompts": (pp, "send_prompts_panel"), "api": (pm, "send_api_panel"),
@@ -10167,8 +10173,10 @@ def check_owner_keys():
         labels = [b.text for row in kb.keyboard for b in row]
         expect(f"надписи или порядок нижних кнопок не те: {labels}", labels == WANT)
         sizes = [len(row) for row in kb.keyboard]
-        expect(f"нижние кнопки не по две в ряд (нечётная последняя — одна): {sizes}",
-               sizes == [2] * (len(WANT) // 2) + [1] * (len(WANT) % 2))
+        # «🎛 Админ-панель» — одна во всю ширину, остальные по две (18.10.2026).
+        expect(f"нижние кнопки не так: «🎛 Админ-панель» одна сверху, остальные по две "
+               f"в ряд: {sizes}",
+               sizes == [1] + [2] * ((len(WANT) - 1) // 2) + [1] * ((len(WANT) - 1) % 2))
         expect("панель не компактная или сворачивается сама",
                kb.resize_keyboard is True and kb.is_persistent is True)
         expect("у нижней кнопки «🌐 Сайт» мини-приложение — с неё сайт не пускает (проба 17.10)",
@@ -10228,11 +10236,15 @@ def check_owner_keys():
             return bot, gone, ctx
 
         codes = dict(pk.KEYS)
+        # «🎛 Админ-панель» с 18.10.2026 открывает статистику: сообщение с
+        # версией и цифрами и кнопки бывшей статистики внизу (раздел 10).
+        opens = {"adm": "stats"}
         for label in WANT:
             code = codes.get(label)
             if code in targets:
                 bot, gone, _ = press(OWNER, label)
-                expect(f"кнопка «{label}» открыла не свой раздел: {opened}", opened == [code])
+                expect(f"кнопка «{label}» открыла не свой раздел: {opened}",
+                       opened == [opens.get(code, code)])
                 expect(f"нажатие «{label}» ушло модели вопросом", not asked)
                 expect(f"нажатие «{label}» осталось висеть в чате", bool(gone))
 
@@ -10425,7 +10437,7 @@ def check_owner_keys():
             text, markup = pm.adm_view(OWNER)
             expect(f"/adm владельца не без кнопок или не тем текстом, что у нижних кнопок "
                    f"(старая запись выключателя «{raw}»): {datas_of(markup)}",
-                   markup is None and text == pk.CARRIER_TEXT)
+                   markup is None and text == pk.carrier_text())
         hist.delete_setting(OLD_KEY)
         text, markup = pm.adm_view(MOD)
         expect("у модератора /adm стал как у владельца — нижней панели у него нет",
@@ -10447,7 +10459,7 @@ def check_owner_keys():
         expect(f"/adm владельца пришёл не одним сообщением с версией и нижними кнопками: "
                f"{[(e[2], type(e[3]).__name__) for e in sent]}",
                len(sent) == 1 and isinstance(sent[0][3], ReplyKeyboardMarkup)
-               and sent[0][2] == pk.CARRIER_TEXT and c.BOT_VERSION_HTML in sent[0][2]
+               and sent[0][2] == pk.carrier_text() and c.BOT_VERSION_HTML in sent[0][2]
                and "АДМИН-ПАНЕЛЬ" in sent[0][2] and "Разделы" not in sent[0][2])
         expect("версия в /adm владельца не синей ссылкой или под ним развернётся карточка GitHub",
                bool(sent) and sent[0][5].get("parse_mode") == ParseMode.HTML
@@ -10568,7 +10580,7 @@ def check_owner_keys():
         bot, gone, _ = press(OWNER, "⬅️ Назад")
         rows, text, _ = last_keys(bot)
         expect(f"«⬅️ Назад» не вернул главную нижнюю панель: {rows}",
-               rows is not None and sum(rows, []) == WANT and text == pk.CARRIER_TEXT
+               rows is not None and sum(rows, []) == WANT and text == pk.carrier_text()
                and not asked and bool(gone))
         press(OWNER, "📡 Настройки API")
         bot = Bot()
@@ -10653,7 +10665,7 @@ def check_owner_keys():
                 expect(f"нижняя «{label}» не узнаётся — нажатие ушло бы модели",
                        pk._code_of(label) is not None)
         for text, code in (("💬 ОТВЕТЫ ИИ: 🔴ВЫКЛ", "p_ai_replies"), ("💬 7 сообщ.", "p_mm_info"),
-                           ("📜 45 сообщ.", "p_ctx_info"), ("💬 Статистика", "stats"),
+                           ("📜 45 сообщ.", "p_ctx_info"), ("💬 Статистика", "adm"),
                            ("⚙️ PROMPTы", "prompts"), ("⚙️ PROMPT: 🔴ВЫКЛ", "p_prompt")):
             expect(f"«{text}» узнаётся как «{pk._code_of(text)}», а не «{code}»",
                    pk._code_of(text) == code)
@@ -10808,7 +10820,7 @@ def check_owner_keys():
         bot, gone, _ = press(OWNER, "⬅️ Назад")
         rows, text, _ = last_keys(bot)
         expect(f"«⬅️ Назад» из подменю PROMPTы не вернул разделы на сообщении с версией: {rows}",
-               rows is not None and sum(rows, []) == WANT and text == pk.CARRIER_TEXT)
+               rows is not None and sum(rows, []) == WANT and text == pk.carrier_text())
         expect("«⬅️ Назад» не убрал панель промптов — она осталась бы без своих кнопок",
                bool(carrier) and ("delete", OWNER, carrier) in bot.events)
         for title, uid in (("постороннего", PLAIN), ("модератора", MOD)):
@@ -10842,7 +10854,153 @@ def check_owner_keys():
         handler_src = inspect.getsource(pp._handle_proactive_callback)
         expect("кнопки «Сам в разговор» и регуляторы под панелью — не общими шагами",
                "flip_prompts_toggle(" in handler_src and "step_proactive(" in handler_src)
+
+        # ═══ 10. «🎛 Админ-панель» = статистика (18.10.2026, вариант Б) ═══
+        # Цифры — в сообщении с версией; кнопки бывшей панели статистики —
+        # внизу, подменю service; каждая делает то же, что под прежней панелью.
+        hist.set_setting(group_digest.ENABLED_KEY, "1")
+        s = hist.get_bot_stats()
+        text = pk.carrier_text()
+        expect(f"в сообщении с версией нет трёх цифр статистики: {text!r}",
+               text.startswith(pk.CARRIER_HEAD) and c.BOT_VERSION_HTML in text
+               and f"Обменов «вопрос-ответ» за этот месяц: {s['lifetime_requests']}" in text
+               and f"Подписчиков на новости: {s['subscriptions']}" in text
+               and f"Архив группы за последние 10 дней: {s['group_msg_count']}" in text)
+        expect("цифры в сообщении с версией и в панели статистики собраны по-разному",
+               pm.stats_lines() in text)
+
+        def _no_stats():
+            raise RuntimeError("база недоступна")
+        pm.get_bot_stats = _no_stats
+        expect("подсчёт цифр сорвался — и сообщение с версией не собралось",
+               pk.carrier_text() == pk.CARRIER_HEAD)
+        bot = Bot(start_id=1500)
+        asyncio.run(pk.send_owner_keys(bot, OWNER, OWNER))
+        expect("подсчёт цифр сорвался — и нижние кнопки не пришли",
+               len(keyboards(bot)) == 1 and keyboards(bot)[0][2] == pk.CARRIER_HEAD)
+        pm.get_bot_stats = saved_svc[3]
+
+        WANT_SERVICE = [["⬇️ Обновления", "💾 Копия базы"], ["📊 Дайджест недели"],
+                        ["📰 Дайджест по понедельникам: 🟢ВКЛ"], ["⬅️ Назад"]]
+        skb = pk.owner_keyboard("service", OWNER)
+        expect(f"подменю «🎛 Админ-панель»: надписи или ряды не те: {rows_of(skb)}",
+               rows_of(skb) == WANT_SERVICE)
+        expect("подменю «🎛 Админ-панель» не компактное или сворачивается само",
+               skb.resize_keyboard is True and skb.is_persistent is True)
+        seen = {}
+        clash = [label for label, code in pk.KEYS + pk.API_KEYS + pk.PROMPTS_KEYS
+                 + pk.SERVICE_KEYS if seen.setdefault(label, code) != code]
+        expect(f"одна надпись у двух разных нижних кнопок: {clash}", not clash)
+        old_texts = [b.text for row in pm._stats_keyboard().inline_keyboard for b in row]
+        for label in sum(WANT_SERVICE[:3], []):
+            expect(f"«{label}» внизу есть, а под прежней панелью статистики — другая надпись",
+                   label in old_texts)
+            expect(f"нижняя «{label}» не узнаётся — нажатие ушло бы модели",
+                   pk._code_of(label) is not None)
+        expect("«📰 Дайджест по понедельникам» с прежней надписью не узнаётся",
+               pk._code_of("📰 Дайджест по понедельникам: 🔴ВЫКЛ") == "s_digest_auto")
+
+        # Настоящая статистика у владельца в личке: сообщение с версией и
+        # цифрами, внизу — подменю; прежнее сообщение и открытый раздел убраны,
+        # само оно в уборку панелей не попадает.
+        hist.set_setting(SLOT, "444")
+        bot = Bot(start_id=1600)
+        asyncio.run(reg(bot, OWNER, 4545))           # открытый раздел — через гигиену
+        bot.events.clear()
+        asyncio.run(saved_targets["stats"](bot, OWNER, OWNER))
+        sent = [e for e in bot.events if e[0] == "send"]
+        expect(f"«🎛 Админ-панель» владельца — не одно сообщение с версией, цифрами и "
+               f"кнопками статистики внизу: {[(e[2][:30], type(e[3]).__name__) for e in sent]}",
+               len(sent) == 1 and isinstance(sent[0][3], ReplyKeyboardMarkup)
+               and sent[0][2] == pk.carrier_text() and rows_of(sent[0][3]) == WANT_SERVICE)
+        expect("«🎛 Админ-панель» не убрала прежнее сообщение с нижними кнопками",
+               ("delete", OWNER, 444) in bot.events)
+        expect("«🎛 Админ-панель» не убрала открытый раздел", ("delete", OWNER, 4545) in bot.events)
+        bot = Bot(start_id=1700)
+        asyncio.run(reg(bot, OWNER, 4646))
+        expect("сообщение с версией попало в уборку панелей — первый же раздел стёр бы кнопки",
+               bool(sent) and ("delete", OWNER, sent[0][4]) not in bot.events)
+        # Модератору и в чужой личке статистики нет — у них прежний путь.
+        bot = Bot()
+        asyncio.run(saved_targets["stats"](bot, MOD, MOD))
+        expect("статистика модератора ушла в нижние кнопки владельца", not keyboards(bot))
+
+        # Нижняя «🎛 Админ-панель», /stats и старая «💬 Статистика» — одна и та же.
+        for label in ("🎛 Админ-панель", "💬 Статистика"):
+            bot, gone, _ = press(OWNER, label)
+            expect(f"нижняя «{label}» не открыла статистику или ушла модели",
+                   opened == ["stats"] and not asked and bool(gone))
+        bot = Bot()
+        upd, _ = make(OWNER, "/stats")
+        opened.clear()
+        asyncio.run(pm.cmd_stats(upd, types.SimpleNamespace(bot=bot, user_data={})))
+        expect("/stats открывает не то же, что «🎛 Админ-панель»", opened == ["stats"])
+
+        # Четыре кнопки подменю — те же действия, что под прежней панелью.
+        calls = []
+
+        def _rec_call(name):
+            async def _r(*a, **kw):
+                calls.append(name)
+            return _r
+        pu.send_updates_panel = _rec_call("updates")
+        pd.send_digest_panel = _rec_call("digest")
+        pm.send_db_backup = _rec_call("backup")
+        for label, name in (("⬇️ Обновления", "updates"), ("📊 Дайджест недели", "digest"),
+                            ("💾 Копия базы", "backup")):
+            calls.clear()
+            bot, gone, _ = press(OWNER, label)
+            expect(f"нижняя «{label}» не сделала того же, что кнопка под панелью статистики",
+                   calls == [name] and not asked and bool(gone))
+        bot, gone, _ = press(OWNER, "📰 Дайджест по понедельникам: 🟢ВКЛ")
+        rows, text, _ = last_keys(bot)
+        expect("нижний «📰 Дайджест по понедельникам» не выключил дайджест или ушёл модели",
+               hist.get_setting(group_digest.ENABLED_KEY, "") == "0" and not asked)
+        expect(f"после «📰 Дайджест» подменю не пришло заново с новой надписью: {rows}",
+               bool(rows) and "📰 Дайджест по понедельникам: 🔴ВЫКЛ" in sum(rows, [])
+               and text == pk.carrier_text() and bool(notices(bot)))
+        expect("нижний «📰 Дайджест» не записан в журнал персонала тем же кодом",
+               hist.get_recent_staff_actions(1)[0].get("action") == "digest")
+        press(OWNER, "📰 Дайджест по понедельникам: 🟢ВКЛ")   # прежняя надпись на экране
+        expect("нажатие «📰 Дайджест» с прежней надписью не вернуло его",
+               hist.get_setting(group_digest.ENABLED_KEY, "") == "1")
+        # Тумблер под прежней панелью — тот же шаг, и после него — статистика.
+        q_said = []
+
+        async def _q_ans(text=None, **kw):
+            q_said.append(text)
+        opened.clear()
+        asyncio.run(pd._handle_digest_callback(
+            types.SimpleNamespace(answer=_q_ans), types.SimpleNamespace(bot=Bot()),
+            "dig:toggle", OWNER, OWNER))
+        expect("тумблер дайджеста под панелью переключает не тем же шагом",
+               hist.get_setting(group_digest.ENABLED_KEY, "") == "0"
+               and q_said and q_said[0].startswith("📰 Дайджест по понедельникам выключен")
+               and opened == ["stats"])
+        hist.set_setting(group_digest.ENABLED_KEY, "1")
+        expect("кнопка «💾 Копия базы» под панелью снимает копию не общим шагом",
+               "send_db_backup(" in router_src[router_src.find('if data == "adm_backup"'):][:600])
+        # Возврат с экранов обновлений и дайджеста — «⬅️ Назад» в статистику.
+        for title, mod in (("обновлений", pu), ("дайджеста", pd)):
+            first = mod._back_rows()[0][0]
+            expect(f"на экране {title} возврат не «⬅️ Назад» в статистику: {first.text}",
+                   first.text == "⬅️ Назад" and first.callback_data == "adm_open_stats")
+        # «⬅️ Назад» из подменю — разделы; чужой такой же текст — модели.
+        bot, gone, _ = press(OWNER, "⬅️ Назад")
+        rows, text, _ = last_keys(bot)
+        expect(f"«⬅️ Назад» из подменю «🎛 Админ-панель» не вернул разделы: {rows}",
+               rows is not None and sum(rows, []) == WANT and text == pk.carrier_text())
+        for title, uid in (("постороннего", PLAIN), ("модератора", MOD)):
+            calls.clear()
+            bot, gone, _ = press(uid, "💾 Копия базы")
+            expect(f"«💾 Копия базы» от {title} перехвачена — а это обычный вопрос модели",
+                   not calls and asked == ["💾 Копия базы"])
     finally:
+        pd.send_digest_panel, pu.send_updates_panel, pm.send_db_backup, pm.get_bot_stats = saved_svc
+        if saved_dig == "":
+            hist.delete_setting(group_digest.ENABLED_KEY)
+        else:
+            hist.set_setting(group_digest.ENABLED_KEY, saved_dig)
         pp.get_known_chats, pp.send_prompt_files = saved_pp
         roles.ADMIN_IDS, cache, roles._loaded = saved_roles
         roles._cache.clear()
@@ -10864,6 +11022,8 @@ def check_owner_keys():
                       f"сообщение с версией, раздел убирает, а сам в уборку панелей не "
                       f"попадает; подменю «Настройки API» — "
                       f"те же переключатели и надписи, что под панелью, а под панелью их нет; "
+                      f"«🎛 Админ-панель» — это и статистика: цифры в сообщении с версией, "
+                      f"кнопки статистики внизу; "
                       f"подменю «PROMPTы» — так же, с объявлением группам у «Сам в разговор», "
                       f"и держит его сама панель промптов одним сообщением")
 

@@ -24,11 +24,39 @@ _ICON = "📊"
 
 
 def _back_rows():
-    """Возврат двумя рядами: откуда пришли и в главную панель."""
+    """
+    Возврат двумя рядами: откуда пришли и в главную панель. «⬅️ Назад» (до
+    18.10.2026 — «⬅️ Статистика») зовёт panel_main.send_stats_panel: у
+    владельца это сообщение с версией и цифрами и кнопки бывшей статистики
+    внизу — экран открывается оттуда.
+    """
     return [
-        [InlineKeyboardButton("⬅️ Статистика", callback_data="adm_open_stats")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="adm_open_stats")],
         _adm_back_row(),
     ]
+
+
+def digest_toggle_text() -> str:
+    """Надпись тумблера понедельничного дайджеста — одна под панелью и внизу."""
+    from services import group_digest
+    from .common import _onoff
+    return f"📰 Дайджест по понедельникам: {_onoff(group_digest.is_enabled())}"
+
+
+def flip_digest_auto(user_id: int) -> str:
+    """
+    Переключить понедельничный дайджест в личку. Общий шаг кнопки под
+    панелью (ветка dig:toggle ниже) и нижней кнопки владельца (18.10.2026,
+    panel_keys.py). Возвращает, что сказать.
+    """
+    from services import group_digest
+    new_val = "0" if group_digest.is_enabled() else "1"
+    set_setting(group_digest.ENABLED_KEY, new_val)
+    state = "включён" if new_val == "1" else "выключен"
+    logger.info("%s Понедельничный дайджест %s (админ %s)", _ICON, state, user_id)
+    _audit(user_id, "digest", 0, f"понедельничный дайджест {state}")
+    return (f"📰 Дайджест по понедельникам {state}."
+            + (" Придёт тебе в личку в 10:00." if new_val == "1" else ""))
 
 
 def digest_keyboard(target_chat: int) -> InlineKeyboardMarkup:
@@ -110,17 +138,10 @@ async def _handle_digest_callback(query, context, data: str, chat_id: int, user_
     action = parts[1] if len(parts) > 1 else ""
 
     if action == "toggle":
-        new_val = "0" if group_digest.is_enabled() else "1"
-        set_setting(group_digest.ENABLED_KEY, new_val)
-        state = "включён" if new_val == "1" else "выключен"
-        logger.info("%s Понедельничный дайджест %s (админ %s)", _ICON, state, user_id)
-        _audit(user_id, "digest", 0, f"понедельничный дайджест {state}")
-        await query.answer(
-            f"📰 Дайджест по понедельникам {state}."
-            + (" Придёт тебе в личку в 10:00." if new_val == "1" else ""),
-            show_alert=True,
-        )
-        # Перерисовываем ПАНЕЛЬ СТАТИСТИКИ — кнопка живёт там.
+        # Шаг — общий с нижней кнопкой владельца (flip_digest_auto выше).
+        await query.answer(flip_digest_auto(user_id), show_alert=True)
+        # Перерисовываем ПАНЕЛЬ СТАТИСТИКИ — кнопка живёт там (у владельца —
+        # сообщение с версией и кнопки бывшей статистики внизу).
         from .panel_main import send_stats_panel
         await send_stats_panel(context.bot, chat_id, user_id)
         return

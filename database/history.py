@@ -84,7 +84,7 @@ from .people import (dossier_add_message, dossier_add_mute, dossier_add_linkdel,
                      get_staff, add_staff, remove_staff, set_staff_perm)
 
 # ─── деньги: копилки расхода и счётчики обращений ───────────────────
-from .money import (add_provider_cost, spend_qwen_tokens, get_qwen_tokens,
+from .money import (add_provider_cost,
                     register_api_call, clear_api_calls, clear_user_token_usage,
                     register_image_call, unregister_image_call,
                     get_remaining_image_calls,

@@ -35,9 +35,11 @@ _LABEL_MAX = 46
 
 def _back_rows():
     """Возврат двумя рядами: откуда пришли и в главную панель.
-    Тот же порядок, что у экрана дайджеста, — оба живут в статистике."""
+    Тот же порядок, что у экрана дайджеста, — оба живут в статистике (у
+    владельца с 18.10.2026 — в нижних кнопках «🎛 Админ-панель»; «⬅️ Назад»,
+    до того дня «⬅️ Статистика», ведёт туда же — panel_main.send_stats_panel)."""
     return [
-        [InlineKeyboardButton("⬅️ Статистика", callback_data="adm_open_stats")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="adm_open_stats")],
         _adm_back_row(),
     ]
 
@@ -147,7 +149,7 @@ def _build_updates_panel(page: int = 0):
 
 
 async def send_updates_panel(bot, chat_id: int, user_id: int, page: int = 0):
-    """Экран «⬇️ ОБНОВЛЕНИЯ» (кнопка в панели статистики)."""
+    """Экран «⬇️ ОБНОВЛЕНИЯ» (кнопка статистики; у владельца — нижняя, в «🎛 Админ-панель»)."""
     text, markup = _build_updates_panel(page)
     await _send_panel_message(bot, chat_id, text, markup)
 
