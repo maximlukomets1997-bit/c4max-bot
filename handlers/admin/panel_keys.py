@@ -6,18 +6,28 @@
 #  оттуда же. Модераторам, другим людям и в группах панели нет.
 #
 #  Как устроено:
-#   • send_owner_keys — шлёт короткое сообщение с панелью и сразу его удаляет:
-#     живая проба 17.10.2026 показала, что кнопки остаются и без сообщения, с
-#     которым пришли. Так в чате ничего не копится. Зовут /start и /adm
-#     владельца и автопанель при запуске бота (main.py) — пропадёт панель
-#     однажды сама, любая из трёх её вернёт.
+#   • send_owner_keys — шлёт короткое сообщение с панелью и ОСТАВЛЯЕТ его, а
+#     предыдущее такое сообщение удаляет: в чате всегда одно. Зовут /start
+#     владельца, автопанель при запуске бота (main.py) и включение выключателем.
+#     ⚠️ СООБЩЕНИЕ С ПАНЕЛЬЮ УДАЛЯТЬ НЕЛЬЗЯ (v5.71 → v5.72, 18.10.2026). В v5.71
+#     бот удалял его в ту же секунду — по пробе 17.10, где кнопки пережили
+#     удаление, сделанное через несколько минут. При мгновенном удалении
+#     Telegram панель не сохраняет: у Максима она пропала сразу. Проба 18.10:
+#     сообщение лежит — панель переживает и выход из чата, и перезапуск
+#     Telegram; новое пришло, старое удалено — панель на месте.
+#     ⚠️ Поэтому /adm панель больше НЕ присылает: сообщение не удаляется, и
+#     прыгало бы под панель на каждое /adm. Пропала (сообщение удалили
+#     руками) — её вернёт /start.
 #   • handle_owner_key — нажатие нижней кнопки приходит ОБЫЧНЫМ текстом. Его
 #     зовёт handlers/messages.py ДО модели и до склейки: текст совпал с
 #     кнопкой и пишет владелец в личке — сообщение удаляется (как команда),
 #     открывается раздел. Тот же текст от кого угодно другого — обычный вопрос.
 #   • Выключатель «⌨️ НИЖНИЕ КНОПКИ» в /adm (settings 'owner_keys_enabled',
-#     по умолчанию включён). Выключен — панель убирается, нажатия больше не
-#     перехватываются.
+#     по умолчанию включён). Выключен — сообщение с панелью удаляется, и
+#     панель уходит вместе с ним; нажатия больше не перехватываются.
+#   • Номер сообщения с панелью — в settings 'owner_keys_msg_<номер владельца>':
+#     по нему удаляется предыдущее. ⚠️ Telegram не даёт ботам удалять сообщения
+#     старше двух суток — тогда старое остаётся, и в чате их два.
 #
 #  ⚠️ «🌐 Сайт» — НЕ кнопка-мини-приложение (проба 17.10.2026): открытый с
 #  нижней кнопки сайт не получает от Telegram, кто его открыл, и пишет «Вход
@@ -33,12 +43,15 @@ import logging
 from telegram import KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.constants import ParseMode
 
-from database.history import get_setting
+from database.history import get_setting, set_setting
 from utils import delete_user_message_safe, register_and_clean_bot_message, schedule_delete
 
 logger = logging.getLogger(__name__)
 
 SETTING_KEY = "owner_keys_enabled"
+# Номер сообщения, с которым стоит панель: owner_keys_msg_<номер владельца>.
+MSG_KEY_PREFIX = "owner_keys_msg_"
+CARRIER_TEXT = "⌨️ Панель управления — кнопки внизу, под полем ввода."
 
 # Надпись кнопки → код действия. Порядок — раскладка: по две кнопки в ряд
 # (утверждена Максимом на пробе 17.10.2026). Надпись и есть то, что Telegram
@@ -84,39 +97,67 @@ def _is_owner_private(chat_id: int, user_id: int | None) -> bool:
     return bool(user_id) and chat_id == user_id and is_owner(user_id)
 
 
-async def _flash(bot, chat_id: int, text: str, markup) -> None:
+def _stored_msg(chat_id: int) -> int:
+    """Номер сообщения, с которым сейчас стоит панель (0 — не знаем такого)."""
+    try:
+        return int(get_setting(f"{MSG_KEY_PREFIX}{chat_id}", "0") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+async def _delete(bot, chat_id: int, message_id: int) -> bool:
+    """Удалить сообщение; False — не вышло (например, оно старше двух суток)."""
+    if not message_id:
+        return False
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+        return True
+    except Exception as e:
+        logger.debug("⌨️ Не удалось удалить сообщение %s с нижними кнопками: %s", message_id, e)
+        return False
+
+
+async def _post(bot, chat_id: int, text: str, markup) -> None:
     """
-    Поставить или убрать панель: сообщение с ней и сразу удалить. Без звука —
-    иначе каждая /adm будила бы телефон уведомлением о пустом месте.
+    Прислать сообщение, с которым стоит панель (или её снятие), запомнить его и
+    убрать предыдущее — уже ПОСЛЕ нового: панель живёт по последнему сообщению.
+    Без звука — служебное сообщение будить телефон не должно.
     """
+    previous = _stored_msg(chat_id)
     msg = await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup,
                                  disable_notification=True)
-    try:
-        await bot.delete_message(chat_id=chat_id, message_id=msg.message_id)
-    except Exception as e:
-        logger.debug("⌨️ Не удалось убрать сообщение с нижними кнопками: %s", e)
+    set_setting(f"{MSG_KEY_PREFIX}{chat_id}", str(msg.message_id))
+    if previous and previous != msg.message_id:
+        await _delete(bot, chat_id, previous)
 
 
 async def send_owner_keys(bot, chat_id: int, user_id: int | None = None) -> None:
     """
     Поставить нижние кнопки в личке владельца. Не владелец, не личка или
     кнопки выключены — ничего не делает. Тихая: панель — удобство, из-за неё
-    не должна падать ни /adm, ни запуск бота.
+    не должны падать ни /start, ни запуск бота.
     """
     uid = chat_id if user_id is None else user_id
     if not _is_owner_private(chat_id, uid) or not keys_enabled():
         return
     try:
-        await _flash(bot, chat_id, "⌨️ Панель управления — кнопки внизу, под полем ввода.",
-                     owner_keyboard())
+        await _post(bot, chat_id, CARRIER_TEXT, owner_keyboard())
     except Exception as e:
         logger.warning("⚠️ Не удалось поставить нижние кнопки владельцу %s: %s", chat_id, e)
 
 
 async def remove_owner_keys(bot, chat_id: int) -> None:
-    """Убрать нижние кнопки (выключатель погасили). Тихая."""
+    """
+    Убрать нижние кнопки (выключатель погасили): удалить сообщение, с которым
+    они стоят, — панель уйдёт вместе с ним. Не удалилось (старше двух суток)
+    или номера нет — прислать снятие панели отдельным сообщением; оно
+    остаётся в чате и уберётся при следующем включении. Тихая.
+    """
     try:
-        await _flash(bot, chat_id, "⌨️ Нижние кнопки убраны.", ReplyKeyboardRemove())
+        if await _delete(bot, chat_id, _stored_msg(chat_id)):
+            set_setting(f"{MSG_KEY_PREFIX}{chat_id}", "0")
+            return
+        await _post(bot, chat_id, "⌨️ Нижние кнопки убраны.", ReplyKeyboardRemove())
     except Exception as e:
         logger.warning("⚠️ Не удалось убрать нижние кнопки у %s: %s", chat_id, e)
 

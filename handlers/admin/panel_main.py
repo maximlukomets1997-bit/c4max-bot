@@ -608,6 +608,6 @@ async def cmd_adm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await _end_kb_test(context.bot, update.effective_chat.id, context)  # выход из проверки поиска — с уборкой
     await send_adm_panel(context.bot, update.effective_chat.id, user_id)
-    # Нижние кнопки владельца (2026-10-17): /adm их возвращает, если пропали.
-    from .panel_keys import send_owner_keys
-    await send_owner_keys(context.bot, update.effective_chat.id, user_id)
+    # ⚠️ Нижних кнопок владельца /adm НЕ присылает (v5.72, 18.10.2026): их
+    # сообщение остаётся в чате и прыгало бы под панель на каждое /adm.
+    # Пропали — вернёт /start (см. handlers/admin/panel_keys.py).

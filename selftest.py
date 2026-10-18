@@ -9996,8 +9996,9 @@ def check_owner_keys():
         id = 777060999
         first_name = "Бот"
 
-        def __init__(self):
-            self.events, self.next_id = [], 700
+        def __init__(self, delete_fail=False, start_id=700):
+            self.events, self.next_id = [], start_id
+            self.delete_fail = delete_fail
 
         async def send_message(self, chat_id=None, text=None, reply_markup=None, **kw):
             self.next_id += 1
@@ -10005,6 +10006,8 @@ def check_owner_keys():
             return types.SimpleNamespace(message_id=self.next_id)
 
         async def delete_message(self, chat_id=None, message_id=None, **kw):
+            if self.delete_fail:
+                raise RuntimeError("Message can't be deleted for everyone")
             self.events.append(("delete", chat_id, message_id))
             return True
 
@@ -10035,7 +10038,8 @@ def check_owner_keys():
     # ─── все подмены — с возвратом на место ───
     import services.roles  # noqa: F401 — модуль прав грузим ДО подмены владельцев
     saved_roles = (roles.ADMIN_IDS, dict(roles._cache), roles._loaded)
-    saved_settings = {k: hist.get_setting(k, "") for k in (pk.SETTING_KEY, la.SETTING_KEY)}
+    SLOT = f"{pk.MSG_KEY_PREFIX}{OWNER}"
+    saved_settings = {k: hist.get_setting(k, "") for k in (pk.SETTING_KEY, la.SETTING_KEY, SLOT)}
     targets = {
         "adm": (pm, "send_adm_panel"), "stats": (pm, "send_stats_panel"),
         "prompts": (pp, "send_prompts_panel"), "api": (pm, "send_api_panel"),
@@ -10083,30 +10087,59 @@ def check_owner_keys():
         expect("у нижней кнопки «🌐 Сайт» мини-приложение — с неё сайт не пускает (проба 17.10)",
                all(getattr(b, "web_app", None) is None for row in kb.keyboard for b in row))
 
-        # ═══ 2. Кому панель приходит ═══
-        async def put(chat_id, user_id):
-            bot = Bot()
+        # ═══ 2. Кому панель приходит и что остаётся в чате ═══
+        # ⚠️ СООБЩЕНИЕ С ПАНЕЛЬЮ ОСТАЁТСЯ (v5.72, 18.10.2026). До этого сверка
+        # требовала обратного — удалять его сразу — и закрепляла ошибку v5.71:
+        # при мгновенном удалении Telegram убирает и саму панель (у Максима
+        # она пропала в первый же день). Проба 18.10: сообщение лежит — панель
+        # живёт; пришло новое, удалено старое — панель на месте.
+        async def put(chat_id, user_id, bot=None):
+            bot = bot or Bot()
             await pk.send_owner_keys(bot, chat_id, user_id)
             return bot
 
+        hist.delete_setting(SLOT)
         bot = asyncio.run(put(OWNER, OWNER))
         sent = keyboards(bot)
         expect("владельцу в личке панель не пришла", len(sent) == 1)
-        expect("сообщение с панелью не убрано — в чате копились бы служебные сообщения",
-               bool(sent) and ("delete", OWNER, sent[0][4]) in bot.events)
+        expect("сообщение с панелью удалено — Telegram при этом убирает и саму панель",
+               not any(e[0] == "delete" for e in bot.events))
+        expect("номер сообщения с панелью не запомнен — следующее не уберёт его",
+               bool(sent) and hist.get_setting(SLOT, "") == str(sent[0][4]))
         expect("панель приходит со звуком уведомления",
                bool(sent) and sent[0][5].get("disable_notification") is True)
+        first = sent[0][4] if sent else 0
+        bot = asyncio.run(put(OWNER, OWNER, Bot(start_id=800)))
+        sent = keyboards(bot)
+        expect("новое сообщение с панелью пришло, а прежнее осталось — в чате копились бы",
+               len(sent) == 1 and ("delete", OWNER, first) in bot.events)
+        expect("удалено новое сообщение с панелью вместо прежнего",
+               bool(sent) and ("delete", OWNER, sent[0][4]) not in bot.events
+               and hist.get_setting(SLOT, "") == str(sent[0][4]))
         for title, chat_id, uid in (("модератору", MOD, MOD), ("постороннему", PLAIN, PLAIN),
                                     ("в группе", -100777060, OWNER)):
             expect(f"нижние кнопки пришли {title}", not asyncio.run(put(chat_id, uid)).events)
         hist.set_setting(pk.SETTING_KEY, "0")
         expect("кнопки выключены, а панель всё равно пришла",
                not asyncio.run(put(OWNER, OWNER)).events)
+        current = int(hist.get_setting(SLOT, "0") or 0)
         bot = Bot()
         asyncio.run(pk.remove_owner_keys(bot, OWNER))
-        expect("выключатель не убирает панель",
-               any(e[0] == "send" and isinstance(e[3], ReplyKeyboardRemove) for e in bot.events))
+        expect("выключатель не удалил сообщение с панелью — панель не ушла бы",
+               ("delete", OWNER, current) in bot.events
+               and not any(e[0] == "send" for e in bot.events))
+        # Старое (старше двух суток) удалить нельзя — тогда снятие панели
+        # отдельным сообщением, и его уберёт следующее включение.
+        hist.set_setting(SLOT, "123")
+        bot = Bot(delete_fail=True, start_id=900)
+        asyncio.run(pk.remove_owner_keys(bot, OWNER))
+        removal = [e for e in bot.events if e[0] == "send" and isinstance(e[3], ReplyKeyboardRemove)]
+        expect("сообщение с панелью не удалилось, а снятия панели нет — панель осталась бы",
+               len(removal) == 1 and hist.get_setting(SLOT, "") == str(removal[0][4]))
         hist.set_setting(pk.SETTING_KEY, "1")
+        bot = asyncio.run(put(OWNER, OWNER, Bot(start_id=950)))
+        expect("включение не убрало сообщение о снятии панели",
+               bool(removal) and ("delete", OWNER, removal[0][4]) in bot.events)
 
         # ═══ 3. Каждая кнопка — в свой раздел ═══
         def press(user_id, text, chat_type="private", user_data=None):
@@ -10178,8 +10211,8 @@ def check_owner_keys():
         bot = Bot()
         upd, _ = make(OWNER, "/adm")
         asyncio.run(pm.cmd_adm(upd, types.SimpleNamespace(bot=bot, user_data={})))
-        expect("/adm владельца не вернул нижние кнопки",
-               opened[-1:] == ["adm"] and len(keyboards(bot)) == 1)
+        expect("/adm присылает нижние кнопки — их сообщение прыгало бы под панель на каждое /adm",
+               opened[-1:] == ["adm"] and not keyboards(bot))
         main_src = open(os.path.join(ROOT, "main.py"), encoding="utf-8").read()
         at_panel = main_src.find("await send_adm_panel(application.bot, owner_id, owner_id)")
         at_keys = main_src.find("await send_owner_keys(application.bot, owner_id, owner_id)")
@@ -10215,9 +10248,10 @@ def check_owner_keys():
                 hist.set_setting(k, v)
 
     return problems, (f"{done} проверок: надписи, порядок и вид панели; приходит только "
-                      f"владельцу в личке и без следа в чате; каждая кнопка — в свой раздел, "
-                      f"мимо модели; чужой такой же текст и выключенные кнопки — модели; "
-                      f"/start, /adm и запуск ставят панель; выключатель в /adm")
+                      f"владельцу в личке, её сообщение остаётся одно — новое убирает "
+                      f"прежнее; каждая кнопка — в свой раздел, мимо модели; чужой такой же "
+                      f"текст и выключенные кнопки — модели; /start и запуск ставят панель, "
+                      f"/adm — нет; выключатель удаляет её сообщение")
 
 
 CHECKS = (
