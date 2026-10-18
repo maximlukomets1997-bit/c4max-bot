@@ -2,8 +2,9 @@
 #  handlers/admin/panel_keys.py — ⌨️ нижние кнопки владельца (2026-10-17)
 # ─────────────────────────────────────────────
 #  Панель кнопок ПОД ПОЛЕМ ВВОДА в личке владельца (просьба Максима — «как в
-#  другом боте»). Кнопки ведут в те же разделы, что /adm, плюс две очистки
-#  оттуда же. Модераторам, другим людям и в группах панели нет.
+#  другом боте»). Кнопки ведут в те же разделы, что /adm, плюс две очистки,
+#  самообновление и перезапуск оттуда же (последние два — с 18.10.2026).
+#  Модераторам, другим людям и в группах панели нет.
 #
 #  Как устроено:
 #   • send_owner_keys — шлёт короткое сообщение с панелью и ОСТАВЛЯЕТ его, а
@@ -69,6 +70,15 @@ KEYS = (
     ("🌐 Сайт", "site"),
     ("🧹 Очистить РАЗГОВОРЫ", "wipe"),
     ("🗑 Очистить мой диалог", "clear"),
+    # Перезапуск и самообновление (18.10.2026, просьба Максима) — КОПИИ кнопок
+    # /adm, там они остаются: выключишь нижнюю панель — без них бот не останется.
+    #   • «⬇️ ОБНОВЛЕНИЕ» показывает состояние (как в /adm): надпись к ней
+    #     дописывает _shown, а нижняя кнопка свою надпись сама не меняет —
+    #     после нажатия панель присылается заново;
+    #   • «🔄 ПЕРЕЗАПУСК» сначала спрашивает: нижняя панель всегда под пальцем,
+    #     а в /adm та же кнопка перезапускает сразу.
+    ("⬇️ ОБНОВЛЕНИЕ", "autoupdate"),
+    ("🔄 ПЕРЕЗАПУСК", "restart"),
 )
 _BY_LABEL = {label: code for label, code in KEYS}
 
@@ -84,9 +94,34 @@ def keys_enabled() -> bool:
         return False
 
 
+def _shown(label: str, code: str) -> str:
+    """Надпись на кнопке: у «⬇️ ОБНОВЛЕНИЕ» — с состоянием, как в /adm."""
+    if code == "autoupdate":
+        from .common import _onoff
+        from .panel_main import autoupdate_on
+        return f"{label}: {_onoff(autoupdate_on())}"
+    return label
+
+
+def _code_of(text: str) -> str | None:
+    """
+    Какая кнопка нажата. «⬇️ ОБНОВЛЕНИЕ» узнаётся при ЛЮБОМ состоянии в
+    надписи: панель с прежней надписью могла остаться на экране, и её
+    нажатие обязано сработать, а не уйти модели вопросом.
+    """
+    text = (text or "").strip()
+    code = _BY_LABEL.get(text)
+    if code:
+        return code
+    for label, key in KEYS:
+        if key == "autoupdate" and text.startswith(label + ":"):
+            return key
+    return None
+
+
 def owner_keyboard() -> ReplyKeyboardMarkup:
     """Сама панель: по две кнопки в ряд, компактная, не сворачивается сама."""
-    rows = [[KeyboardButton(label) for label, _ in KEYS[i:i + 2]]
+    rows = [[KeyboardButton(_shown(label, code)) for label, code in KEYS[i:i + 2]]
             for i in range(0, len(KEYS), 2)]
     return ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True)
 
@@ -228,6 +263,42 @@ async def _run(code: str, context, chat_id: int, user_id: int) -> None:
         # по ней Максиму считают, как часто он чистит диалог.
         logger.info("🔧 История диалога очищена кнопкой (пользователь %s)", user_id)
         await _notice(bot, chat_id, "✅ История диалога очищена!")
+    elif code == "autoupdate":
+        # Переключение — общий шаг с кнопкой /adm; панель — заново, чтобы
+        # надпись на нижней кнопке показала новое состояние.
+        from .panel_main import autoupdate_notice, flip_autoupdate
+        on = flip_autoupdate(user_id)
+        await _notice(bot, chat_id, autoupdate_notice(on))
+        await send_owner_keys(bot, chat_id, user_id)
+    elif code == "restart":
+        # Сначала вопрос. «✅ Да» — та же ветка system_restart, что у кнопки
+        # /adm (router.py): заберёт свежий код и перезапустит бота.
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        sent = await bot.send_message(
+            chat_id=chat_id, parse_mode=ParseMode.HTML,
+            text="🔄 <b>Перезапустить бота?</b>\n<i>На сервере он сначала заберёт "
+                 "свежий код с GitHub.</i>",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ Да, перезапустить", callback_data="system_restart"),
+                InlineKeyboardButton("Отмена", callback_data="keys:restart_no"),
+            ]]))
+        if sent:
+            await register_and_clean_bot_message(bot, chat_id, sent.message_id)
+
+
+async def handle_keys_callback(query, data: str) -> None:
+    """
+    Кнопки под сообщениями нижней панели (router.py, ветка «keys:»). Сейчас
+    одна — «Отмена» у вопроса о перезапуске: вопрос убирается.
+    """
+    if data == "keys:restart_no":
+        await query.answer("Отменено.")
+        try:
+            await query.message.delete()
+        except Exception as e:
+            logger.debug("⌨️ Не удалось убрать вопрос о перезапуске: %s", e)
+        return
+    await query.answer("Кнопка устарела.", show_alert=True)
 
 
 async def handle_owner_key(update, context, text: str) -> bool:
@@ -239,7 +310,7 @@ async def handle_owner_key(update, context, text: str) -> bool:
     как на кнопке. Как любая команда, гасит ожидание числа (экраны счетов и
     счёта викторины) и режимы панели базы знаний.
     """
-    code = _BY_LABEL.get((text or "").strip())
+    code = _code_of(text)
     if not code:
         return False
     chat, user = update.effective_chat, update.effective_user

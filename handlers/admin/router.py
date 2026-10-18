@@ -591,23 +591,19 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     # Выключенный тумблер не мешает обновляться вручную (кнопка перезапуска
     # и .bat) — он гасит только автоматический цикл.
     if data == "adm_autoupdate":
-        from config import AUTO_UPDATE_ENABLED_DEFAULT
-        from handlers.admin.panel_main import build_adm_keyboard
-
-        now_on = get_setting("auto_update_enabled", AUTO_UPDATE_ENABLED_DEFAULT) == "1"
-        set_setting("auto_update_enabled", "0" if now_on else "1")
-        logger.info("🔧 Админ %s %s самообновление", user_id, "выключил" if now_on else "включил")
-        _audit(user_id, "autoupdate", None, "выключено" if now_on else "включено")
-        await query.answer(
-            "⬇️ Самообновление выключено — правки с GitHub бот сам забирать не будет."
-            if now_on else
-            "⬇️ Самообновление включено — раз в 5 минут бот проверяет GitHub.",
-            show_alert=True
-        )
+        # Само переключение — общий шаг с нижней кнопкой владельца
+        # (panel_main.flip_autoupdate, 2026-10-18).
+        from handlers.admin.panel_main import autoupdate_notice, build_adm_keyboard, flip_autoupdate
+        now_on = flip_autoupdate(user_id)
+        await query.answer(autoupdate_notice(now_on), show_alert=True)
         try:
             await query.edit_message_reply_markup(reply_markup=build_adm_keyboard(user_id))
         except Exception as e:
             logger.warning("⚠️ Не удалось перерисовать панель после тумблера самообновления: %s", e)
+        # На нижней кнопке «⬇️ ОБНОВЛЕНИЕ» тоже видно состояние, а свою надпись
+        # она сама не меняет — присылаем панель заново (прежнее сообщение уберётся).
+        from .panel_keys import send_owner_keys
+        await send_owner_keys(context.bot, chat_id, user_id)
         return
 
 
@@ -771,6 +767,14 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             await query.edit_message_reply_markup(reply_markup=_build_api_keyboard(user_id))
         except Exception as e:
             logger.warning("⚠️ Не удалось обновить клавиатуру тумблера ответа на глазах: %s", e)
+        return
+
+    if data.startswith("keys:"):
+        # Кнопки под сообщениями нижней панели владельца (2026-10-18):
+        # «Отмена» у вопроса о перезапуске. «✅ Да» ведёт на ту же ветку
+        # system_restart, что кнопка /adm, — своей у нижней панели нет.
+        from .panel_keys import handle_keys_callback
+        await handle_keys_callback(query, data)
         return
 
     if data == "toggle_owner_keys":

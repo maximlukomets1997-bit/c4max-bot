@@ -535,6 +535,33 @@ def _adm_rows():
     ]
 
 
+def autoupdate_on() -> bool:
+    """Самообновление включено? Тот же ключ и то же начальное значение, что у
+    кнопки /adm, страницы настроек сайта и jobs/update.py."""
+    return get_setting("auto_update_enabled", AUTO_UPDATE_ENABLED_DEFAULT) == "1"
+
+
+def flip_autoupdate(user_id: int) -> bool:
+    """
+    Переключить самообновление — общий шаг кнопки «⬇️ ОБНОВЛЕНИЕ» в /adm и
+    такой же нижней кнопки владельца (2026-10-18, panel_keys.py): второго
+    набора правил «как переключать» быть не должно. Возвращает НОВОЕ состояние.
+    """
+    from database.history import set_setting
+    from .common import _audit
+    now_on = autoupdate_on()
+    set_setting("auto_update_enabled", "0" if now_on else "1")
+    logger.info("🔧 Админ %s %s самообновление", user_id, "выключил" if now_on else "включил")
+    _audit(user_id, "autoupdate", None, "выключено" if now_on else "включено")
+    return not now_on
+
+
+def autoupdate_notice(on: bool) -> str:
+    """Что сказать после переключения — одинаково в /adm и у нижней кнопки."""
+    return ("⬇️ Самообновление включено — раз в 5 минут бот проверяет GitHub." if on else
+            "⬇️ Самообновление выключено — правки с GitHub бот сам забирать не будет.")
+
+
 def _owner_keys_button():
     """Выключатель «⌨️ НИЖНИЕ КНОПКИ» — надпись следует за настройкой."""
     from .panel_keys import keys_enabled

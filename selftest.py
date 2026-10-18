@@ -9987,9 +9987,12 @@ def check_owner_keys():
             problems.append(title)
 
     OWNER, MOD, PLAIN = 777060001, 777060002, 777060011
+    # Две последние — с 18.10.2026: копии кнопок /adm. У «ОБНОВЛЕНИЯ» в
+    # надписи состояние — здесь при включённом самообновлении.
     WANT = ["🎛 Админ-панель", "💬 Статистика", "⚙️ PROMPTы", "📡 Настройки API",
             "🛠 DDoS-Guard", "👥 Пользователи", "📚 База знаний", "🎮 Викторина",
-            "📜 Логи бота", "🌐 Сайт", "🧹 Очистить РАЗГОВОРЫ", "🗑 Очистить мой диалог"]
+            "📜 Логи бота", "🌐 Сайт", "🧹 Очистить РАЗГОВОРЫ", "🗑 Очистить мой диалог",
+            "⬇️ ОБНОВЛЕНИЕ: 🟢ВКЛ", "🔄 ПЕРЕЗАПУСК"]
 
     class Bot:
         username = "c4max_test_bot"
@@ -10039,7 +10042,8 @@ def check_owner_keys():
     import services.roles  # noqa: F401 — модуль прав грузим ДО подмены владельцев
     saved_roles = (roles.ADMIN_IDS, dict(roles._cache), roles._loaded)
     SLOT = f"{pk.MSG_KEY_PREFIX}{OWNER}"
-    saved_settings = {k: hist.get_setting(k, "") for k in (pk.SETTING_KEY, la.SETTING_KEY, SLOT)}
+    saved_settings = {k: hist.get_setting(k, "") for k in
+                      (pk.SETTING_KEY, la.SETTING_KEY, SLOT, "auto_update_enabled")}
     targets = {
         "adm": (pm, "send_adm_panel"), "stats": (pm, "send_stats_panel"),
         "prompts": (pp, "send_prompts_panel"), "api": (pm, "send_api_panel"),
@@ -10076,6 +10080,7 @@ def check_owner_keys():
         mb.wait_sec = lambda: 0
         hist.set_setting(la.SETTING_KEY, "0")        # показ по ходу сторожит своя группа
         hist.set_setting(pk.SETTING_KEY, "1")
+        hist.set_setting("auto_update_enabled", "1")
 
         # ═══ 1. Панель: надписи, порядок, вид ═══
         kb = pk.owner_keyboard()
@@ -10180,6 +10185,60 @@ def check_owner_keys():
         bot, gone, _ = press(OWNER, "🗑 Очистить мой диалог")
         expect("«🗑 Очистить мой диалог» не очистил память бота о владельце",
                not hist.get_history(OWNER) and not asked)
+
+        # «⬇️ ОБНОВЛЕНИЕ» (18.10.2026): переключает самообновление тем же шагом,
+        # что кнопка /adm, и присылает панель заново — надпись следует за ним.
+        def auto_label(bot):
+            labels = [b.text for e in keyboards(bot) for row in e[3].keyboard for b in row]
+            return next((t for t in labels if t.startswith("⬇️ ОБНОВЛЕНИЕ")), "")
+
+        bot, gone, _ = press(OWNER, "⬇️ ОБНОВЛЕНИЕ: 🟢ВКЛ")
+        expect("нижняя «⬇️ ОБНОВЛЕНИЕ» не выключила самообновление или ушла модели",
+               hist.get_setting("auto_update_enabled", "") == "0" and not asked and bool(gone))
+        expect(f"после нажатия панель не пришла заново с новой надписью: «{auto_label(bot)}»",
+               auto_label(bot) == "⬇️ ОБНОВЛЕНИЕ: 🔴ВЫКЛ")
+        expect("нижняя «⬇️ ОБНОВЛЕНИЕ» не записана в журнал персонала тем же кодом, что в /adm",
+               any(r.get("action") == "autoupdate" for r in hist.get_recent_staff_actions(20)))
+        bot, gone, _ = press(OWNER, "⬇️ ОБНОВЛЕНИЕ: 🟢ВКЛ")      # прежняя надпись на экране
+        expect("нажатие «⬇️ ОБНОВЛЕНИЕ» с прежней надписью не сработало",
+               hist.get_setting("auto_update_enabled", "") == "1" and not asked)
+        router_src = open(os.path.join(ROOT, "handlers", "admin", "router.py"),
+                          encoding="utf-8").read()
+        branch = router_src[router_src.find('if data == "adm_autoupdate"'):]
+        branch = branch[:branch.find("\n    if data ==", 10)]
+        expect("кнопка /adm «⬇️ ОБНОВЛЕНИЕ» переключает не общим шагом или не освежает "
+               "нижнюю панель", "flip_autoupdate(" in branch and "send_owner_keys(" in branch)
+
+        # «🔄 ПЕРЕЗАПУСК» — сначала вопрос, сам бот не перезапускается.
+        restarted = []
+        bot = Bot()
+        upd, gone = make(OWNER, "🔄 ПЕРЕЗАПУСК")
+        app = types.SimpleNamespace(bot_data={}, stop_running=lambda: restarted.append(True))
+        asked.clear()
+        asyncio.run(hm.handle_message(upd, types.SimpleNamespace(bot=bot, user_data={},
+                                                                 application=app)))
+        ask = [e for e in bot.events if e[0] == "send" and e[3] is not None
+               and hasattr(e[3], "inline_keyboard")]
+        datas = [b.callback_data for e in ask for row in e[3].inline_keyboard for b in row]
+        expect("нижний «🔄 ПЕРЕЗАПУСК» перезапустил бота без вопроса",
+               not restarted and "shutdown_reason" not in app.bot_data and not asked)
+        expect(f"нижний «🔄 ПЕРЕЗАПУСК» не спросил «Перезапустить?» с кнопками «Да» — "
+               f"ветка /adm — и «Отмена»: {datas}",
+               len(ask) == 1 and datas == ["system_restart", "keys:restart_no"])
+        cancelled = []
+
+        async def _answer(*a, **kw):
+            cancelled.append("answer")
+
+        async def _del():
+            cancelled.append("delete")
+        query = types.SimpleNamespace(answer=_answer, message=types.SimpleNamespace(delete=_del))
+        asyncio.run(pk.handle_keys_callback(query, "keys:restart_no"))
+        expect("«Отмена» у вопроса о перезапуске не убрала вопрос",
+               cancelled == ["answer", "delete"])
+        from services.roles import perm_for_callback as _perm
+        expect("«Отмена» у вопроса о перезапуске может нажать не только владелец",
+               _perm("keys:restart_no") == "owner")
 
         # ═══ 4. Кого не перехватывать ═══
         for title, uid in (("постороннего", PLAIN), ("модератора", MOD)):
