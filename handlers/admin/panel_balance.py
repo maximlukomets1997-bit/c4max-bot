@@ -1,5 +1,5 @@
 # ───────────────────────────────────────────────
-#  handlers/admin/panel_balance.py — экран «💰 Счета и квоты».
+#  handlers/admin/panel_balance.py — экран «💰 Счета».
 #
 #  Выделен из panel_main.py 2026-08-04 разрезом БЕЗ изменения логики: экран
 #  ни разу не пересекается ни с /adm, ни с панелью моделей — у него свой
@@ -8,13 +8,12 @@
 # ───────────────────────────────────────────────
 import html
 import logging
-import re
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
-from config import AVAILABLE_MODELS, PROVIDER_ICONS, PROVIDERS
-from database.history import set_setting, get_setting, delete_setting, get_qwen_tokens
+from config import PROVIDER_ICONS, PROVIDERS
+from database.history import set_setting, get_setting, delete_setting
 from utils import delete_user_message_safe, schedule_delete
 
 logger = logging.getLogger(__name__)
@@ -22,21 +21,17 @@ from .common import _adm_back_row, _audit, _send_panel_message
 
 
 # ─────────────────────────────────────────────
-#  Экран «💰 Счета и квоты» (2026-07-27, просьба Максима)
+#  Экран «💰 Счета» (2026-07-27, просьба Максима; до 18.10.2026 назывался
+#  «💰 Счета и квоты» — квоты были у удалённого провайдера Qwen)
 #
-#  До него остатки на счетах и остаток бесплатной квоты Qwen правились только
-#  руками в базе. Здесь они правятся кнопками: нажал — бот просит прислать
+#  До него остатки на счетах правились только руками в базе. Здесь они правятся кнопками: нажал — бот просит прислать
 #  число — прислал, и значение на месте (перезапуск не нужен, все счётчики
 #  читаются из settings на каждый показ панели).
 #
-#  Три правила, которые нельзя «чинить»:
+#  Два правила, которые нельзя «чинить»:
 #   • «не задано» ≠ «ноль». Пустой остаток УДАЛЯЕТСЯ (delete_setting), а не
 #     обнуляется: пока ключа нет, вычитающий UPDATE в add_provider_cost его не находит
 #     и ничего не портит; с нулём остаток ушёл бы в минус с первого запроса.
-#   • Кнопки квот Qwen собираются ИЗ AVAILABLE_MODELS сами (в отличие от
-#     _MODEL_BUTTON_ROWS) — новая модель Qwen получит кнопку без правки кода.
-#     Квота модели, удалённой из конфига, показывается в тексте отдельной
-#     строкой, чтобы её остаток не потерялся вместе с моделью.
 #   • Ожидание числа живёт в user_data["balance_edit"] и гаснет от ЛЮБОЙ другой
 #     кнопки (одна проверка в router.py) и от ЛЮБОЙ команды (одна строка
 #     в log_incoming_command) — иначе следующий вопрос боту в личке был бы
@@ -45,15 +40,13 @@ from .common import _adm_back_row, _audit, _send_panel_message
 
 # Настраиваемые ОСТАТКИ на счетах. Ключи те же, что читает панель API и
 # из которых вычитает add_provider_cost (одна на всех, ключи берёт из реестра).
-# Денежного остатка у Qwen намеренно нет (решение Максима 2026-07-27): там
-# бесплатная квота в токенах, а не счёт в долларах.
 # ⚠️ СОБИРАЮТСЯ ИЗ РЕЕСТРА `config.PROVIDERS` (2026-08-03) — ключи, имена и
 # надписи кнопок там, здесь только ПОРЯДОК НА ЭКРАНЕ: кнопки счетов разложены
 # руками по два в ряд, и блоки текста идут тем же порядком, что они. Провайдер,
 # забытый в этих кортежах, на экран не попадёт — поэтому полноту сверяет
 # `preflight.py` (проверка «провайдеры»), а не внимательность.
 _BALANCE_ORDER = ("deepseek", "xiaomi", "image")
-_COST_ORDER = ("deepseek", "qwen", "xiaomi", "image")
+_COST_ORDER = ("deepseek", "xiaomi", "image")
 
 _BALANCE_FIELDS = {
     pid: {"key": PROVIDERS[pid]["balance_key"], "provider": pid,
@@ -68,7 +61,7 @@ _BALANCE_FIELDS = {
 # Ноль набирается руками, поэтому отдельного «обнулить» с подтверждением
 # больше нет — см. _build_cost_panel ниже.
 # Правка руками нужна ещё и потому, что вечные счётчики (DeepSeek, Xiaomi)
-# месячный сброс не трогает вовсе, а у месячных (Qwen, картинки) бывает нужно
+# месячный сброс не трогает вовсе, а у месячных (картинки) бывает нужно
 # начать счёт заново посреди месяца.
 _COST_FIELDS = {
     pid: {"key": PROVIDERS[pid]["cost_key"], "provider": pid,
@@ -77,7 +70,6 @@ _COST_FIELDS = {
 }
 
 _MAX_MONEY = 1_000_000.0          # больше — почти наверняка опечатка
-_MAX_TOKENS = 100_000_000_000     # то же для квоты токенов
 
 
 def _icon(provider: str) -> str:
@@ -86,22 +78,12 @@ def _icon(provider: str) -> str:
     return PROVIDER_ICONS.get(provider, "🤖")
 
 
-def _qwen_model_keys() -> list:
-    """Модели Qwen из конфига — по ним собираются кнопки квот."""
-    return [m for m, meta in AVAILABLE_MODELS.items() if meta.get("provider") == "qwen"]
-
-
 def _money_str(value: float) -> str:
     """Деньги — тем же видом, что в панели API (6 знаков)."""
     return f"${value:.6f}"
 
 
-def _tokens_str(value: int) -> str:
-    """Токены с пробелами по три разряда: 1 000 000."""
-    return f"{int(value):,}".replace(",", " ")
-
-
-def _read_number(key: str, kind: str):
+def _read_number(key: str):
     """
     Значение настройки как число: (число, задано ли).
     «Задано ли» важнее самого числа: остаток $0.000000 и «остаток не задан» —
@@ -109,34 +91,33 @@ def _read_number(key: str, kind: str):
     """
     raw = get_setting(key, "")
     if raw is None or str(raw).strip() == "":
-        return (0 if kind == "tokens" else 0.0), False
+        return 0.0, False
     try:
-        return (int(float(raw)) if kind == "tokens" else float(raw)), True
+        return float(raw), True
     except (TypeError, ValueError):
-        return (0 if kind == "tokens" else 0.0), False
+        return 0.0, False
 
 
-def _value_str(key: str, kind: str, absent: str) -> str:
-    """Готовая строка значения для экрана: число или подпись «не задано»."""
-    value, is_set = _read_number(key, kind)
+def _value_str(key: str, absent: str) -> str:
+    """Готовая строка значения для экрана: сумма или подпись «не задано»."""
+    value, is_set = _read_number(key)
     if not is_set:
         return f"<i>{absent}</i>"
-    return f"<b>{_tokens_str(value) if kind == 'tokens' else _money_str(value)}</b>"
+    return f"<b>{_money_str(value)}</b>"
 
 
 def _balance_field(field_id: str):
     """
     Описание настраиваемого значения по его коду из кнопки.
-    Коды: deepseek | xiaomi | image (остатки на счетах), cost:<провайдер>
-    (счётчик «потрачено») и qwen:<модель> (остаток квоты токенов).
+    Коды: deepseek | xiaomi | image (остатки на счетах) и cost:<провайдер>
+    (счётчик «потрачено»).
     Неизвестный код → None (кнопка из старого,
-    ещё не затёртого сообщения).
+    ещё не затёртого сообщения — например, «🎫 Квота …» удалённого Qwen).
     """
     if field_id in _BALANCE_FIELDS:
         cfg = _BALANCE_FIELDS[field_id]
         return {
             "key": cfg["key"],
-            "kind": "money",
             "title": f"{_icon(cfg['provider'])} ОСТАТОК НА СЧЕТУ: {cfg['name'].upper()}",
             "short": f"Остаток {cfg['name']}",
             "example": "5.32",
@@ -144,13 +125,12 @@ def _balance_field(field_id: str):
             "absent": "не задан",
         }
     if field_id.startswith("cost:"):
-        # Счётчик «потрачено» (2026-08-17). Правится тем же вводом, что остатки
-        # и квоты: заводить второй механизм ради четырёх значений незачем.
+        # Счётчик «потрачено» (2026-08-17). Правится тем же вводом, что остатки:
+        # заводить второй механизм ради трёх значений незачем.
         cfg = _COST_FIELDS.get(field_id[len("cost:"):])
         if cfg:
             return {
                 "key": cfg["key"],
-                "kind": "money",
                 "title": f"{_icon(cfg['provider'])} ПОТРАЧЕНО: {cfg['name'].upper()}",
                 "short": f"Потрачено {cfg['name']}",
                 "example": "2.87",
@@ -162,65 +142,13 @@ def _balance_field(field_id: str):
                 "absent": "не задан",
             }
         return None
-    if field_id.startswith("qwen:"):
-        model = field_id[len("qwen:"):]
-        # Модель может быть уже удалена из конфига, но с заведённой квотой —
-        # такую тоже разрешаем править, иначе её остаток не поправить ничем.
-        if model and (model in AVAILABLE_MODELS or model in get_qwen_tokens()):
-            return {
-                "key": f"qwen_tokens_{model}",
-                "kind": "tokens",
-                "title": f"{_icon('qwen')} КВОТА ТОКЕНОВ: {model}",
-                "short": f"Квота {model}",
-                "example": "1000000",
-                "clear": "убрать квоту («не задана»)",
-                "absent": "квота не задана",
-            }
     return None
 
 
-def _quota_until_key(model: str) -> str:
-    """Ключ settings со СРОКОМ бесплатной квоты Qwen по модели (18.09.2026).
-    Дата хранится строкой ровно как её показывает консоль Model Studio
-    («19.10.2026») — бот её не считает, только показывает."""
-    return f"qwen_quota_until_{model}"
-
-
-def _quota_until(model: str) -> str:
-    """Приписка «· квота до 19.10.2026» или пустая строка, если срок не вписан.
-
-    ⚠️ ЗАЧЕМ. Квота Alibaba не вечная, и срок у каждой модели свой (консоль
-    Model Studio, 18.09.2026: у удалённых 03.10.2026 qwen3.7-max и qwen3.7-plus
-    — 19.10.2026, у тогдашней qwen3.8-max — 31.10.2026). Бот сроков не знает и
-    после даты показывал бы остаток, которого уже нет. Дата вписывается
-    руками — вторым словом к числу квоты."""
-    raw = (get_setting(_quota_until_key(model), "") or "").strip()
-    return f" · квота до {raw}" if raw else ""
-
-
-_DATE_RE = re.compile(r"^(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{4})$")
-
-
-def _split_quota_input(raw: str):
+def _parse_number(raw: str):
     """
-    Делит ввод «66614 19.10.2026» на число и срок: (остаток текста, дата или "").
-    Дата необязательна — «66614» так и останется числом без срока. Мусор вместо
-    даты датой не считается: вернём его в числовой части, и разбор числа сам
-    объяснит человеку, что не так.
-    """
-    parts = (raw or "").strip().split()
-    if len(parts) >= 2:
-        m = _DATE_RE.match(parts[-1])
-        if m:
-            d, mth, y = m.groups()
-            return " ".join(parts[:-1]), f"{int(d):02d}.{int(mth):02d}.{y}"
-    return raw, ""
-
-
-def _parse_number(raw: str, kind: str):
-    """
-    Число из того, что прислал человек: (значение, текст ошибки).
-    Понимает «5,32», «$ 5.32», «1 000 000». Отрицательное и заведомо
+    Сумма из того, что прислал человек: (значение, текст ошибки).
+    Понимает «5,32», «$ 5.32», «1 000». Отрицательное и заведомо
     нереальное отбивает с пояснением, а не молча — человек должен понимать,
     почему бот не принял.
     """
@@ -233,10 +161,6 @@ def _parse_number(raw: str, kind: str):
         return None, f"«{html.escape(raw[:30])}» — это не число"
     if value < 0:
         return None, "отрицательное число — так не бывает"
-    if kind == "tokens":
-        if value > _MAX_TOKENS:
-            return None, "слишком много токенов — проверь, не лишний ли разряд"
-        return int(value), ""
     if value > _MAX_MONEY:
         return None, "слишком большая сумма — проверь, не лишний ли разряд"
     return round(value, 6), ""
@@ -244,11 +168,11 @@ def _parse_number(raw: str, kind: str):
 
 def _build_balance_panel(flash: str = ""):
     """
-    Текст и кнопки экрана «💰 Счета и квоты». flash — строка-итог последнего
+    Текст и кнопки экрана «💰 Счета». flash — строка-итог последнего
     действия («было → стало»), показывается сверху один раз.
     """
     sep = "───────────────────────────\n"
-    parts = [f"💰 <b>СЧЕТА И КВОТЫ</b>\n{sep}"]
+    parts = [f"💰 <b>СЧЕТА</b>\n{sep}"]
     if flash:
         parts.append(f"{flash}\n{sep}")
 
@@ -261,32 +185,15 @@ def _build_balance_panel(flash: str = ""):
 
     for field_id in _BALANCE_ORDER:
         cfg = _BALANCE_FIELDS[field_id]
-        spent, _ = _read_number(_COST_FIELDS[field_id]["key"], "money")
+        spent, _ = _read_number(_COST_FIELDS[field_id]["key"])
         note = balance_sync_note(cfg["provider"])
         note = f" <i>({note})</i>" if note else ""
         parts.append(
             f"{_icon(cfg['provider'])} <b>{cfg['name']}</b>\n"
             f"  • Потрачено: <b>{_money_str(spent)}</b>\n"
-            f"  • Остаток на счету: {_value_str(cfg['key'], 'money', 'не задан')}{note}\n"
+            f"  • Остаток на счету: {_value_str(cfg['key'], 'не задан')}{note}\n"
             f"{sep}"
         )
-
-    # Qwen: денег на счету нет, зато есть остаток бесплатной квоты по каждой
-    # модели. Строки берём из конфига, а не из вызовов, — иначе после месячного
-    # сброса модель без вызовов пропала бы вместе с остатком квоты.
-    qw_spent, _ = _read_number("qwen_cost_usd", "money")
-    block = (f"{_icon('qwen')} <b>Qwen</b> — бесплатная квота в токенах\n"
-             f"  • Потрачено: <b>{_money_str(qw_spent)}</b>\n")
-    known = get_qwen_tokens()
-    for model in _qwen_model_keys():
-        known.pop(model, None)
-        block += (f"  • {model}: осталось "
-                  f"{_value_str(f'qwen_tokens_{model}', 'tokens', 'квота не задана')}"
-                  f"{_quota_until(model)}\n")
-    for model, tokens in known.items():
-        block += (f"  • {html.escape(model)} (нет в конфиге): "
-                  f"осталось <b>{_tokens_str(tokens)}</b>\n")
-    parts.append(block + sep)
 
     parts.append("Нажми кнопку — бот попросит прислать число.\n"
                  "Правка сразу видна в панели API и в отчётах о расходах.")
@@ -306,10 +213,6 @@ def _build_balance_panel(flash: str = ""):
         [InlineKeyboardButton(_BALANCE_FIELDS["xiaomi"]["btn"], callback_data="bal:set:xiaomi"),
          InlineKeyboardButton(_BALANCE_FIELDS["image"]["btn"], callback_data="bal:set:image")],
     ]
-    # Кнопки квот — по две в ряд, собираются из конфига сами.
-    qw_buttons = [InlineKeyboardButton(f"🎫 Квота {m}", callback_data=f"bal:set:qwen:{m}")
-                  for m in _qwen_model_keys()]
-    rows += [qw_buttons[i:i + 2] for i in range(0, len(qw_buttons), 2)]
     rows.append([InlineKeyboardButton("✏️ Изменить «потрачено»", callback_data="bal:cost")])
     # Обе кнопки возврата — ОДНИМ рядом (решение Максима 2026-07-27).
     rows.append([InlineKeyboardButton("⬅️ Настройки API", callback_data="adm_open_api")]
@@ -339,7 +242,7 @@ def _build_cost_panel():
              "НЕ влияет, остаток на счету она тоже не трогает. Пригодится, когда "
              "цифра бота разошлась с кабинетом или сменился ключ.\n\n")
     for cfg in _COST_FIELDS.values():
-        spent, _ = _read_number(cfg["key"], "money")
+        spent, _ = _read_number(cfg["key"])
         text += f"  • {_icon(cfg['provider'])} {cfg['name']}: <b>{_money_str(spent)}</b>\n"
 
     buttons = [InlineKeyboardButton(f"{_icon(cfg['provider'])} {cfg['name']}",
@@ -351,7 +254,7 @@ def _build_cost_panel():
 
 
 async def send_balance_panel(bot, chat_id: int, user_id: int, flash: str = ""):
-    """Присылает экран «💰 Счета и квоты» новым сообщением (через общую гигиену
+    """Присылает экран «💰 Счета» новым сообщением (через общую гигиену
     панелей — предыдущая панель удаляется). Используется после ввода числа:
     ответ пришёл сообщением, править «то же самое» сообщение уже нечем."""
     text, markup = _build_balance_panel(flash)
@@ -374,7 +277,7 @@ async def _show_screen(context, query, text: str, markup: InlineKeyboardMarkup):
 
 async def _handle_balance_callback(query, context, data: str, chat_id: int, user_id: int):
     """
-    Кнопки экрана «💰 Счета и квоты» (префикс bal:). Ветки:
+    Кнопки экрана «💰 Счета» (префикс bal:). Ветки:
       bal:panel                    — сам экран
       bal:set:<код>                — начать ввод числа (ждём сообщение)
       bal:cancel                   — отменить ожидание числа
@@ -412,24 +315,13 @@ async def _handle_balance_callback(query, context, data: str, chat_id: int, user
         await query.answer()
         # Значок в заголовке уже стоит внутри title (провайдерский, из
         # PROVIDER_ICONS) — второго не добавляем.
-        now = _value_str(info["key"], info["kind"], info["absent"])
-        if info["kind"] == "tokens":
-            now += " токенов"
-        # У квоты Qwen подсказываем, что вторым словом можно прислать срок её
-        # действия (он показан рядом с остатком на экране «Счета и квоты»).
-        date_hint = ""
-        if info["kind"] == "tokens" and field_id.startswith("qwen:"):
-            model = field_id[len("qwen:"):]
-            now += _quota_until(model)
-            date_hint = ("\nВторым словом можно прислать срок квоты: "
-                         f"<code>{info['example']} 19.10.2026</code>")
+        now = _value_str(info["key"], info["absent"])
         text = (
             f"<b>{html.escape(info['title'])}</b>\n"
             "───────────────────────────\n"
             f"Сейчас: {now}\n\n"
             "Пришли новое число одним сообщением.\n"
-            f"Например: <code>{info['example']}</code>"
-            f"{date_hint}\n"
+            f"Например: <code>{info['example']}</code>\n"
             f"Прочерк <code>-</code> — {info['clear']}."
         )
         markup = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="bal:cancel")]])
@@ -447,7 +339,7 @@ async def _handle_balance_callback(query, context, data: str, chat_id: int, user
 
 async def handle_balance_input(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
     """
-    Ввод числа для экрана «💰 Счета и квоты». Зовётся из handlers/messages.py,
+    Ввод числа для экрана «💰 Счета». Зовётся из handlers/messages.py,
     когда в личке ВЛАДЕЛЬЦА висит ожидание `user_data["balance_edit"]`.
 
     Возвращает True — сообщение съедено этим режимом (в ИИ не пойдёт).
@@ -468,18 +360,10 @@ async def handle_balance_input(update: Update, context: ContextTypes.DEFAULT_TYP
         return True
 
     raw = (text or "").strip()
-    was_str = _value_str(info["key"], info["kind"], info["absent"])
+    was_str = _value_str(info["key"], info["absent"])
     # То же «было», но без разметки — для журнала бота (в лог HTML не пишем).
-    was_value, was_set = _read_number(info["key"], info["kind"])
-    was_plain = ((_tokens_str(was_value) if info["kind"] == "tokens" else _money_str(was_value))
-                 if was_set else info["absent"])
-
-    # У квоты Qwen вторым словом можно прислать СРОК её действия: «66614
-    # 19.10.2026». Дата необязательна: без неё меняется только число, а ранее
-    # вписанный срок остаётся на месте (18.09.2026).
-    quota_date = ""
-    if info["kind"] == "tokens" and field_id.startswith("qwen:"):
-        raw, quota_date = _split_quota_input(raw)
+    was_value, was_set = _read_number(info["key"])
+    was_plain = _money_str(was_value) if was_set else info["absent"]
 
     # Прочерк — убрать значение СОВСЕМ (не ноль: см. delete_setting).
     if raw in ("-", "–", "—"):
@@ -493,7 +377,7 @@ async def handle_balance_input(update: Update, context: ContextTypes.DEFAULT_TYP
                                 f"стало <i>{info['absent']}</i>")
         return True
 
-    value, err = _parse_number(raw, info["kind"])
+    value, err = _parse_number(raw)
     if value is None:
         warn = await context.bot.send_message(
             chat_id=chat_id,
@@ -508,19 +392,13 @@ async def handle_balance_input(update: Update, context: ContextTypes.DEFAULT_TYP
             schedule_delete(context.bot, chat_id, warn.message_id, 15)
         return True
 
-    set_setting(info["key"], str(int(value)) if info["kind"] == "tokens" else f"{value:.6f}")
-    if quota_date:
-        set_setting(_quota_until_key(field_id[len("qwen:"):]), quota_date)
+    set_setting(info["key"], f"{value:.6f}")
     context.user_data.pop("balance_edit", None)
-    new_str = (f"<b>{_tokens_str(value)}</b>" if info["kind"] == "tokens"
-               else f"<b>{_money_str(value)}</b>")
-    if quota_date:
-        new_str += f" (квота до {quota_date})"
+    new_str = f"<b>{_money_str(value)}</b>"
     logger.info("🔧 Владелец %s изменил %s: было %s → стало %s",
-                update.effective_user.id, info["key"], was_plain,
-                _tokens_str(value) if info["kind"] == "tokens" else _money_str(value))
+                update.effective_user.id, info["key"], was_plain, _money_str(value))
     _audit(update.effective_user.id, "balance", 0,
-           f"{info['short']}: стало {_tokens_str(value) if info['kind'] == 'tokens' else _money_str(value)}")
+           f"{info['short']}: стало {_money_str(value)}")
     await send_balance_panel(context.bot, chat_id, update.effective_user.id,
                             f"✅ <b>{html.escape(info['short'])}</b>: было {was_str} → стало {new_str}")
     return True
