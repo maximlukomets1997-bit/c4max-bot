@@ -10022,7 +10022,9 @@ def check_owner_keys():
     они могут так: нажатие уходит модели вопросом (и стоит денег), кнопка
     открывает не тот раздел, панель приходит модератору или постороннему,
     перехват ловит чужой такой же текст. С 18.10.2026 выключателя у панели
-    нет — и старая запись «выключено» в базе не должна её убирать.
+    нет — и старая запись «выключено» в базе не должна её убирать; и тогда же
+    /adm владельца стал тем же сообщением, что держит панель: попади оно в
+    уборку панелей — первый открытый раздел стёр бы его вместе с кнопками.
 
     Гоняются настоящие: панель и её отправка (`panel_keys`), обработчик
     `handlers/messages.py::handle_message`, `/start` и `/adm`; поддельные —
@@ -10324,18 +10326,22 @@ def check_owner_keys():
         bot = Bot()
         upd, _ = make(OWNER, "/adm")
         asyncio.run(pm.cmd_adm(upd, types.SimpleNamespace(bot=bot, user_data={})))
-        expect("/adm присылает нижние кнопки — их сообщение прыгало бы под панель на каждое /adm",
+        # /adm шлёт нижние кнопки только через send_adm_panel (её подмена в этой
+        # группе — записная книжка; настоящую гоняет раздел 6–7).
+        expect("/adm шлёт нижние кнопки в обход send_adm_panel — в чате было бы два сообщения",
                opened[-1:] == ["adm"] and not keyboards(bot))
+        # ⚠️ С 18.10.2026 у владельца /adm и есть сообщение с нижними кнопками:
+        # позовёт main.py после него ещё и send_owner_keys — панель придёт дважды.
         main_src = open(os.path.join(ROOT, "main.py"), encoding="utf-8").read()
         at_panel = main_src.find("await send_adm_panel(application.bot, owner_id, owner_id)")
-        at_keys = main_src.find("await send_owner_keys(application.bot, owner_id, owner_id)")
-        expect("после запуска бота нижние кнопки не ставятся вместе с панелью (main.py)",
-               0 <= at_panel < at_keys)
+        expect("после запуска бота панель приходит дважды или не приходит: main.py должен "
+               "звать только send_adm_panel", at_panel >= 0 and "await send_owner_keys(" not in main_src)
 
-        # ═══ 6–7. /adm: выключателя нет, у владельца — без кнопок (18.10.2026) ═══
+        # ═══ 6–7. /adm: выключателя нет, у владельца — сообщение нижних кнопок ═══
         # Все разделы стоят внизу, а выключателя нижних кнопок больше нет: у
-        # владельца /adm — заголовок с версией и подсказка, без кнопок, при
-        # любой старой записи в базе. Модератору — его часть /adm по правам.
+        # владельца /adm — заголовок с версией без кнопок под сообщением, при
+        # любой старой записи в базе, и это ОДНО сообщение с нижними кнопками
+        # (18.10.2026, решение Максима). Модератору — его часть /adm по правам.
         def datas_of(markup):
             return [b.callback_data for row in (markup.inline_keyboard if markup else [])
                     for b in row]
@@ -10346,19 +10352,44 @@ def check_owner_keys():
         for raw in ("1", "0"):
             hist.set_setting(OLD_KEY, raw)
             text, markup = pm.adm_view(OWNER)
-            expect(f"/adm владельца не без кнопок (старая запись выключателя «{raw}»): "
-                   f"{datas_of(markup)}", markup is None and "нижних кнопках" in text)
+            expect(f"/adm владельца не без кнопок или не тем текстом, что у нижних кнопок "
+                   f"(старая запись выключателя «{raw}»): {datas_of(markup)}",
+                   markup is None and text == pk.CARRIER_TEXT)
         hist.delete_setting(OLD_KEY)
         text, markup = pm.adm_view(MOD)
         expect("у модератора /adm стал как у владельца — нижней панели у него нет",
                "adm_open_mod" in datas_of(markup) and "Выберите раздел" not in text
                and "adm_open_stats" not in datas_of(markup))
         # Настоящая отправка /adm (в этой группе её подменяет записная книжка).
-        bot = Bot()
+        # У владельца — ОДНО сообщение: заголовок с версией (без строки
+        # «Разделы…» — надпись Максима 18.10.2026) и нижние кнопки; прежнее
+        # такое удаляется; открытый раздел убирается, а само сообщение в
+        # уборку панелей не попадает — иначе первый же раздел стёр бы его.
+        from telegram.constants import ParseMode
+        from utils import clean_bot_messages, register_and_clean_bot_message as reg
+        hist.set_setting(SLOT, "333")                  # прежнее сообщение с панелью
+        bot = Bot(start_id=1200)
+        asyncio.run(reg(bot, OWNER, 4242))             # открытый раздел — через гигиену
+        bot.events.clear()
         asyncio.run(saved_targets["adm"](bot, OWNER, OWNER))
         sent = [e for e in bot.events if e[0] == "send"]
-        expect("/adm владельца пришёл с кнопками",
-               bool(sent) and sent[-1][3] is None and "нижних кнопках" in sent[-1][2])
+        expect(f"/adm владельца пришёл не одним сообщением с версией и нижними кнопками: "
+               f"{[(e[2], type(e[3]).__name__) for e in sent]}",
+               len(sent) == 1 and isinstance(sent[0][3], ReplyKeyboardMarkup)
+               and sent[0][2] == pk.CARRIER_TEXT and c.BOT_VERSION_HTML in sent[0][2]
+               and "АДМИН-ПАНЕЛЬ" in sent[0][2] and "Разделы" not in sent[0][2])
+        expect("версия в /adm владельца не синей ссылкой или под ним развернётся карточка GitHub",
+               bool(sent) and sent[0][5].get("parse_mode") == ParseMode.HTML
+               and getattr(sent[0][5].get("link_preview_options"), "is_disabled", False) is True)
+        expect("/adm владельца не убрал прежнее сообщение с нижними кнопками — их стало бы два",
+               ("delete", OWNER, 333) in bot.events)
+        expect("/adm владельца не убрал открытый раздел", ("delete", OWNER, 4242) in bot.events)
+        carrier = sent[0][4] if sent else 0
+        bot = Bot(start_id=1300)
+        asyncio.run(reg(bot, OWNER, 4343))             # открыли раздел
+        expect("открытие раздела удалило сообщение с нижними кнопками — пропали бы и кнопки",
+               bool(carrier) and ("delete", OWNER, carrier) not in bot.events)
+        asyncio.run(clean_bot_messages(Bot(), OWNER))  # уборка за собой: дальше чистый лист
 
         # ═══ 8. Подменю «📡 Настройки API» (18.10.2026, пилот) ═══
         # Нижняя «📡 Настройки API» присылает панель и ставит внизу её
@@ -10714,8 +10745,9 @@ def check_owner_keys():
                       f"владельцу в личке, её сообщение остаётся одно — новое убирает "
                       f"прежнее; каждая кнопка — в свой раздел, мимо модели; чужой такой же "
                       f"текст — модели; выключателя нет, старая запись «выключено» ничего не "
-                      f"гасит; /start и запуск ставят панель, /adm — нет, у владельца он без "
-                      f"кнопок; подменю «Настройки API» — "
+                      f"гасит; /start и запуск ставят панель; /adm владельца — это же одно "
+                      f"сообщение с версией, раздел убирает, а сам в уборку панелей не "
+                      f"попадает; подменю «Настройки API» — "
                       f"те же переключатели и надписи, что под панелью, а под панелью их нет; "
                       f"подменю «PROMPTы» — так же, с объявлением группам у «Сам в разговор»")
 

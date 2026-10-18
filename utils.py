@@ -284,7 +284,20 @@ async def register_and_clean_bot_message(bot, chat_id: int, message_id: int, kee
 
     try:
         register_bot_message(chat_id, message_id)
+    except Exception as e:
+        logger.error("⚠️ Не удалось очистить старые сообщения бота в чате %s: %s", chat_id, e)
+        return
+    await clean_bot_messages(bot, chat_id, keep_count)
 
+
+async def clean_bot_messages(bot, chat_id: int, keep_count: int = 0):
+    """
+    Удаляет зарегистрированные сообщения бота, оставляя последние `keep_count`
+    (по умолчанию — ни одного). Сама ничего не регистрирует: её отдельно зовёт
+    /adm владельца (18.10.2026), чтобы убрать открытый раздел, — его новое
+    сообщение несёт нижние кнопки и в эту уборку попадать не должно.
+    """
+    try:
         old_ids = get_old_bot_messages(chat_id, keep_count=keep_count)
         for old_id in old_ids:
             try:

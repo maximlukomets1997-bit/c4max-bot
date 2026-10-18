@@ -634,11 +634,12 @@ def adm_view(user_id: int):
     """
     Что показывает /adm этому человеку: (текст, клавиатура или None).
 
-    ⚠️ У ВЛАДЕЛЬЦА — БЕЗ КНОПОК (2026-10-18, решения Максима): все разделы
-    стоят внизу под полем ввода (panel_keys.py), а выключателя нижних кнопок
-    больше нет — они есть всегда. Пропала панель из чата — её вернёт /start.
-    Остаётся заголовок с версией и подсказка, где разделы. Модераторов это не
-    касается: нижней панели у них нет, /adm у них — по правам.
+    ⚠️ У ВЛАДЕЛЬЦА — БЕЗ КНОПОК ПОД СООБЩЕНИЕМ (2026-10-18, решения Максима):
+    все разделы стоят внизу под полем ввода (panel_keys.py), выключателя
+    нижних кнопок нет. Текст — заголовок с версией, ОДИН с сообщением нижних
+    кнопок (panel_keys.CARRIER_TEXT): в личке /adm владельца и есть это
+    сообщение (send_adm_panel). Модераторов это не касается: нижней панели у
+    них нет, /adm у них — по правам.
 
     Версия в заголовке — способ увидеть, какая сборка РЕАЛЬНО работает (на
     сервере она меняется только после того, как он забрал правки). Синей
@@ -647,10 +648,8 @@ def adm_view(user_id: int):
     """
     from services import roles
     if roles.is_owner(user_id):
-        return ((f"🎛 <b>АДМИН-ПАНЕЛЬ</b> · {BOT_VERSION_HTML}\n"
-                 "───────────────────────────\n"
-                 "<i>Разделы — в нижних кнопках под полем ввода.</i>"),
-                None)
+        from .panel_keys import CARRIER_TEXT
+        return CARRIER_TEXT, None
 
     keyboard = _filter_keyboard(_adm_rows(), user_id)
     if keyboard:
@@ -673,11 +672,25 @@ async def send_adm_panel(bot, chat_id: int, user_id: int | None = None):
     Собирается ПО ПРАВАМ смотрящего: список разделов один на всех, а лишнее
     отсекает фильтр по таблице прав (services/roles.py). Владельческие разделы
     в таблице не значатся вовсе — им достаётся запрет по умолчанию. Вид — по
-    adm_view (у владельца — без кнопок, разделы внизу).
+    adm_view.
     user_id по умолчанию = chat_id: панель всегда открывается в личке, где
     это одно и то же число.
+
+    ⚠️ У ВЛАДЕЛЬЦА В ЛИЧКЕ /adm — ЭТО СООБЩЕНИЕ НИЖНИХ КНОПОК (18.10.2026,
+    решение Максима: два одинаковых сообщения — одно). Оно приходит заново, а
+    прежнее удаляется (panel_keys.send_owner_keys). В гигиену панелей его НЕ
+    кладём — открытие любого раздела стёрло бы его вместе с нижними кнопками;
+    открытый раздел (и «✅ Бот запущен» при старте) убираем той же уборкой,
+    что и раньше, но без регистрации нового.
     """
     uid = chat_id if user_id is None else user_id
+    from services import roles
+    if chat_id == uid and roles.is_owner(uid):
+        from utils import clean_bot_messages
+        from .panel_keys import send_owner_keys
+        await send_owner_keys(bot, chat_id, uid)
+        await clean_bot_messages(bot, chat_id)
+        return
     text, markup = adm_view(uid)
     sent_msg = await bot.send_message(
         chat_id=chat_id, text=text, parse_mode=ParseMode.HTML,

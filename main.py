@@ -386,19 +386,18 @@ async def post_init(application):
         html=True,
     )
 
-    # Сразу за этим автоматически показываем владельцу его панель.
-    # Панель отправляется через тот же механизм очистки, поэтому она УДАЛЯЕТ
-    # только что отправленное «✅ Бот запущен…» — в итоге остаётся готовая
-    # к работе панель. Второй аргумент send_adm_panel — чьи права: в личке он
-    # совпадает с chat_id, но полагаться на это не надо.
+    # Сразу за этим автоматически показываем владельцу его панель. Она УДАЛЯЕТ
+    # только что отправленное «✅ Бот запущен…» (та же уборка панелей) — в
+    # итоге остаётся готовая к работе панель. Второй аргумент send_adm_panel —
+    # чьи права: в личке он совпадает с chat_id, но полагаться на это не надо.
+    # ⚠️ У владельца /adm — это и есть сообщение с нижними кнопками (18.10.2026,
+    # panel_main.send_adm_panel): отдельно send_owner_keys здесь НЕ звать,
+    # иначе панель придёт дважды подряд.
     try:
-        from handlers.admin import send_adm_panel, send_owner_keys
+        from handlers.admin import send_adm_panel
         for owner_id in _service_recipients():
             try:
                 await send_adm_panel(application.bot, owner_id, owner_id)
-                # Нижние кнопки владельца (2026-10-17, panel_keys.py) — вместе
-                # с панелью: после каждого запуска они на месте.
-                await send_owner_keys(application.bot, owner_id, owner_id)
             except Exception as e:
                 logger.warning("⚠️ Не удалось показать панель %s: %s", owner_id, _friendly_error(e))
     except Exception as e:
