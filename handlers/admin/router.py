@@ -34,9 +34,9 @@ from .panel_main import (BATCH_INFO_TEXT, _build_api_keyboard, flip_api_toggle, 
                          send_stats_panel)
 from .panel_mod import _handle_mod_callback, send_mod_panel
 from .panel_prompts import (NO_PROMPT_FILES_TEXT, _build_prompt_panel_text_and_keyboard,
-                            _handle_proactive_callback, _handle_proactive_wipe,
+                            _handle_proactive_callback,
                             flip_prompts_toggle, handle_prompt_reset,
-                            send_prompts_panel, send_prompt_files)
+                            send_prompts_panel, send_prompt_files, wipe_memory)
 from .panel_quiz import _handle_quiz_callback
 from .panel_rag import _end_kb_test, _handle_kb_callback, send_rag_panel
 from .panel_updates import _handle_updates_callback
@@ -269,7 +269,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         if not raw:
             await query.answer(
                 "🗄 Архив разговоров пуст: он наполняется по кнопке "
-                "«🧹 Очистить РАЗГОВОРЫ»." if is_archive else
+                "«🧹 Очистить ПАМЯТЬ»." if is_archive else
                 "💬 Записей пока нет: после очистки разговоров в группе ещё не писали.",
                 show_alert=True,
             )
@@ -281,8 +281,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         if len(raw) > _TG_FILE_MAX:
             await query.answer(
                 f"⚠️ Файл слишком велик для Telegram ({len(raw) // (1024 * 1024)} МБ).\n"
-                f"Нажми «🧹 Очистить РАЗГОВОРЫ» — запись уедет в архив, "
-                f"и начнётся новая.",
+                f"Нажми «🧹 Очистить ПАМЯТЬ» — запись уедет в архив, "
+                f"и начнётся новая. Учти: бот заодно забудет личную переписку со всеми.",
                 show_alert=True,
             )
             return
@@ -954,20 +954,14 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await _handle_proactive_callback(query, user_id, data)
         return
 
-    # ── Дубликат «🧹 Очистить РАЗГОВОРЫ» в главной панели ─────────────────
-    # (2026-07-26 на время тестов, 2026-07-31 по решению Максима оставлен
-    # навсегда — см. panel_main.py). Действие то же самое, что
-    # у кнопки в панели промптов, — зовём тот же обработчик, но с флагом
-    # from_adm: он вернёт клавиатуру /adm, а не панели промптов.
-    # ⚠️ БЕЗ ПОДТВЕРЖДЕНИЯ (2026-08-10, просьба Максима «вылазит ещё одна
-    # кнопка подтверждения — её нужно убрать»): жмём — и бот сразу забывает
-    # разговоры. Действие обратимое, поэтому спрашивать не о чем: архив НЕ
-    # удаляется, в settings лишь ставится черта времени, старше которой
-    # стенограмма не читается. Та же кнопка в панели промптов подтверждение
-    # СОХРАНЯЕТ — там её жмут реже и не глядя.
-    # Ветки adm:wipe_yes / adm:wipe_no убраны вместе с подтверждением; если
-    # у кого-то висит старое сообщение с теми кнопками, нажатие просто
-    # ничего не сделает.
-    if data == "adm:wipe":
-        await _handle_proactive_wipe(query, user_id, True, from_adm=True)
+    # ── «🧹 Очистить ПАМЯТЬ» в главной панели ─────────────────────────────
+    # Копия нижней кнопки владельца (18.10.2026, решение Максима): память
+    # групп и личная переписка ВСЕХ людей разом — panel_prompts.wipe_memory.
+    # ⚠️ БЕЗ ПОДТВЕРЖДЕНИЯ, хотя личная часть необратима, — так решил Максим.
+    # Клавиатуру не трогаем: она не менялась, повторная отправка той же
+    # разметки — ошибка Telegram «Message is not modified».
+    # До 18.10.2026 здесь была ветка adm:wipe (только разговоры групп); она
+    # убрана вместе с кнопкой — нажатие на старом сообщении ничего не сделает.
+    if data == "adm:memory":
+        await query.answer(wipe_memory(user_id), show_alert=True)
         return

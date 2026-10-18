@@ -14,7 +14,7 @@ selftest.py — поведение в перечисленных областя�
 Запуск из корня проекта:
     python .claude/skills/project-map/scripts/impact.py send_formatted
     python .claude/skills/project-map/scripts/impact.py rag_enabled
-    python .claude/skills/project-map/scripts/impact.py "adm:wipe"
+    python .claude/skills/project-map/scripts/impact.py "adm:memory"
 """
 
 import argparse

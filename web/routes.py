@@ -341,7 +341,7 @@ async def system(request):
             kwargs = {}
             return aioweb.HTTPSeeOther("/download?what=backup")
         elif do == "wipe":
-            message = actions.wipe_conversations(actor_id)
+            message = actions.wipe_memory(actor_id)
         elif do == "restart":
             message = await actions.restart_bot(actor_id, application)
         else:

@@ -739,30 +739,24 @@ def digest_toggle(actor_id: int) -> bool:
     return new_val == "1"
 
 
-def wipe_conversations(actor_id: int) -> str:
+def wipe_memory(actor_id: int) -> str:
     """
-    «Очистить РАЗГОВОРЫ» — бот забывает переписку во ВСЕХ группах.
+    «🧹 Очистить ПАМЯТЬ» (18.10.2026, решение Максима — как в боте): бот
+    забывает разговоры во ВСЕХ группах и личную переписку со ВСЕМИ людьми.
+    До этого дня здесь была «Очистить РАЗГОВОРЫ» — только группы.
 
-    ⚠️ ЗДЕСЬ ТРИ ШАГА, И НИ ОДИН НЕ ЛИШНИЙ (сверено с
-    handlers/admin/panel_prompts.py::_handle_proactive_wipe):
-      1. черта в базе — с неё бот начинает считать разговор заново;
-      2. сброс счётчиков В ПАМЯТИ — без него проверка сработает по уже
-         пустой стенограмме;
-      3. закрытие файла записи разговора — текущий уезжает в архив, чтобы
-         запись совпадала с той памятью, которая у бота осталась.
-    Пропустишь любой — очистка будет неполной и молча.
+    ⚠️ ДЕЛАЕТ ТА ЖЕ ФУНКЦИЯ, ЧТО КНОПКА БОТА — panel_prompts.wipe_memory:
+    черта под разговорами, сброс счётчиков в памяти, закрытие записи
+    разговора, удаление личной переписки, лог и журнал персонала. Своей копии
+    этих шагов здесь больше нет (до 18.10.2026 была), так что разойтись с
+    ботом ей не на чем. Подтверждение «Да, выполнить / Отмена» — у страницы
+    (web/routes.py), в отличие от бота: там его нет по решению Максима.
     """
-    from database.history import set_proactive_reset_mark
-    from services.proactive import forget_conversations
-    from services import chat_log
+    from handlers.admin.panel_prompts import wipe_memory as _wipe_memory
 
-    mark = set_proactive_reset_mark()
-    forget_conversations()
-    chat_log.close_session()   # тихий шаг: не переложилось — очистка всё равно была
-    _staff_audit(actor_id, "proactive_wipe", 0, "бот забыл разговоры во всех группах")
-    logger.info("🌐 Сайт: бот забыл разговоры во всех группах (черта %s UTC, админ %s)",
-                mark, actor_id)
-    return "🧹 Готово: бот забыл разговоры во всех группах."
+    message = _wipe_memory(actor_id)
+    logger.info("🌐 Сайт: нажата «🧹 Очистить ПАМЯТЬ» (админ %s)", actor_id)
+    return message
 
 
 def toggle_personal_prompt(actor_id: int) -> bool:

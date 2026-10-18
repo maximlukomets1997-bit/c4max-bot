@@ -223,6 +223,26 @@ def clear_history(user_id: int):
         conn.commit()
 
 
+def clear_all_histories() -> tuple[int, int]:
+    """
+    Стирает личную память бота У ВСЕХ людей разом — «🧹 Очистить ПАМЯТЬ»:
+    нижняя кнопка владельца, её копия в /adm и сайт (18.10.2026, решение Максима).
+
+    То же, что clear_history, но на всю таблицу: личка и группы, новости из
+    рассылки — всё, что бот помнит о каждом человеке. Удаление настоящее,
+    вернуть нельзя. Накопленную статистику токенов НЕ обнуляет.
+    Возвращает (сколько сообщений стёрто, у скольких людей).
+    """
+    with _lock:
+        conn = _get_connection()
+        row = conn.execute(
+            "SELECT COUNT(*) AS cnt, COUNT(DISTINCT user_id) AS people FROM messages"
+        ).fetchone()
+        conn.execute("DELETE FROM messages")
+        conn.commit()
+    return (row["cnt"] or 0, row["people"] or 0) if row else (0, 0)
+
+
 def register_bot_message(chat_id: int, message_id: int):
     """Регистрирует отправленное ботом сообщение в БД."""
     with _lock:

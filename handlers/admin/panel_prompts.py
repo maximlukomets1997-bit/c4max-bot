@@ -478,8 +478,8 @@ async def _handle_proactive_callback(query, user_id, data):
 def wipe_conversations(user_id: int) -> str:
     """
     Сама очистка РАЗГОВОРОВ — общая для всех кнопок, которые её делают:
-    панели промптов (с подтверждением), /adm и нижней кнопки владельца
-    (handlers/admin/panel_keys.py, 17.10.2026). Возвращает черту времени.
+    панели промптов (с подтверждением) и «🧹 Очистить ПАМЯТЬ» внизу, в /adm и
+    на сайте (через wipe_memory ниже). Возвращает черту времени.
     Подробности — в докстринге _handle_proactive_wipe ниже.
     """
     from database.history import set_proactive_reset_mark
@@ -498,7 +498,35 @@ def wipe_conversations(user_id: int) -> str:
     return mark
 
 
-async def _handle_proactive_wipe(query, user_id: int, confirmed: bool, from_adm: bool = False):
+def wipe_memory(user_id: int) -> str:
+    """
+    «🧹 Очистить ПАМЯТЬ» — нижняя кнопка владельца, её копия в /adm и кнопка
+    сайта (web/actions.py::wipe_memory) (18.10.2026, решение Максима: две
+    кнопки «🧹 Очистить РАЗГОВОРЫ» и «🗑 Очистить мой диалог» слиты в одну). В
+    боте без подтверждения — так решил Максим, хотя вторая половина
+    необратима; на сайте подтверждение «Да, выполнить / Отмена» осталось.
+
+    Делает обе очистки разом:
+      • память групп — wipe_conversations выше (черта, обратимо);
+      • личную переписку ВСЕХ людей — database/chat.py::clear_all_histories
+        (удаление настоящее). Статистику токенов не трогает.
+
+    Публичная «🗑️ Очистить историю» в /start и /clear сюда не ведут: они
+    стирают только самого нажавшего и открыты всем — им можно лишь своё.
+    Возвращает текст ответа владельцу.
+    """
+    from database.history import clear_all_histories
+
+    wipe_conversations(user_id)
+    msgs, people = clear_all_histories()
+    logger.info("🔧 Владелец %s стёр личную память бота у всех: %d сообщ. у %d чел.",
+                user_id, msgs, people)
+    _audit(user_id, "clear_all_ctx", 0, f"{msgs} сообщ. у {people} чел.")
+    return ("🧹 Готово: бот забыл разговоры во всех группах и личную переписку "
+            f"со всеми — {msgs} сообщ. у {people} чел.")
+
+
+async def _handle_proactive_wipe(query, user_id: int, confirmed: bool):
     """
     Ветки proactive:wipe (спросить) и proactive:wipe_yes (забыть) — кнопка
     «🧹Очистить РАЗГОВОРЫ» блока «Сам в разговор».
@@ -513,17 +541,13 @@ async def _handle_proactive_wipe(query, user_id: int, confirmed: bool, from_adm:
     подменяется на «да / отмена» — тем же приёмом, что очистка журнала в
     панели модерации.
 
-    from_adm=True — нажали дубликат кнопки в /adm. Там подтверждения нет
-    (просьба Максима 2026-08-10), сюда приходят сразу с confirmed=True, и
-    клавиатуру после очистки НЕ трогают: она не менялась, а повторная отправка
-    той же разметки — это ошибка Telegram «Message is not modified» в логах.
+    С 18.10.2026 сюда приходит ТОЛЬКО панель промптов: копия в /adm (раньше
+    шла сюда с флагом from_adm, без подтверждения) слита с «🗑 Очистить мой
+    диалог» в «🧹 Очистить ПАМЯТЬ» — та зовёт wipe_memory напрямую.
     """
-    # ⚠️ ПОДТВЕРЖДЕНИЕ ОСТАЛОСЬ ТОЛЬКО У КНОПКИ ИЗ ПАНЕЛИ ПРОМПТОВ (2026-08-10,
-    # просьба Максима убрать его в /adm). Поэтому callback'и подтверждения
-    # всегда «proactive:…»: из /adm сюда приходят уже с confirmed=True, и
-    # ветка ниже не выполняется вовсе. Пары «adm:wipe_yes/no» больше НЕТ —
-    # заведёшь её обратно, не добавив ветку в роутер, и preflight это поймает
-    # (проверка «кнопки ↔ роутер»), как поймал при этой правке.
+    # Callback'и подтверждения — «proactive:…». Пары «adm:wipe_yes/no» НЕТ с
+    # 10.08.2026 — заведёшь её обратно, не добавив ветку в роутер, и preflight
+    # это поймает (проверка «кнопки ↔ роутер»).
     prefix = "proactive"
 
     if not confirmed:
@@ -542,19 +566,13 @@ async def _handle_proactive_wipe(query, user_id: int, confirmed: bool, from_adm:
 
     # Возвращаем кнопки панели промптов: перед очисткой там стояло
     # подтверждение «да / отмена», и его надо сменить обратно на обычные.
-    #
-    # ⚠️ ИЗ /adm КЛАВИАТУРУ НЕ ТРОГАЕМ ВОВСЕ (2026-08-11). С тех пор как
-    # подтверждение в админ-панели убрали, её кнопки при нажатии НЕ менялись —
-    # и «возврат» отправлял Телеграму ровно ту же разметку, что уже на экране.
-    # Telegram на это отвечает ошибкой «Message is not modified», она падала в
-    # лог отладочной строкой и выглядела как поломка (её и заметил Максим).
-    # Поломки не было — был лишний запрос к Telegram на каждое нажатие.
-    if not from_adm:
-        try:
-            _, markup = _build_prompt_panel_text_and_keyboard(user_id)
-            await query.edit_message_reply_markup(reply_markup=markup)
-        except Exception as e:
-            logger.debug("🔧 Не удалось вернуть клавиатуру после очистки разговоров: %s", e)
+    # (Возврат уместен только здесь: кнопка без подтверждения клавиатуру не
+    # меняет, и «возврат» той же разметки — ошибка «Message is not modified».)
+    try:
+        _, markup = _build_prompt_panel_text_and_keyboard(user_id)
+        await query.edit_message_reply_markup(reply_markup=markup)
+    except Exception as e:
+        logger.debug("🔧 Не удалось вернуть клавиатуру после очистки разговоров: %s", e)
 
 
 # ─────────────────────────────────────────────
@@ -841,13 +859,14 @@ def _build_prompt_panel_text_and_keyboard(user_id, bot_username=None, full: bool
     full_text += _proactive_stats_lines()
 
     # ── КНОПКИ УПРАВЛЕНИЯ ────────────────────────────────────────────────
-    # ⚠️ У владельца их под панелью НЕТ (2026-10-18, решение Максима): все
-    # стоят в нижнем подменю «⚙️ PROMPTы» (panel_keys.py), под панелью —
-    # только возврат, а в тексте строка, где они. full=True — полный вариант:
-    # его меряет preflight. Надписи — prompts_toggle_text, одни с нижними.
+    # ⚠️ У владельца под панелью кнопок НЕТ ВОВСЕ (2026-10-18, решения
+    # Максима): переключатели — в нижнем подменю «⚙️ PROMPTы», и держит их
+    # само сообщение панели (send_prompts_panel → panel_keys.send_owner_keys).
+    # Без «⬅️ Админ-панель» и без строки «где переключатели»: у сообщения один
+    # набор кнопок — нижние. full=True — полный вариант: его меряет preflight.
+    # Надписи — prompts_toggle_text, одни с нижними.
     if not full and prompts_toggles_below(user_id):
-        full_text += "\n\n⌨️ <i>Переключатели и регуляторы — в нижних кнопках.</i>"
-        return _fit_panel_text(full_text), InlineKeyboardMarkup([_adm_back_row()])
+        return _fit_panel_text(full_text), None
 
     # Живые цифры (порог/контекст) и статус НАМЕРЕННО только на кнопках, а не
     # в тексте панели — регуляторы обновляют панель дешёвым
@@ -1048,15 +1067,33 @@ async def cmd_prompt_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await register_and_clean_bot_message(context.bot, chat_id, sent_msg.message_id)
 
 
+def prompts_panel_text(user_id: int, bot_username=None) -> str:
+    """Текст панели «⚙️ НАСТРОЙКИ PROMPTов» целиком, с шапкой. Один на обычную
+    отправку и на сообщение нижнего подменю (panel_keys.send_owner_keys)."""
+    prompt_text, _ = _build_prompt_panel_text_and_keyboard(user_id, bot_username)
+    return ("⚙️ <b>НАСТРОЙКИ PROMPTов</b>\n"
+            "───────────────────────────\n"
+            + prompt_text)
+
+
 async def send_prompts_panel(bot, chat_id: int, user_id: int):
-    """Панель «⚙️ НАСТРОЙКИ PROMPTов»: системный промпт, промпт новостей, тумблеры."""
-    prompt_text, prompt_markup = _build_prompt_panel_text_and_keyboard(user_id, bot.username)
-    text = (
-        "⚙️ <b>НАСТРОЙКИ PROMPTов</b>\n"
-        "───────────────────────────\n"
-        + prompt_text
-    )
-    await _send_panel_message(bot, chat_id, text, prompt_markup)
+    """
+    Панель «⚙️ НАСТРОЙКИ PROMPTов»: системный промпт, промпт новостей, тумблеры.
+
+    ⚠️ У ВЛАДЕЛЬЦА В ЛИЧКЕ ПАНЕЛЬ — ЭТО СООБЩЕНИЕ НИЖНЕГО ПОДМЕНЮ (18.10.2026,
+    решение Максима: одно сообщение вместо панели и отдельного «⚙️ PROMPTы —
+    переключатели внизу»). Её шлёт panel_keys.send_owner_keys(menu="prompts"):
+    к тексту панели прикреплены нижние кнопки, прежнее такое сообщение
+    удаляется, в гигиену панелей оно НЕ попадает — иначе первый же раздел
+    стёр бы его вместе с кнопками.
+    """
+    if chat_id == user_id and prompts_toggles_below(user_id):
+        from .panel_keys import send_owner_keys
+        await send_owner_keys(bot, chat_id, user_id, menu="prompts")
+        return
+    _, prompt_markup = _build_prompt_panel_text_and_keyboard(user_id, bot.username)
+    await _send_panel_message(bot, chat_id, prompts_panel_text(user_id, bot.username),
+                              prompt_markup)
 
 
 # ─────────────────────────────────────────────

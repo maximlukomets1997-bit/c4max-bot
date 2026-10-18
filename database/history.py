@@ -65,7 +65,7 @@ from .settings import (get_setting, set_setting, delete_setting,
 # ─── переписка с ботом и гигиена его сообщений ──────────────────────
 from .chat import (get_history, get_history_length, get_user_usage,
                    add_messages, add_bot_message, clear_history,
-                   register_bot_message, get_old_bot_messages,
+                   clear_all_histories, register_bot_message, get_old_bot_messages,
                    remove_bot_message, add_pending_delete,
                    remove_pending_delete, list_pending_deletes)
 

@@ -10015,7 +10015,8 @@ def check_direct_hands():
 def check_owner_keys():
     """
     Нижние кнопки владельца (17.10.2026, просьба Максима): панель под полем
-    ввода в его личке, кнопки ведут в разделы /adm и в две очистки оттуда же.
+    ввода в его личке, кнопки ведут в разделы /adm, в очистку памяти и
+    перезапуск оттуда же.
 
     ⚠️ Ради чего проверка существует. `preflight` нижних кнопок не видит вовсе:
     у них нет callback_data, по которому он считает кнопки. А сломаться тихо
@@ -10056,12 +10057,12 @@ def check_owner_keys():
             problems.append(title)
 
     OWNER, MOD, PLAIN = 777060001, 777060002, 777060011
-    # Последняя — с 18.10.2026: копия кнопки /adm. Тумблера «⬇️ ОБНОВЛЕНИЕ»
-    # рядом с ней больше нет — самообновление включено всегда.
+    # Последний ряд — с 18.10.2026: «🧹 Очистить ПАМЯТЬ» (слиты «Очистить
+    # РАЗГОВОРЫ» и «Очистить мой диалог») и перезапуск, копия кнопки /adm.
+    # Тумблера «⬇️ ОБНОВЛЕНИЕ» больше нет — самообновление включено всегда.
     WANT = ["🎛 Админ-панель", "💬 Статистика", "⚙️ PROMPTы", "📡 Настройки API",
             "🛠 DDoS-Guard", "👥 Пользователи", "📚 База знаний", "🎮 Викторина",
-            "📜 Логи бота", "🌐 Сайт", "🧹 Очистить РАЗГОВОРЫ", "🗑 Очистить мой диалог",
-            "🔄 ПЕРЕЗАПУСК"]
+            "📜 Логи бота", "🌐 Сайт", "🧹 Очистить ПАМЯТЬ", "🔄 ПЕРЕЗАПУСК"]
 
     class Bot:
         username = "c4max_test_bot"
@@ -10246,11 +10247,81 @@ def check_owner_keys():
                                   for row in site[-1][3].inline_keyboard for b in row)
                and not asked)
 
-        # «🗑 Очистить мой диалог» — настоящая очистка памяти владельца.
-        hist.add_messages(OWNER, OWNER, "вопрос до очистки", "ответ до очистки")
-        bot, gone, _ = press(OWNER, "🗑 Очистить мой диалог")
-        expect("«🗑 Очистить мой диалог» не очистил память бота о владельце",
-               not hist.get_history(OWNER) and not asked)
+        # «🧹 Очистить ПАМЯТЬ» (18.10.2026, решение Максима: слиты «🧹 Очистить
+        # РАЗГОВОРЫ» и «🗑 Очистить мой диалог») — без вопроса и разом: память
+        # групп (wipe_conversations, здесь записная книжка) и НАСТОЯЩАЯ личная
+        # переписка ВСЕХ людей. Статистику токенов не трогает.
+        hist.clear_all_histories()                     # с чистого листа — для счёта ниже
+        people = (OWNER, MOD, PLAIN)
+        for uid in people:
+            hist.add_messages(uid, uid, "вопрос до очистки", "ответ до очистки",
+                              total_tokens=10)
+        usage = {uid: hist.get_user_usage(uid) for uid in people}
+        bot, gone, _ = press(OWNER, "🧹 Очистить ПАМЯТЬ")
+        left = [uid for uid in people if hist.get_history(uid)]
+        expect(f"«🧹 Очистить ПАМЯТЬ» не стёрла личную переписку у всех — осталась у {left}",
+               not left and not asked)
+        expect(f"«🧹 Очистить ПАМЯТЬ» не забыла разговоры групп: {opened}", opened == ["wipe"])
+        expect("«🧹 Очистить ПАМЯТЬ» обнулила статистику токенов",
+               all(hist.get_user_usage(uid) == usage[uid] for uid in people))
+        said = [e[2] or "" for e in bot.events if e[0] == "send" and e[3] is None]
+        expect(f"«🧹 Очистить ПАМЯТЬ» не сказала, сколько стёрто (ждали 6 сообщ. у 3 чел.): {said}",
+               any("6 сообщ. у 3 чел." in t for t in said))
+
+        # Её копия в /adm — одним рядом с перезапуском, та же очистка через
+        # настоящий роутер. Модератору — отказ: кнопка стирает память у всех.
+        from handlers.admin import router as rt
+        adm_rows = [[b.callback_data for b in row]
+                    for row in pm.build_adm_keyboard(OWNER).inline_keyboard]
+        expect(f"в /adm «🧹 Очистить ПАМЯТЬ» не одним рядом с перезапуском: {adm_rows}",
+               ["adm:memory", "system_restart"] in adm_rows)
+        expect(f"в /adm вернулись прежние уборочные кнопки: {adm_rows}",
+               not any(d in ("adm:wipe", "clear_history_btn") for row in adm_rows for d in row))
+
+        def tap(uid, data):
+            answers = []
+
+            async def _ans(text=None, show_alert=False, **kw):
+                answers.append(text or "")
+            q = types.SimpleNamespace(from_user=types.SimpleNamespace(id=uid), data=data,
+                                      message=types.SimpleNamespace(chat_id=uid), answer=_ans)
+            opened.clear()
+            asyncio.run(rt.handle_callback_query(types.SimpleNamespace(callback_query=q),
+                                                 types.SimpleNamespace(bot=Bot(), user_data={})))
+            return answers
+
+        hist.add_messages(PLAIN, PLAIN, "вопрос до очистки", "ответ до очистки")
+        tap(MOD, "adm:memory")
+        expect("модератор стёр память бота кнопкой /adm «🧹 Очистить ПАМЯТЬ»",
+               bool(hist.get_history(PLAIN)) and not opened)
+        answers = tap(OWNER, "adm:memory")
+        expect(f"«🧹 Очистить ПАМЯТЬ» в /adm не стёрла память или не сказала сколько: {answers}",
+               not hist.get_history(PLAIN) and opened == ["wipe"]
+               and any("2 сообщ. у 1 чел." in t for t in answers))
+
+        # Та же кнопка на сайте (18.10.2026, решение Максима): «Обслуживание» →
+        # «Опасное», С ПОДТВЕРЖДЕНИЕМ «Да, выполнить / Отмена» — в отличие от
+        # бота. Действие — та же wipe_memory, своей копии шагов у сайта нет.
+        from web import actions as web_actions, pages as web_pages
+        plain_page = web_pages.page_system(None, "подпись")
+        expect("на сайте нет «🧹 Очистить ПАМЯТЬ» или осталась «Очистить РАЗГОВОРЫ»",
+               "🧹 Очистить ПАМЯТЬ" in plain_page and "Очистить РАЗГОВОРЫ" not in plain_page)
+        expect("сайт не спрашивает «Да, выполнить» перед очисткой памяти или спрашивает без нажатия",
+               "Да, выполнить" in web_pages.page_system(None, "подпись", confirm="wipe")
+               and "Да, выполнить" not in plain_page)
+        hist.add_messages(MOD, MOD, "вопрос до очистки", "ответ до очистки")
+        opened.clear()
+        said = web_actions.wipe_memory(OWNER)
+        expect(f"сайт не стёр память у всех или не сказал сколько: {said}",
+               not hist.get_history(MOD) and opened == ["wipe"] and "2 сообщ. у 1 чел." in said)
+        web_routes_src = open(os.path.join(ROOT, "web", "routes.py"), encoding="utf-8").read()
+        expect("кнопка сайта «wipe» ведёт не в очистку памяти",
+               'do == "wipe":\n            message = actions.wipe_memory(actor_id)' in web_routes_src)
+        # Спрашивает ли сайт — решает обработчик формы, а не страница: страница
+        # лишь умеет нарисовать вопрос, когда её об этом попросили.
+        asks = re.search(r'if do in \(([^)]*)\) and not confirmed', web_routes_src)
+        expect("сайт очищает память без вопроса «Да, выполнить / Отмена»",
+               bool(asks) and '"wipe"' in asks.group(1))
 
         # Тумблера самообновления нет НИГДЕ (18.10.2026, решение Максима:
         # обновления включены всегда). Внизу его нет по WANT; здесь — /adm и
@@ -10587,14 +10658,28 @@ def check_owner_keys():
             expect(f"«{text}» узнаётся как «{pk._code_of(text)}», а не «{code}»",
                    pk._code_of(text) == code)
 
-        # Вход в подменю: панель раздела, как раньше, и переключатели внизу.
+        # Вход в подменю: ОДНО сообщение — сама панель промптов, к ней прикреплены
+        # нижние кнопки подменю (18.10.2026, решение Максима): без «⬅️ Админ-панель»,
+        # без строки «где переключатели» и без отдельного «⚙️ PROMPTы — переключатели
+        # внизу». Здесь — настоящая send_prompts_panel, не записная книжка.
+        PANEL_HEAD = "⚙️ <b>НАСТРОЙКИ PROMPTов</b>"
+        pp.send_prompts_panel = saved_targets["prompts"]
+        hist.set_setting(SLOT, "444")                  # прежнее сообщение с панелью
+        asyncio.run(reg(Bot(start_id=1400), OWNER, 4545))   # открытый раздел — через гигиену
         bot, gone, _ = press(OWNER, "⚙️ PROMPTы")
+        sent = [e for e in bot.events if e[0] == "send"]
         rows, text, msg_id = last_keys(bot)
-        expect("нижняя «⚙️ PROMPTы» не открыла панель раздела", opened == ["prompts"])
-        expect(f"после «⚙️ PROMPTы» внизу не подменю раздела: {rows}",
-               rows == WANT_PROMPTS and text == pk.PROMPTS_CARRIER_TEXT and not asked)
+        expect(f"нижняя «⚙️ PROMPTы» прислала не одно сообщение: {[e[2][:30] for e in sent]}",
+               len(sent) == 1 and not asked)
+        expect(f"после «⚙️ PROMPTы» внизу не подменю раздела: {rows}", rows == WANT_PROMPTS)
+        expect("подменю PROMPTы держит не сама панель промптов, или в ней осталась строка "
+               "«в нижних кнопках»", text.startswith(PANEL_HEAD) and "SYSTEM PROMPT" in text
+               and "в нижних кнопках" not in text)
         expect("сообщение с подменю PROMPTы не запомнено — следующее не уберёт его",
                bool(msg_id) and hist.get_setting(SLOT, "") == str(msg_id))
+        expect("панель промптов не убрала прежнее сообщение с нижними кнопками — их стало бы два",
+               ("delete", OWNER, 444) in bot.events)
+        expect("панель промптов не убрала открытый раздел", ("delete", OWNER, 4545) in bot.events)
 
         # Переключатели: та же настройка, надпись следует, прежняя надпись работает.
         for label_on, key, off_val, label_off in (
@@ -10606,8 +10691,8 @@ def check_owner_keys():
             rows, text, _ = last_keys(bot)
             expect(f"нижняя «{label_on}» не переключила свою настройку или ушла модели",
                    hist.get_setting(key, "") == off_val and not asked and bool(gone))
-            expect(f"после «{label_on}» подменю не пришло заново с новой надписью: {rows}",
-                   bool(rows) and label_off in sum(rows, []) and text == pk.PROMPTS_CARRIER_TEXT)
+            expect(f"после «{label_on}» панель с подменю не пришла заново с новой надписью: {rows}",
+                   bool(rows) and label_off in sum(rows, []) and text.startswith(PANEL_HEAD))
             expect(f"после «{label_on}» нет короткого ответа, что произошло", bool(notices(bot)))
             bot, gone, _ = press(OWNER, label_on)        # прежняя надпись на экране
             expect(f"нажатие «{label_on}» с прежней надписью не вернуло настройку",
@@ -10660,11 +10745,15 @@ def check_owner_keys():
                    and hist.get_setting("proactive_min_msgs", "") == "1"
                    and hist.get_setting("proactive_context_msgs", "") == "30" and not asked)
 
-        # Экран итогов и файлы промптов.
+        # Экран итогов и файлы промптов. Панель промптов при этом остаётся: она
+        # держит нижние кнопки, и уборка панелей стереть её не должна.
+        carrier = int(hist.get_setting(SLOT, "0") or 0)
         bot, gone, _ = press(OWNER, "📊 Подробнее об участии")
         screens = [e for e in bot.events if e[0] == "send" and hasattr(e[3], "inline_keyboard")]
         expect("нижняя «📊 Подробнее об участии» не прислала экран итогов с возвратом к промптам",
                bool(screens) and "back_to_stats" in datas_of(screens[-1][3]) and not asked)
+        expect("экран итогов стёр панель промптов — пропали бы и нижние кнопки",
+               bool(carrier) and ("delete", OWNER, carrier) not in bot.events)
         sent_files = []
 
         async def _files(bot_, chat_id, user_id):
@@ -10680,22 +10769,48 @@ def check_owner_keys():
         expect("промптов нет, а нижняя «📄 Полные PROMPTы» молчит",
                notices(bot) == [pp.NO_PROMPT_FILES_TEXT])
 
-        # Под панелью — только возврат и строка, где переключатели.
+        # Разметка не принята (в промпте что-то, чего Telegram не разобрал) —
+        # панель всё равно уходит, без разметки, и нижние кнопки при ней.
+        class _HtmlFailBot(Bot):
+            async def send_message(self, chat_id=None, text=None, reply_markup=None, **kw):
+                if kw.get("parse_mode"):
+                    raise RuntimeError("Can't parse entities")
+                return await super().send_message(chat_id=chat_id, text=text,
+                                                  reply_markup=reply_markup, **kw)
+        bot = _HtmlFailBot(start_id=1600)
+        asyncio.run(pk.send_owner_keys(bot, OWNER, OWNER, menu="prompts"))
+        sent = keyboards(bot)
+        expect("разметка панели промптов не принята — и панель с нижними кнопками не ушла "
+               "без разметки", len(sent) == 1 and "<b>" not in sent[0][2]
+               and "НАСТРОЙКИ PROMPTов" in sent[0][2])
+
+        # Под панелью у владельца — НИЧЕГО (18.10.2026): ни ушедших вниз
+        # переключателей, ни «⬅️ Админ-панель», ни строки, где они.
         P_TOGGLES = {"toggle_admin_prompt", "toggle_ai_replies", "proactive:toggle",
                      "proactive:wipe", "proactive:hands", "proactive:mm_dec", "proactive:mm_inc",
                      "proactive:ctx_dec", "proactive:ctx_inc", "proactive:stats", "prompts_files"}
         ptext, pmarkup = pp._build_prompt_panel_text_and_keyboard(OWNER)
-        expect(f"у владельца под панелью промптов остались кнопки, ушедшие вниз: "
-               f"{sorted(P_TOGGLES & set(datas_of(pmarkup)))}",
-               datas_of(pmarkup) == ["adm_back"] and "в нижних кнопках" in ptext)
+        expect(f"у владельца под панелью промптов остались кнопки: {datas_of(pmarkup)}",
+               pmarkup is None and "в нижних кнопках" not in ptext)
         expect("полный вариант панели промптов (его меряет preflight) потерял кнопки",
                P_TOGGLES <= set(datas_of(full_kb)))
-        bot = Bot()
+        # Свой счёт номеров: press() ниже начинает с 700, и совпади номера —
+        # «прежнее» сообщение сочлось бы тем же самым и не удалилось.
+        bot = Bot(start_id=1500)
         asyncio.run(saved_targets["prompts"](bot, OWNER, OWNER))
         sent = [e for e in bot.events if e[0] == "send"]
-        expect("настоящая панель промптов у владельца пришла не короткой",
-               bool(sent) and datas_of(sent[-1][3]) == ["adm_back"]
-               and "в нижних кнопках" in sent[-1][2])
+        expect("настоящая панель промптов у владельца пришла не одним сообщением с нижними кнопками",
+               len(sent) == 1 and isinstance(sent[0][3], ReplyKeyboardMarkup)
+               and sent[0][2].startswith(PANEL_HEAD))
+        # «⬅️ Назад»: панель промптов уходит вместе со своими кнопками, внизу —
+        # снова разделы на сообщении с версией.
+        carrier = int(hist.get_setting(SLOT, "0") or 0)
+        bot, gone, _ = press(OWNER, "⬅️ Назад")
+        rows, text, _ = last_keys(bot)
+        expect(f"«⬅️ Назад» из подменю PROMPTы не вернул разделы на сообщении с версией: {rows}",
+               rows is not None and sum(rows, []) == WANT and text == pk.CARRIER_TEXT)
+        expect("«⬅️ Назад» не убрал панель промптов — она осталась бы без своих кнопок",
+               bool(carrier) and ("delete", OWNER, carrier) in bot.events)
         for title, uid in (("постороннего", PLAIN), ("модератора", MOD)):
             bot, gone, _ = press(uid, "🤚 РУКИ (мут): 🟢ВКЛ")
             expect(f"«🤚 РУКИ» от {title} перехвачены — а это обычный вопрос модели",
@@ -10749,7 +10864,8 @@ def check_owner_keys():
                       f"сообщение с версией, раздел убирает, а сам в уборку панелей не "
                       f"попадает; подменю «Настройки API» — "
                       f"те же переключатели и надписи, что под панелью, а под панелью их нет; "
-                      f"подменю «PROMPTы» — так же, с объявлением группам у «Сам в разговор»")
+                      f"подменю «PROMPTы» — так же, с объявлением группам у «Сам в разговор», "
+                      f"и держит его сама панель промптов одним сообщением")
 
 
 CHECKS = (

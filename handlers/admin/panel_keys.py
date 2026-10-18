@@ -2,8 +2,8 @@
 #  handlers/admin/panel_keys.py — ⌨️ нижние кнопки владельца (2026-10-17)
 # ─────────────────────────────────────────────
 #  Панель кнопок ПОД ПОЛЕМ ВВОДА в личке владельца (просьба Максима — «как в
-#  другом боте»). Кнопки ведут в те же разделы, что /adm, плюс две очистки
-#  и перезапуск оттуда же (перезапуск — с 18.10.2026).
+#  другом боте»). Кнопки ведут в те же разделы, что /adm, плюс очистка
+#  памяти и перезапуск оттуда же (перезапуск и единая очистка — с 18.10.2026).
 #  Модераторам, другим людям и в группах панели нет.
 #
 #  Как устроено:
@@ -56,7 +56,8 @@ from telegram.constants import ParseMode
 
 from config import BOT_VERSION_HTML
 from database.history import get_setting, set_setting
-from utils import delete_user_message_safe, register_and_clean_bot_message, schedule_delete
+from utils import (clean_bot_messages, delete_user_message_safe,
+                   register_and_clean_bot_message, schedule_delete)
 
 logger = logging.getLogger(__name__)
 
@@ -84,8 +85,11 @@ KEYS = (
     ("🎮 Викторина", "quiz"),
     ("📜 Логи бота", "logs"),
     ("🌐 Сайт", "site"),
-    ("🧹 Очистить РАЗГОВОРЫ", "wipe"),
-    ("🗑 Очистить мой диалог", "clear"),
+    # Одна очистка вместо двух (18.10.2026, решение Максима): до этого дня
+    # здесь стояли «🧹 Очистить РАЗГОВОРЫ» и «🗑 Очистить мой диалог». Теперь
+    # память групп и личная переписка ВСЕХ людей стираются разом, без
+    # вопроса (panel_prompts.wipe_memory). Стоит в одном ряду с перезапуском.
+    ("🧹 Очистить ПАМЯТЬ", "wipe"),
     # Перезапуск (18.10.2026, просьба Максима) — КОПИЯ кнопки /adm, там она
     # остаётся: выключишь нижнюю панель — без неё бот не останется. Сначала
     # спрашивает: нижняя панель всегда под пальцем, а в /adm та же кнопка
@@ -111,12 +115,18 @@ API_ROWS = (
 API_CARRIER_TEXT = "📡 Настройки API — переключатели внизу. «⬅️ Назад» — к разделам."
 API_KEYS = tuple(key for row in API_ROWS for key in row)
 
-# Подменю «⚙️ PROMPTы» (2026-10-18, решение Максима) — так же, как у API:
-# панель с текстом промптов приходит как раньше, а её переключатели и
-# регуляторы — внизу (panel_prompts.flip_prompts_toggle / step_proactive; под
-# панелью их тогда нет — panel_prompts.prompts_toggles_below). «Сам в
-# разговор» и «Руки» — одним рядом, «Руки» с короткой надписью «(мут)» —
-# так решил Максим. «🧹 Очистить РАЗГОВОРЫ» здесь нет: она в главной панели.
+# Подменю «⚙️ PROMPTы» (2026-10-18, решение Максима): переключатели и
+# регуляторы промптов — внизу (panel_prompts.flip_prompts_toggle /
+# step_proactive; под панелью их тогда нет — panel_prompts.prompts_toggles_below).
+# ⚠️ В ОТЛИЧИЕ ОТ API, ПОДМЕНЮ ДЕРЖИТ САМА ПАНЕЛЬ ПРОМПТОВ (18.10.2026, решение
+# Максима: одно сообщение вместо двух) — своего короткого текста у него нет,
+# текст собирает panel_prompts.prompts_panel_text. У панели API так нельзя:
+# под ней кнопки моделей, а у сообщения один набор кнопок. Отсюда цена:
+# каждое нажатие переключателя присылает заново ВСЮ панель — надписи нижних
+# кнопок у отправленного сообщения Telegram поменять не даёт.
+# «Сам в разговор» и «Руки» — одним рядом, «Руки» с короткой надписью «(мут)» —
+# так решил Максим. Очистки разговоров здесь нет: она в главной панели, с
+# 18.10.2026 — частью «🧹 Очистить ПАМЯТЬ».
 PROMPTS_ROWS = (
     (("⚙️ PROMPT", "p_prompt"), ("💬 ОТВЕТЫ ИИ", "p_ai_replies")),
     (("🗣 САМ В РАЗГОВОР", "p_proactive"), ("🤚 РУКИ (мут)", "p_hands")),
@@ -125,11 +135,11 @@ PROMPTS_ROWS = (
     (("📊 Подробнее об участии", "p_stats"), ("📄 Полные PROMPTы", "p_files")),
     (("⬅️ Назад", "back"),),
 )
-PROMPTS_CARRIER_TEXT = "⚙️ PROMPTы — переключатели внизу. «⬅️ Назад» — к разделам."
 PROMPTS_KEYS = tuple(key for row in PROMPTS_ROWS for key in row)
 
-# Подменю: раскладка и текст сообщения, с которым оно стоит.
-_MENUS = {"api": (API_ROWS, API_CARRIER_TEXT), "prompts": (PROMPTS_ROWS, PROMPTS_CARRIER_TEXT)}
+# Подменю: раскладка и текст сообщения, с которым оно стоит. None — текстом
+# служит сама панель раздела (send_owner_keys собирает её в момент отправки).
+_MENUS = {"api": (API_ROWS, API_CARRIER_TEXT), "prompts": (PROMPTS_ROWS, None)}
 
 _ALL_KEYS = KEYS + API_KEYS + PROMPTS_KEYS
 _BY_LABEL = {label: code for label, code in _ALL_KEYS}
@@ -228,17 +238,19 @@ async def _delete(bot, chat_id: int, message_id: int) -> bool:
         return False
 
 
-async def _post(bot, chat_id: int, text: str, markup) -> None:
+async def _post(bot, chat_id: int, text: str, markup, html: bool = True) -> None:
     """
     Прислать сообщение, с которым стоит панель, запомнить его и убрать
     предыдущее — уже ПОСЛЕ нового: панель живёт по последнему сообщению.
     Без звука — служебное сообщение будить телефон не должно. Разметка — HTML
     (версия синей ссылкой), превью ссылки погашено — иначе под сообщением
-    развернётся карточка GitHub. Тексты сообщений — только свои, постоянные.
+    развернётся карточка GitHub. Тексты — свои постоянные и панель промптов
+    (её превью экранированы при сборке); html=False — запасной путь без
+    разметки, как у _send_panel_message.
     """
     previous = _stored_msg(chat_id)
     msg = await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup,
-                                 parse_mode=ParseMode.HTML,
+                                 parse_mode=ParseMode.HTML if html else None,
                                  link_preview_options=LinkPreviewOptions(is_disabled=True),
                                  disable_notification=True)
     set_setting(f"{MSG_KEY_PREFIX}{chat_id}", str(msg.message_id))
@@ -253,13 +265,33 @@ async def send_owner_keys(bot, chat_id: int, user_id: int | None = None,
     подменю раздела (api — «📡 Настройки API», prompts — «⚙️ PROMPTы»). Не
     владелец или не личка — ничего не делает. Тихая: панель — удобство, из-за
     неё не должны падать ни /start, ни запуск бота.
+
+    prompts — это САМА ПАНЕЛЬ ПРОМПТОВ с нижними кнопками (18.10.2026): она
+    заменяет открытый раздел так же, как заменяла его прежде через гигиену
+    панелей, — только сама в гигиену не попадает (см. шапку файла).
     """
     uid = chat_id if user_id is None else user_id
     if not _is_owner_private(chat_id, uid):
         return
+    keyboard = owner_keyboard(menu, uid)
+    if menu == "prompts":
+        from .panel_prompts import prompts_panel_text
+        text = prompts_panel_text(uid, getattr(bot, "username", None))
+        try:
+            await _post(bot, chat_id, text, keyboard)
+        except Exception as e:
+            logger.warning("⚠️ Панель промптов с разметкой не ушла: %s — отправляю без разметки", e)
+            try:
+                await _post(bot, chat_id, re.sub(r"<[^>]+>", "", text)[:4000], keyboard, html=False)
+            except Exception as e2:
+                logger.warning("⚠️ Не удалось поставить панель промптов владельцу %s: %s",
+                               chat_id, e2)
+                return
+        await clean_bot_messages(bot, chat_id)
+        return
     text = _MENUS[menu][1] if menu in _MENUS else CARRIER_TEXT
     try:
-        await _post(bot, chat_id, text, owner_keyboard(menu, uid))
+        await _post(bot, chat_id, text, keyboard)
     except Exception as e:
         logger.warning("⚠️ Не удалось поставить нижние кнопки владельцу %s: %s", chat_id, e)
 
@@ -285,10 +317,11 @@ async def _run(code: str, context, chat_id: int, user_id: int) -> None:
         from .panel_main import send_stats_panel
         await send_stats_panel(bot, chat_id, user_id)
     elif code == "prompts":
-        # Панель раздела — как раньше, а внизу — его переключатели.
+        # Панель раздела — сама с нижними кнопками подменю (send_prompts_panel
+        # у владельца зовёт send_owner_keys(menu="prompts")). Второй раз
+        # send_owner_keys здесь НЕ звать — панель пришла бы дважды.
         from .panel_prompts import send_prompts_panel
         await send_prompts_panel(bot, chat_id, user_id)
-        await send_owner_keys(bot, chat_id, user_id, menu="prompts")
     elif code in ("p_prompt", "p_ai_replies", "p_proactive", "p_hands"):
         from .panel_prompts import flip_prompts_toggle
         said, _ = await flip_prompts_toggle(code[2:], user_id, bot)
@@ -308,8 +341,9 @@ async def _run(code: str, context, chat_id: int, user_id: int) -> None:
         await _notice(bot, chat_id, proactive_step_info(code[2:-5]), _INFO_TTL_SEC)
     elif code == "p_stats":
         # Тот же экран итогов, что у кнопки под панелью; там он заменяет
-        # панель на месте, отсюда — новым сообщением (панель промптов уберёт
-        # гигиена панелей). «⬅️ К промптам» на нём ведёт обратно.
+        # панель на месте, отсюда — новым сообщением. Панель промптов при этом
+        # остаётся: она держит нижние кнопки и в гигиену панелей не входит.
+        # «⬅️ К промптам» на экране итогов присылает её заново.
         from .common import _send_panel_message
         from .panel_prompts import _build_proactive_stats_panel
         text, markup = _build_proactive_stats_panel()
@@ -371,16 +405,8 @@ async def _run(code: str, context, chat_id: int, user_id: int) -> None:
         if sent:
             await register_and_clean_bot_message(bot, chat_id, sent.message_id)
     elif code == "wipe":
-        from .panel_prompts import wipe_conversations
-        wipe_conversations(user_id)
-        await _notice(bot, chat_id, "🧹 Готово: бот забыл разговоры во всех группах.")
-    elif code == "clear":
-        from database.history import clear_history
-        clear_history(user_id)
-        # Та же строка лога, что у кнопки «🗑 Очистить мой диалог» в /adm:
-        # по ней Максиму считают, как часто он чистит диалог.
-        logger.info("🔧 История диалога очищена кнопкой (пользователь %s)", user_id)
-        await _notice(bot, chat_id, "✅ История диалога очищена!")
+        from .panel_prompts import wipe_memory
+        await _notice(bot, chat_id, wipe_memory(user_id))
     elif code == "restart":
         # Сначала вопрос. «✅ Да» — та же ветка system_restart, что у кнопки
         # /adm (router.py): заберёт свежий код и перезапустит бота.
