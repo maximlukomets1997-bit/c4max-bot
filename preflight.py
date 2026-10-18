@@ -510,7 +510,9 @@ def check_panels():
         "клавиатура API": lambda: ("", _build_api_keyboard(owner, full=True)),
         "счета и квоты": _build_balance_panel,
         "правка «потрачено»": _build_cost_panel,
-        "промпты": lambda: _build_prompt_panel_text_and_keyboard(owner, "c4max_bot"),
+        # full=True: у владельца переключатели промптов внизу (18.10.2026),
+        # а мерить надо самый полный вариант.
+        "промпты": lambda: _build_prompt_panel_text_and_keyboard(owner, "c4max_bot", full=True),
         "итоги участия": _build_proactive_stats_panel,
         "модерация": lambda: _build_mod_panel_text_and_keyboard(owner),
         "список пользователей": lambda: _build_users_panel(owner, 999),

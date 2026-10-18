@@ -286,6 +286,139 @@ def _chat_title(chat_id: int) -> str:
     return str(chat_id)
 
 
+# ─────────────────────────────────────────────
+#  Переключатели и регуляторы панели — ОБЩИЕ шаги (2026-10-18)
+#
+#  Кнопки под панелью (router.py и _handle_proactive_callback ниже) и нижнее
+#  подменю владельца «⚙️ PROMPTы» (panel_keys.py) переключают одними шагами:
+#  настройка, строка лога, журнал, объявление группам и ответ — одни. Надпись
+#  кнопки — тоже одна. Второго набора правил «как переключать» быть не должно.
+# ─────────────────────────────────────────────
+
+# Регуляторы участия: код → ключ настройки, запасное значение, значок. Шаг и
+# пределы — services/settings_spec.py (тот же регулятор на сайте).
+_PROACTIVE_STEPS = {
+    "mm": ("proactive_min_msgs", PROACTIVE_MIN_MSGS, "💬"),
+    "ctx": ("proactive_context_msgs", PROACTIVE_CONTEXT_MSGS, "📜"),
+}
+
+NO_PROMPT_FILES_TEXT = "⚠️ Ни один промпт не задан — отправлять нечего."
+
+
+def prompts_toggle_text(code: str, user_id: int) -> str:
+    """
+    Надпись переключателя или числа регулятора — одна под панелью и внизу.
+    code: prompt | ai_replies | proactive | hands | mm | ctx.
+    """
+    if code == "prompt":
+        # ВНИМАНИЕ: настройка хранится НАОБОРОТ — "1" в admin_no_prompt_<id>
+        # значит «промпт ВЫКЛЮЧЕН», поэтому в _onoff уходит перевёрнутое значение.
+        return f"⚙️ PROMPT: {_onoff(get_setting(f'admin_no_prompt_{user_id}', '0') != '1')}"
+    if code == "ai_replies":
+        # Глобальная настройка, по умолчанию ВКЛ.
+        return f"💬 ОТВЕТЫ ИИ: {_onoff(get_setting('ai_replies_enabled', '1') != '0')}"
+    if code == "proactive":
+        on = get_setting("proactive_enabled", PROACTIVE_ENABLED_DEFAULT) == "1"
+        return f"🗣 САМ В РАЗГОВОР: {_onoff(on)}"
+    if code == "hands":
+        # «(мут)» без потолка в минутах (18.10.2026, решение Максима): внизу
+        # кнопка стоит в половину ширины рядом с «Сам в разговор». Потолок
+        # называет ответ при включении.
+        on = get_setting("proactive_hands", PROACTIVE_HANDS_DEFAULT) == "1"
+        return f"🤚 РУКИ (мут): {_onoff(on)}"
+    if code in _PROACTIVE_STEPS:
+        key, default, icon = _PROACTIVE_STEPS[code]
+        return f"{icon} {_int_setting(key, default)} сообщ."
+    raise ValueError(f"нет такой кнопки панели промптов: {code}")
+
+
+async def flip_prompts_toggle(code: str, user_id: int, bot) -> tuple:
+    """
+    Переключить (code: prompt | ai_replies | proactive | hands). Возвращает
+    (что сказать, показать ли окном): под панелью — всплывающий ответ,
+    внизу — короткое сообщение тем же текстом.
+    """
+    if code == "prompt":
+        key = f"admin_no_prompt_{user_id}"
+        new_val = "0" if get_setting(key, "0") == "1" else "1"
+        set_setting(key, new_val)
+        status_text = ("выключен (ИИ общается без промпта)" if new_val == "1"
+                       else "включен (личность C4_Max активна)")
+        logger.info("🔧 Админ: персональный промпт %s", "выключен" if new_val == "1" else "включён")
+        return f"Персональный промпт {status_text}!", True
+    if code == "ai_replies":
+        new_val = "0" if get_setting("ai_replies_enabled", "1") == "1" else "1"
+        set_setting("ai_replies_enabled", new_val)
+        status_text = "выключены (бот молчит в личке админа)" if new_val == "0" else "включены"
+        logger.info("🔧 Админ: ответы ИИ %s", "выключены" if new_val == "0" else "включены")
+        return f"Ответы ИИ {status_text}!", True
+    if code == "hands":
+        new_val = "0" if get_setting("proactive_hands", PROACTIVE_HANDS_DEFAULT) == "1" else "1"
+        set_setting("proactive_hands", new_val)
+        state = "включены" if new_val == "1" else "выключены"
+        # «Руки бота», а не «руки „Сам в разговор“»: с 12.10.2026 тот же
+        # тумблер решает и про мут за слова в адрес самого бота.
+        logger.info("🔧 Панель промптов: руки бота (мут) %s", state)
+        _audit(user_id, "proactive_hands", 0, state)
+        return (f"Руки {state}." + (" Бот сможет сам выдавать мут до "
+                                    f"{PROACTIVE_MUTE_MAX_SEC // 60} мин." if new_val == "1" else ""),
+                new_val == "1")
+    if code == "proactive":
+        new_val = "0" if get_setting("proactive_enabled", PROACTIVE_ENABLED_DEFAULT) == "1" else "1"
+        set_setting("proactive_enabled", new_val)
+        state = "включён" if new_val == "1" else "выключен"
+        logger.info("🔧 Панель промптов: режим «Сам в разговор» %s", state)
+        # Объявление в группы (2026-07-24, просьба Максима): выключил — бот
+        # сообщает группам о «бане», включил — сообщение молча удаляется.
+        # Рассылка не должна ломать саму кнопку: ошибки уже проглочены внутри,
+        # но страхуемся и здесь — тумблер обязан переключиться в любом случае.
+        try:
+            if new_val == "0":
+                await _announce_proactive_off(bot)
+            else:
+                await _remove_proactive_off_announce(bot)
+        except Exception as e:
+            logger.warning("⚠️ Объявление о смене режима «Сам в разговор» не отработало: %s", e)
+        return f"Сам в разговор {state}", False
+    raise ValueError(f"нет такого переключателя панели промптов: {code}")
+
+
+def step_proactive(code: str, steps: int) -> str | None:
+    """
+    Шаг регулятора участия (code: mm — порог, ctx — стенограмма). Возвращает,
+    что сказать; None — упёрлись в предел и ничего не поменялось.
+    """
+    key, default, icon = _PROACTIVE_STEPS[code]
+    before = _int_setting(key, default)
+    after = _adjust_proactive_setting(key, steps)
+    if after == before:
+        return None
+    if code == "mm":
+        logger.info("🔧 Панель промптов: порог «Сам в разговор» = %d сообщ.", after)
+    else:
+        logger.info("🔧 Панель промптов: стенограмма «Сам в разговор» = %d сообщ.", after)
+    from services.settings_spec import SPEC
+    return f"{icon} {SPEC[key]['title']}: {after} сообщ."
+
+
+def proactive_step_info(code: str) -> str:
+    """Что за число на средней кнопке регулятора — теми же словами, что на сайте."""
+    from services.settings_spec import SPEC
+    key, _, icon = _PROACTIVE_STEPS[code]
+    return f"{icon} {SPEC[key]['title']}: {SPEC[key]['hint']}."
+
+
+def prompts_toggles_below(user_id: int) -> bool:
+    """
+    Переключатели панели стоят в нижнем подменю владельца (2026-10-18)? Тогда
+    под панелью их нет. Нижние кнопки у владельца есть всегда (выключателя
+    нет с 18.10.2026), а панель промптов — владельческая; полный вариант под
+    панелью — только для preflight (full=True).
+    """
+    from services.roles import is_owner
+    return is_owner(user_id)
+
+
 async def _handle_proactive_callback(query, user_id, data):
     """
     Ветки proactive:<действие> — тумблер и регуляторы режима «Сам в разговор»
@@ -318,45 +451,14 @@ async def _handle_proactive_callback(query, user_id, data):
             logger.warning("⚠️ Не удалось показать итоги участия: %s", e)
         return
 
-    if action == "hands":
-        new_val = "0" if get_setting("proactive_hands", PROACTIVE_HANDS_DEFAULT) == "1" else "1"
-        set_setting("proactive_hands", new_val)
-        state = "включены" if new_val == "1" else "выключены"
-        # «Руки бота», а не «руки „Сам в разговор“»: с 12.10.2026 тот же
-        # тумблер решает и про мут за слова в адрес самого бота.
-        logger.info("🔧 Панель промптов: руки бота (мут) %s", state)
-        _audit(user_id, "proactive_hands", 0, state)
-        await query.answer(
-            f"Руки {state}." + (" Бот сможет сам выдавать мут до "
-                                f"{PROACTIVE_MUTE_MAX_SEC // 60} мин." if new_val == "1" else ""),
-            show_alert=(new_val == "1"),
-        )
-    elif action == "toggle":
-        new_val = "0" if get_setting("proactive_enabled", PROACTIVE_ENABLED_DEFAULT) == "1" else "1"
-        set_setting("proactive_enabled", new_val)
-        state = "включён" if new_val == "1" else "выключен"
-        logger.info("🔧 Панель промптов: режим «Сам в разговор» %s", state)
-        # Объявление в группы (2026-07-24, просьба Максима): выключил — бот
-        # сообщает группам о «бане», включил — сообщение молча удаляется.
-        # Рассылка не должна ломать саму кнопку: ошибки уже проглочены внутри,
-        # но страхуемся и здесь — тумблер обязан переключиться в любом случае.
-        try:
-            if new_val == "0":
-                await _announce_proactive_off(query.get_bot())
-            else:
-                await _remove_proactive_off_announce(query.get_bot())
-        except Exception as e:
-            logger.warning("⚠️ Объявление о смене режима «Сам в разговор» не отработало: %s", e)
-        await query.answer(f"Сам в разговор {state}", show_alert=False)
-    elif action in ("mm_inc", "mm_dec"):
-        new_mm = _adjust_proactive_setting("proactive_min_msgs",
-                                           1 if action.endswith("inc") else -1)
-        logger.info("🔧 Панель промптов: порог «Сам в разговор» = %d сообщ.", new_mm)
-        await query.answer()
-    elif action in ("ctx_inc", "ctx_dec"):
-        new_ctx = _adjust_proactive_setting("proactive_context_msgs",
-                                            1 if action.endswith("inc") else -1)
-        logger.info("🔧 Панель промптов: стенограмма «Сам в разговор» = %d сообщ.", new_ctx)
+    # Переключатели и регуляторы — общие шаги с нижним подменю владельца
+    # (flip_prompts_toggle / step_proactive выше).
+    if action in ("hands", "toggle"):
+        said, alert = await flip_prompts_toggle("hands" if action == "hands" else "proactive",
+                                                user_id, query.get_bot())
+        await query.answer(said, show_alert=alert)
+    elif action in ("mm_inc", "mm_dec", "ctx_inc", "ctx_dec"):
+        step_proactive(action[:-4], 1 if action.endswith("inc") else -1)
         await query.answer()
     elif action == "wipe_no":
         # Отмена подтверждения — общая перерисовка ниже вернёт обычные кнопки.
@@ -507,7 +609,7 @@ def _fit_panel_text(text: str, limit: int = _PANEL_TEXT_MAX) -> str:
     return text
 
 
-def _build_prompt_panel_text_and_keyboard(user_id, bot_username=None):
+def _build_prompt_panel_text_and_keyboard(user_id, bot_username=None, full: bool = False):
     additions = get_setting("prompt_additions")
     prompt_text, _, _ = get_active_system_prompt()
 
@@ -549,12 +651,6 @@ def _build_prompt_panel_text_and_keyboard(user_id, bot_username=None):
             "➕ <b>ДОПОЛНЕНИЯ:</b>\n"
             f"{_expandable_preview(additions)}"
         )
-
-    # Метка кнопки переключения промпта (сам статус в тексте больше не выводится).
-    # ВНИМАНИЕ: настройка хранится НАОБОРОТ — "1" в admin_no_prompt_<id> значит
-    # «промпт ВЫКЛЮЧЕН», поэтому в _onoff уходит перевёрнутое значение.
-    no_prompt_val = get_setting(f"admin_no_prompt_{user_id}", "0")
-    btn_prompt_label = f"⚙️ PROMPT: {_onoff(no_prompt_val != '1')}"
 
     # Команды — обычным текстом (НЕ <code>): Telegram сам подсвечивает их синим
     # и делает кликабельными, как /unsubscribe в сообщении о подписке.
@@ -744,45 +840,46 @@ def _build_prompt_panel_text_and_keyboard(user_id, bot_username=None):
     # текст панели и так занимает больше трёх тысяч символов из 4096.
     full_text += _proactive_stats_lines()
 
-    # Метка кнопки тумблера ответов ИИ (глобальная настройка, по умолчанию ВКЛ)
-    ai_replies_val = get_setting("ai_replies_enabled", "1")
-    btn_ai_label = f"💬 ОТВЕТЫ ИИ: {_onoff(ai_replies_val != '0')}"
-
-    # Кнопки режима «Сам в разговор»: живые цифры (порог/контекст) и статус
-    # НАМЕРЕННО только на кнопках, а не в тексте панели — регуляторы обновляют
-    # панель дешёвым edit_message_reply_markup, не трогая текст (нет риска
-    # упереться в лимит 4096 символов).
-    proactive_on = get_setting("proactive_enabled", PROACTIVE_ENABLED_DEFAULT) == "1"
-    btn_proactive_label = f"🗣 САМ В РАЗГОВОР: {_onoff(proactive_on)}"
-    proactive_mm = _int_setting("proactive_min_msgs", PROACTIVE_MIN_MSGS)
-    # proactive_ctx уже посчитан выше — для строки стенограммы в сводке
-    # «Руки» — отдельным рядом, а не рядом с тумблером режима: это единственная
-    # кнопка панели, которая даёт боту право наказывать живых людей.
-    hands_on = get_setting("proactive_hands", PROACTIVE_HANDS_DEFAULT) == "1"
-    btn_hands_label = f"🤚 РУКИ (мут до {PROACTIVE_MUTE_MAX_SEC // 60} мин): {_onoff(hands_on)}"
-
     # ── КНОПКИ УПРАВЛЕНИЯ ────────────────────────────────────────────────
+    # ⚠️ У владельца их под панелью НЕТ (2026-10-18, решение Максима): все
+    # стоят в нижнем подменю «⚙️ PROMPTы» (panel_keys.py), под панелью —
+    # только возврат, а в тексте строка, где они. full=True — полный вариант:
+    # его меряет preflight. Надписи — prompts_toggle_text, одни с нижними.
+    if not full and prompts_toggles_below(user_id):
+        full_text += "\n\n⌨️ <i>Переключатели и регуляторы — в нижних кнопках.</i>"
+        return _fit_panel_text(full_text), InlineKeyboardMarkup([_adm_back_row()])
+
+    # Живые цифры (порог/контекст) и статус НАМЕРЕННО только на кнопках, а не
+    # в тексте панели — регуляторы обновляют панель дешёвым
+    # edit_message_reply_markup, не трогая текст (нет риска упереться в 4096).
     # Тумблеры промпта/ответов в один ряд, ниже — блок «Сам в разговор»
     # (тумблер и очистка стенограммы, отдельный ряд «руки», два ряда
     # регуляторов ➖/➕ — порог и контекст), в конце — возврат в /adm.
     keyboard = [
         [
-            InlineKeyboardButton(btn_prompt_label, callback_data="toggle_admin_prompt"),
-            InlineKeyboardButton(btn_ai_label, callback_data="toggle_ai_replies"),
+            InlineKeyboardButton(prompts_toggle_text("prompt", user_id),
+                                 callback_data="toggle_admin_prompt"),
+            InlineKeyboardButton(prompts_toggle_text("ai_replies", user_id),
+                                 callback_data="toggle_ai_replies"),
         ],
         [
-            InlineKeyboardButton(btn_proactive_label, callback_data="proactive:toggle"),
+            InlineKeyboardButton(prompts_toggle_text("proactive", user_id),
+                                 callback_data="proactive:toggle"),
             InlineKeyboardButton("🧹Очистить РАЗГОВОРЫ", callback_data="proactive:wipe"),
         ],
-        [InlineKeyboardButton(btn_hands_label, callback_data="proactive:hands")],
+        # «Руки» — отдельным рядом, а не рядом с тумблером режима: это
+        # единственная кнопка панели, которая даёт боту право наказывать
+        # живых людей. (Внизу, по решению Максима 18.10.2026, — рядом.)
+        [InlineKeyboardButton(prompts_toggle_text("hands", user_id),
+                              callback_data="proactive:hands")],
         [
             InlineKeyboardButton("➖ порог", callback_data="proactive:mm_dec"),
-            InlineKeyboardButton(f"💬 {proactive_mm} сообщ.", callback_data="proactive:noop"),
+            InlineKeyboardButton(prompts_toggle_text("mm", user_id), callback_data="proactive:noop"),
             InlineKeyboardButton("➕ порог", callback_data="proactive:mm_inc"),
         ],
         [
             InlineKeyboardButton("➖ контекст", callback_data="proactive:ctx_dec"),
-            InlineKeyboardButton(f"📜 {proactive_ctx} сообщ.", callback_data="proactive:noop"),
+            InlineKeyboardButton(prompts_toggle_text("ctx", user_id), callback_data="proactive:noop"),
             InlineKeyboardButton("➕ контекст", callback_data="proactive:ctx_inc"),
         ],
         # Подробности участия — своим рядом сразу под регуляторами, которые

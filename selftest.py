@@ -10113,9 +10113,15 @@ def check_owner_keys():
     # её больше не читает, и «0» в ней ничего не должно выключать.
     OLD_KEY = "owner_keys_enabled"
     import utils_format as uf
+    from config import PROACTIVE_OFF_ANNOUNCE, PROACTIVE_OFF_MSGS_KEY, PROACTIVE_MUTE_MAX_SEC
+    PROMPT_KEYS = (f"admin_no_prompt_{OWNER}", "ai_replies_enabled", "proactive_enabled",
+                   "proactive_hands", "proactive_min_msgs", "proactive_context_msgs",
+                   PROACTIVE_OFF_MSGS_KEY)
     saved_settings = {k: hist.get_setting(k, "") for k in
                       (OLD_KEY, la.SETTING_KEY, SLOT,
-                       uf.THOUGHTS_SETTING_KEY, la.THOUGHTS_SETTING_KEY, mb.SETTING_KEY)}
+                       uf.THOUGHTS_SETTING_KEY, la.THOUGHTS_SETTING_KEY, mb.SETTING_KEY)
+                      + PROMPT_KEYS}
+    saved_pp = (pp.get_known_chats, pp.send_prompt_files)
     targets = {
         "adm": (pm, "send_adm_panel"), "stats": (pm, "send_stats_panel"),
         "prompts": (pp, "send_prompts_panel"), "api": (pm, "send_api_panel"),
@@ -10507,7 +10513,191 @@ def check_owner_keys():
             branch = branch[:branch.find("\n    if data", 10)]
             expect(f"ветка «{name}» переключает не общим шагом с нижним подменю",
                    step in branch)
+
+        # ═══ 9. Подменю «⚙️ PROMPTы» (18.10.2026) ═══
+        # Нижняя «⚙️ PROMPTы» присылает панель и ставит внизу её переключатели
+        # и регуляторы; каждый — тот же шаг, что кнопка под панелью (с
+        # объявлением группам у «Сам в разговор»); под панелью их нет.
+        GROUP = -100777061
+        pp.get_known_chats = lambda: [{"chat_id": GROUP}]
+        for k, v in ((f"admin_no_prompt_{OWNER}", "0"), ("ai_replies_enabled", "1"),
+                     ("proactive_enabled", "1"), ("proactive_hands", "1"),
+                     ("proactive_min_msgs", "1"), ("proactive_context_msgs", "30")):
+            hist.set_setting(k, v)
+        hist.set_setting(PROACTIVE_OFF_MSGS_KEY, "")
+        WANT_PROMPTS = [["⚙️ PROMPT: 🟢ВКЛ", "💬 ОТВЕТЫ ИИ: 🟢ВКЛ"],
+                        ["🗣 САМ В РАЗГОВОР: 🟢ВКЛ", "🤚 РУКИ (мут): 🟢ВКЛ"],
+                        ["➖ порог", "💬 1 сообщ.", "➕ порог"],
+                        ["➖ контекст", "📜 30 сообщ.", "➕ контекст"],
+                        ["📊 Подробнее об участии", "📄 Полные PROMPTы"], ["⬅️ Назад"]]
+        pkb = pk.owner_keyboard("prompts", OWNER)
+        expect(f"подменю «PROMPTы»: надписи или ряды не те: {rows_of(pkb)}",
+               rows_of(pkb) == WANT_PROMPTS)
+        expect("подменю «PROMPTы» не компактное или сворачивается само",
+               pkb.resize_keyboard is True and pkb.is_persistent is True)
+        seen = {}
+        clash = [label for label, code in pk.KEYS + pk.API_KEYS + pk.PROMPTS_KEYS
+                 if seen.setdefault(label, code) != code]
+        expect(f"одна надпись у двух разных нижних кнопок — одна никогда не сработает: {clash}",
+               not clash)
+        # Надписи внизу — те же, что у кнопок под панелью (полный вариант).
+        full_kb = pp._build_prompt_panel_text_and_keyboard(OWNER, full=True)[1]
+        inline_texts = [b.text for row in full_kb.inline_keyboard for b in row]
+        for label in ("⚙️ PROMPT: 🟢ВКЛ", "💬 ОТВЕТЫ ИИ: 🟢ВКЛ", "🗣 САМ В РАЗГОВОР: 🟢ВКЛ",
+                      "🤚 РУКИ (мут): 🟢ВКЛ", "💬 1 сообщ.", "📜 30 сообщ."):
+            expect(f"надпись «{label}» внизу есть, а под панелью — другая", label in inline_texts)
+        for row in WANT_PROMPTS:
+            for label in row:
+                expect(f"нижняя «{label}» не узнаётся — нажатие ушло бы модели",
+                       pk._code_of(label) is not None)
+        for text, code in (("💬 ОТВЕТЫ ИИ: 🔴ВЫКЛ", "p_ai_replies"), ("💬 7 сообщ.", "p_mm_info"),
+                           ("📜 45 сообщ.", "p_ctx_info"), ("💬 Статистика", "stats"),
+                           ("⚙️ PROMPTы", "prompts"), ("⚙️ PROMPT: 🔴ВЫКЛ", "p_prompt")):
+            expect(f"«{text}» узнаётся как «{pk._code_of(text)}», а не «{code}»",
+                   pk._code_of(text) == code)
+
+        # Вход в подменю: панель раздела, как раньше, и переключатели внизу.
+        bot, gone, _ = press(OWNER, "⚙️ PROMPTы")
+        rows, text, msg_id = last_keys(bot)
+        expect("нижняя «⚙️ PROMPTы» не открыла панель раздела", opened == ["prompts"])
+        expect(f"после «⚙️ PROMPTы» внизу не подменю раздела: {rows}",
+               rows == WANT_PROMPTS and text == pk.PROMPTS_CARRIER_TEXT and not asked)
+        expect("сообщение с подменю PROMPTы не запомнено — следующее не уберёт его",
+               bool(msg_id) and hist.get_setting(SLOT, "") == str(msg_id))
+
+        # Переключатели: та же настройка, надпись следует, прежняя надпись работает.
+        for label_on, key, off_val, label_off in (
+                ("⚙️ PROMPT: 🟢ВКЛ", f"admin_no_prompt_{OWNER}", "1", "⚙️ PROMPT: 🔴ВЫКЛ"),
+                ("💬 ОТВЕТЫ ИИ: 🟢ВКЛ", "ai_replies_enabled", "0", "💬 ОТВЕТЫ ИИ: 🔴ВЫКЛ"),
+                ("🤚 РУКИ (мут): 🟢ВКЛ", "proactive_hands", "0", "🤚 РУКИ (мут): 🔴ВЫКЛ")):
+            on_val = hist.get_setting(key, "")
+            bot, gone, _ = press(OWNER, label_on)
+            rows, text, _ = last_keys(bot)
+            expect(f"нижняя «{label_on}» не переключила свою настройку или ушла модели",
+                   hist.get_setting(key, "") == off_val and not asked and bool(gone))
+            expect(f"после «{label_on}» подменю не пришло заново с новой надписью: {rows}",
+                   bool(rows) and label_off in sum(rows, []) and text == pk.PROMPTS_CARRIER_TEXT)
+            expect(f"после «{label_on}» нет короткого ответа, что произошло", bool(notices(bot)))
+            bot, gone, _ = press(OWNER, label_on)        # прежняя надпись на экране
+            expect(f"нажатие «{label_on}» с прежней надписью не вернуло настройку",
+                   hist.get_setting(key, "") == on_val and not asked)
+        expect("включение нижних «🤚 РУКИ» не предупредило, до скольких минут мут",
+               any(f"до {PROACTIVE_MUTE_MAX_SEC // 60} мин" in n for n in notices(bot)))
+        expect("нижние «🤚 РУКИ» не записаны в журнал персонала тем же кодом, что под панелью",
+               hist.get_recent_staff_actions(1)[0].get("action") == "proactive_hands")
+        # «Сам в разговор»: выключение — объявление группам, включение — его удаление.
+        bot, gone, _ = press(OWNER, "🗣 САМ В РАЗГОВОР: 🟢ВКЛ")
+        announced = [e for e in bot.events if e[0] == "send" and e[1] == GROUP]
+        expect("нижняя «🗣 САМ В РАЗГОВОР» не выключила режим или ушла модели",
+               hist.get_setting("proactive_enabled", "") == "0" and not asked)
+        expect("выключение «Сам в разговор» снизу не объявило об этом группам",
+               len(announced) == 1 and announced[0][2] == PROACTIVE_OFF_ANNOUNCE)
+        bot, gone, _ = press(OWNER, "🗣 САМ В РАЗГОВОР: 🔴ВЫКЛ")
+        expect("нижняя «🗣 САМ В РАЗГОВОР» не включила режим обратно",
+               hist.get_setting("proactive_enabled", "") == "1")
+        expect("включение «Сам в разговор» снизу не убрало объявление из группы",
+               bool(announced) and ("delete", GROUP, announced[0][4]) in bot.events)
+
+        # Регуляторы: шаг, предел и пояснение.
+        bot, gone, _ = press(OWNER, "➕ порог")
+        rows, _, _ = last_keys(bot)
+        expect(f"нижний «➕ порог» не прибавил шаг или надпись не следует: {rows}",
+               hist.get_setting("proactive_min_msgs", "") == "2" and bool(rows)
+               and "💬 2 сообщ." in sum(rows, []) and not asked)
+        press(OWNER, "➖ порог")
+        bot, gone, _ = press(OWNER, "➖ порог")
+        expect("«➖ порог» на нижнем пределе: не сказано «крайнее значение» или прислано "
+               "подменю «в то же самое»", hist.get_setting("proactive_min_msgs", "") == "1"
+               and not keyboards(bot) and notices(bot) == ["Это крайнее значение."])
+        bot, gone, _ = press(OWNER, "➕ контекст")
+        rows, _, _ = last_keys(bot)
+        expect(f"нижний «➕ контекст» не прибавил шаг или надпись не следует: {rows}",
+               hist.get_setting("proactive_context_msgs", "") == "35" and bool(rows)
+               and "📜 35 сообщ." in sum(rows, []))
+        press(OWNER, "➖ контекст")
+        expect("нижний «➖ контекст» не убавил шаг",
+               hist.get_setting("proactive_context_msgs", "") == "30")
+        from services.settings_spec import SPEC as _SPEC
+        for label, key in (("💬 7 сообщ.", "proactive_min_msgs"),
+                           ("📜 45 сообщ.", "proactive_context_msgs")):
+            bot, gone, _ = press(OWNER, label)       # прежнее число на экране
+            said = notices(bot)
+            # Пояснение — теми же словами, что подсказка на странице настроек сайта.
+            expect(f"средняя «{label}» не пояснила словами сайта, что это за число, или "
+                   f"что-то поменяла: {said}",
+                   len(said) == 1 and _SPEC[key]["hint"] in said[0] and not keyboards(bot)
+                   and hist.get_setting("proactive_min_msgs", "") == "1"
+                   and hist.get_setting("proactive_context_msgs", "") == "30" and not asked)
+
+        # Экран итогов и файлы промптов.
+        bot, gone, _ = press(OWNER, "📊 Подробнее об участии")
+        screens = [e for e in bot.events if e[0] == "send" and hasattr(e[3], "inline_keyboard")]
+        expect("нижняя «📊 Подробнее об участии» не прислала экран итогов с возвратом к промптам",
+               bool(screens) and "back_to_stats" in datas_of(screens[-1][3]) and not asked)
+        sent_files = []
+
+        async def _files(bot_, chat_id, user_id):
+            sent_files.append(chat_id)
+            return files_count[0]
+        files_count = [3]
+        pp.send_prompt_files = _files
+        bot, gone, _ = press(OWNER, "📄 Полные PROMPTы")
+        expect("нижняя «📄 Полные PROMPTы» не прислала файлы промптов",
+               sent_files == [OWNER] and not asked)
+        files_count[0] = 0
+        bot, gone, _ = press(OWNER, "📄 Полные PROMPTы")
+        expect("промптов нет, а нижняя «📄 Полные PROMPTы» молчит",
+               notices(bot) == [pp.NO_PROMPT_FILES_TEXT])
+
+        # Под панелью — только возврат и строка, где переключатели.
+        P_TOGGLES = {"toggle_admin_prompt", "toggle_ai_replies", "proactive:toggle",
+                     "proactive:wipe", "proactive:hands", "proactive:mm_dec", "proactive:mm_inc",
+                     "proactive:ctx_dec", "proactive:ctx_inc", "proactive:stats", "prompts_files"}
+        ptext, pmarkup = pp._build_prompt_panel_text_and_keyboard(OWNER)
+        expect(f"у владельца под панелью промптов остались кнопки, ушедшие вниз: "
+               f"{sorted(P_TOGGLES & set(datas_of(pmarkup)))}",
+               datas_of(pmarkup) == ["adm_back"] and "в нижних кнопках" in ptext)
+        expect("полный вариант панели промптов (его меряет preflight) потерял кнопки",
+               P_TOGGLES <= set(datas_of(full_kb)))
+        bot = Bot()
+        asyncio.run(saved_targets["prompts"](bot, OWNER, OWNER))
+        sent = [e for e in bot.events if e[0] == "send"]
+        expect("настоящая панель промптов у владельца пришла не короткой",
+               bool(sent) and datas_of(sent[-1][3]) == ["adm_back"]
+               and "в нижних кнопках" in sent[-1][2])
+        for title, uid in (("постороннего", PLAIN), ("модератора", MOD)):
+            bot, gone, _ = press(uid, "🤚 РУКИ (мут): 🟢ВКЛ")
+            expect(f"«🤚 РУКИ» от {title} перехвачены — а это обычный вопрос модели",
+                   asked == ["🤚 РУКИ (мут): 🟢ВКЛ"]
+                   and hist.get_setting("proactive_hands", "") == "1")
+
+        # Кнопки под панелью — тем же шагом: «Руки» по-настоящему, остальное сверкой.
+        q_answers = []
+
+        async def _q_answer(text=None, **kw):
+            q_answers.append(text)
+
+        async def _q_markup(**kw):
+            return True
+        q = types.SimpleNamespace(answer=_q_answer, get_bot=lambda: Bot(),
+                                  edit_message_reply_markup=_q_markup)
+        asyncio.run(pp._handle_proactive_callback(q, OWNER, "proactive:hands"))
+        expect("«🤚 РУКИ» под панелью переключают не той же настройкой или не пишутся в журнал",
+               hist.get_setting("proactive_hands", "") == "0"
+               and hist.get_recent_staff_actions(1)[0].get("action") == "proactive_hands"
+               and q_answers == ["Руки выключены."])
+        hist.set_setting("proactive_hands", "1")
+        for name, step in (('if data == "toggle_admin_prompt"', 'flip_prompts_toggle("prompt"'),
+                           ('if data == "toggle_ai_replies"', 'flip_prompts_toggle("ai_replies"')):
+            branch = router_src[router_src.find(name):]
+            branch = branch[:branch.find("\n    if data", 10)]
+            expect(f"ветка «{name}» переключает не общим шагом с нижним подменю", step in branch)
+        import inspect
+        handler_src = inspect.getsource(pp._handle_proactive_callback)
+        expect("кнопки «Сам в разговор» и регуляторы под панелью — не общими шагами",
+               "flip_prompts_toggle(" in handler_src and "step_proactive(" in handler_src)
     finally:
+        pp.get_known_chats, pp.send_prompt_files = saved_pp
         roles.ADMIN_IDS, cache, roles._loaded = saved_roles
         roles._cache.clear()
         roles._cache.update(cache)
@@ -10526,7 +10716,8 @@ def check_owner_keys():
                       f"текст — модели; выключателя нет, старая запись «выключено» ничего не "
                       f"гасит; /start и запуск ставят панель, /adm — нет, у владельца он без "
                       f"кнопок; подменю «Настройки API» — "
-                      f"те же переключатели и надписи, что под панелью, а под панелью их нет")
+                      f"те же переключатели и надписи, что под панелью, а под панелью их нет; "
+                      f"подменю «PROMPTы» — так же, с объявлением группам у «Сам в разговор»")
 
 
 CHECKS = (

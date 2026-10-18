@@ -30,8 +30,9 @@
 #   • Номер сообщения с панелью — в settings 'owner_keys_msg_<номер владельца>':
 #     по нему удаляется предыдущее. ⚠️ Telegram не даёт ботам удалять сообщения
 #     старше двух суток — тогда старое остаётся, и в чате их два.
-#   • Подменю «📡 Настройки API» (18.10.2026, пилот) — API_ROWS: та же панель,
-#     другие кнопки; сообщение с ним — тот же один в чате. Подробности — у API_ROWS.
+#   • Подменю «📡 Настройки API» (18.10.2026, пилот) — API_ROWS, и «⚙️ PROMPTы»
+#     (18.10.2026) — PROMPTS_ROWS: та же панель, другие кнопки; сообщение с ним —
+#     тот же один в чате. Подробности — у API_ROWS и PROMPTS_ROWS.
 #
 #  ⚠️ «🌐 Сайт» — НЕ кнопка-мини-приложение (проба 17.10.2026): открытый с
 #  нижней кнопки сайт не получает от Telegram, кто его открыл, и пишет «Вход
@@ -43,6 +44,7 @@
 # ─────────────────────────────────────────────
 
 import logging
+import re
 
 from telegram import KeyboardButton, ReplyKeyboardMarkup
 from telegram.constants import ParseMode
@@ -98,10 +100,44 @@ API_ROWS = (
 API_CARRIER_TEXT = "📡 Настройки API — переключатели внизу. «⬅️ Назад» — к разделам."
 API_KEYS = tuple(key for row in API_ROWS for key in row)
 
-_BY_LABEL = {label: code for label, code in KEYS + API_KEYS}
-# У этих кнопок к надписи дописано состояние («…: 🟢ВКЛ», «…: 3 с») — узнаются
-# по началу надписи.
-_STATEFUL = ("thoughts", "live_answer", "live_thoughts", "batch_info")
+# Подменю «⚙️ PROMPTы» (2026-10-18, решение Максима) — так же, как у API:
+# панель с текстом промптов приходит как раньше, а её переключатели и
+# регуляторы — внизу (panel_prompts.flip_prompts_toggle / step_proactive; под
+# панелью их тогда нет — panel_prompts.prompts_toggles_below). «Сам в
+# разговор» и «Руки» — одним рядом, «Руки» с короткой надписью «(мут)» —
+# так решил Максим. «🧹 Очистить РАЗГОВОРЫ» здесь нет: она в главной панели.
+PROMPTS_ROWS = (
+    (("⚙️ PROMPT", "p_prompt"), ("💬 ОТВЕТЫ ИИ", "p_ai_replies")),
+    (("🗣 САМ В РАЗГОВОР", "p_proactive"), ("🤚 РУКИ (мут)", "p_hands")),
+    (("➖ порог", "p_mm_dec"), ("💬 порог", "p_mm_info"), ("➕ порог", "p_mm_inc")),
+    (("➖ контекст", "p_ctx_dec"), ("📜 контекст", "p_ctx_info"), ("➕ контекст", "p_ctx_inc")),
+    (("📊 Подробнее об участии", "p_stats"), ("📄 Полные PROMPTы", "p_files")),
+    (("⬅️ Назад", "back"),),
+)
+PROMPTS_CARRIER_TEXT = "⚙️ PROMPTы — переключатели внизу. «⬅️ Назад» — к разделам."
+PROMPTS_KEYS = tuple(key for row in PROMPTS_ROWS for key in row)
+
+# Подменю: раскладка и текст сообщения, с которым оно стоит.
+_MENUS = {"api": (API_ROWS, API_CARRIER_TEXT), "prompts": (PROMPTS_ROWS, PROMPTS_CARRIER_TEXT)}
+
+_ALL_KEYS = KEYS + API_KEYS + PROMPTS_KEYS
+_BY_LABEL = {label: code for label, code in _ALL_KEYS}
+# У этих кнопок в надписи состояние или число («…: 🟢ВКЛ», «…: 3 с»,
+# «💬 3 сообщ.») — надпись целиком собирает тот же шаг, что у кнопки под
+# панелью, а узнаётся она по образцу при ЛЮБОМ состоянии.
+_STATEFUL = {
+    "thoughts": "🧠 МЫСЛИ ПОД КАПОТОМ: .+",
+    "live_answer": "✍️ ОТВЕТ НА ГЛАЗАХ: .+",
+    "live_thoughts": "🧠 МЫСЛИ В ЧЕРНОВИКЕ: .+",
+    "batch_info": "🧩 СКЛЕЙКА: .+",
+    "p_prompt": "⚙️ PROMPT: .+",
+    "p_ai_replies": "💬 ОТВЕТЫ ИИ: .+",
+    "p_proactive": "🗣 САМ В РАЗГОВОР: .+",
+    "p_hands": r"🤚 РУКИ \(мут\): .+",
+    "p_mm_info": r"💬 \d+ сообщ\.",
+    "p_ctx_info": r"📜 \d+ сообщ\.",
+}
+_STATEFUL_RX = {code: re.compile(pattern) for code, pattern in _STATEFUL.items()}
 
 # Сколько живут короткие ответы очисток — как у /clear.
 _NOTICE_TTL_SEC = 7
@@ -109,12 +145,15 @@ _NOTICE_TTL_SEC = 7
 _INFO_TTL_SEC = 20
 
 
-def _shown(label: str, code: str) -> str:
+def _shown(label: str, code: str, user_id: int | None = None) -> str:
     """
-    Надпись на кнопке с состоянием, как под панелью API: у переключателей
-    надпись целиком берётся у кнопки под панелью (panel_main.api_toggle_text)
-    — разойтись им нельзя.
+    Надпись на кнопке с состоянием — целиком у кнопки под панелью
+    (panel_main.api_toggle_text, panel_prompts.prompts_toggle_text): разойтись
+    им нельзя. user_id нужен личному тумблеру «⚙️ PROMPT».
     """
+    if code.startswith("p_") and code in _STATEFUL:
+        from .panel_prompts import prompts_toggle_text
+        return prompts_toggle_text(code[2:].removesuffix("_info"), user_id)
     if code in _STATEFUL:
         from .panel_main import api_toggle_text
         return api_toggle_text(code)
@@ -132,22 +171,23 @@ def _code_of(text: str) -> str | None:
     code = _BY_LABEL.get(text)
     if code:
         return code
-    for label, key in KEYS + API_KEYS:
-        if key in _STATEFUL and text.startswith(label + ":"):
+    for key, rx in _STATEFUL_RX.items():
+        if rx.fullmatch(text):
             return key
     return None
 
 
-def owner_keyboard(menu: str = "main") -> ReplyKeyboardMarkup:
+def owner_keyboard(menu: str = "main", user_id: int | None = None) -> ReplyKeyboardMarkup:
     """
     Сама панель, компактная, не сворачивается сама. main — разделы по две
-    кнопки в ряд; api — подменю «📡 Настройки API» по своим рядам.
+    кнопки в ряд; api и prompts — подменю разделов по своим рядам.
     """
-    if menu == "api":
-        layout = API_ROWS
+    if menu in _MENUS:
+        layout = _MENUS[menu][0]
     else:
         layout = [KEYS[i:i + 2] for i in range(0, len(KEYS), 2)]
-    rows = [[KeyboardButton(_shown(label, code)) for label, code in row] for row in layout]
+    rows = [[KeyboardButton(_shown(label, code, user_id)) for label, code in row]
+            for row in layout]
     return ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True)
 
 
@@ -195,16 +235,16 @@ async def send_owner_keys(bot, chat_id: int, user_id: int | None = None,
                           menu: str = "main") -> None:
     """
     Поставить нижние кнопки в личке владельца: главную панель (main) или
-    подменю «📡 Настройки API» (api). Не владелец или не личка — ничего не
-    делает. Тихая: панель — удобство, из-за неё не должны падать ни /start,
-    ни запуск бота.
+    подменю раздела (api — «📡 Настройки API», prompts — «⚙️ PROMPTы»). Не
+    владелец или не личка — ничего не делает. Тихая: панель — удобство, из-за
+    неё не должны падать ни /start, ни запуск бота.
     """
     uid = chat_id if user_id is None else user_id
     if not _is_owner_private(chat_id, uid):
         return
-    text = API_CARRIER_TEXT if menu == "api" else CARRIER_TEXT
+    text = _MENUS[menu][1] if menu in _MENUS else CARRIER_TEXT
     try:
-        await _post(bot, chat_id, text, owner_keyboard(menu))
+        await _post(bot, chat_id, text, owner_keyboard(menu, uid))
     except Exception as e:
         logger.warning("⚠️ Не удалось поставить нижние кнопки владельцу %s: %s", chat_id, e)
 
@@ -230,8 +270,39 @@ async def _run(code: str, context, chat_id: int, user_id: int) -> None:
         from .panel_main import send_stats_panel
         await send_stats_panel(bot, chat_id, user_id)
     elif code == "prompts":
+        # Панель раздела — как раньше, а внизу — его переключатели.
         from .panel_prompts import send_prompts_panel
         await send_prompts_panel(bot, chat_id, user_id)
+        await send_owner_keys(bot, chat_id, user_id, menu="prompts")
+    elif code in ("p_prompt", "p_ai_replies", "p_proactive", "p_hands"):
+        from .panel_prompts import flip_prompts_toggle
+        said, _ = await flip_prompts_toggle(code[2:], user_id, bot)
+        await _notice(bot, chat_id, said)
+        await send_owner_keys(bot, chat_id, user_id, menu="prompts")
+    elif code in ("p_mm_dec", "p_mm_inc", "p_ctx_dec", "p_ctx_inc"):
+        from .panel_prompts import step_proactive
+        said = step_proactive(code[2:-4], 1 if code.endswith("inc") else -1)
+        if said is None:
+            # Упёрлись в предел — надписи те же, панель заново не нужна.
+            await _notice(bot, chat_id, "Это крайнее значение.")
+            return
+        await _notice(bot, chat_id, said)
+        await send_owner_keys(bot, chat_id, user_id, menu="prompts")
+    elif code in ("p_mm_info", "p_ctx_info"):
+        from .panel_prompts import proactive_step_info
+        await _notice(bot, chat_id, proactive_step_info(code[2:-5]), _INFO_TTL_SEC)
+    elif code == "p_stats":
+        # Тот же экран итогов, что у кнопки под панелью; там он заменяет
+        # панель на месте, отсюда — новым сообщением (панель промптов уберёт
+        # гигиена панелей). «⬅️ К промптам» на нём ведёт обратно.
+        from .common import _send_panel_message
+        from .panel_prompts import _build_proactive_stats_panel
+        text, markup = _build_proactive_stats_panel()
+        await _send_panel_message(bot, chat_id, text, markup)
+    elif code == "p_files":
+        from .panel_prompts import NO_PROMPT_FILES_TEXT, send_prompt_files
+        if not await send_prompt_files(bot, chat_id, user_id):
+            await _notice(bot, chat_id, NO_PROMPT_FILES_TEXT, 15)
     elif code == "api":
         # Панель раздела — как раньше, а внизу — его переключатели.
         from .panel_main import send_api_panel

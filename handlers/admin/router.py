@@ -33,8 +33,9 @@ from .panel_main import (BATCH_INFO_TEXT, _build_api_keyboard, flip_api_toggle, 
                          send_daily_report_panel, send_weekly_report_panel,
                          send_stats_panel)
 from .panel_mod import _handle_mod_callback, send_mod_panel
-from .panel_prompts import (_build_prompt_panel_text_and_keyboard, _handle_proactive_callback,
-                            _handle_proactive_wipe, handle_prompt_reset,
+from .panel_prompts import (NO_PROMPT_FILES_TEXT, _build_prompt_panel_text_and_keyboard,
+                            _handle_proactive_callback, _handle_proactive_wipe,
+                            flip_prompts_toggle, handle_prompt_reset,
                             send_prompts_panel, send_prompt_files)
 from .panel_quiz import _handle_quiz_callback
 from .panel_rag import _end_kb_test, _handle_kb_callback, send_rag_panel
@@ -178,10 +179,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         if not sent:
             # Самоудаляемое, а не через гигиену панелей: гигиена снесла бы
             # саму панель промптов, из которой нажали кнопку.
-            warn = await context.bot.send_message(
-                chat_id=chat_id,
-                text="⚠️ Ни один промпт не задан — отправлять нечего.",
-            )
+            warn = await context.bot.send_message(chat_id=chat_id, text=NO_PROMPT_FILES_TEXT)
             if warn:
                 schedule_delete(context.bot, chat_id, warn.message_id, 15)
         return
@@ -671,12 +669,9 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     if data == "toggle_admin_prompt":
-        current_val = get_setting(f"admin_no_prompt_{user_id}", "0")
-        new_val = "0" if current_val == "1" else "1"
-        set_setting(f"admin_no_prompt_{user_id}", new_val)
-        status_text = "выключен (ИИ общается без промпта)" if new_val == "1" else "включен (личность C4_Max активна)"
-        logger.info("🔧 Админ: персональный промпт %s", "выключен" if new_val == "1" else "включён")
-        await query.answer(f"Персональный промпт {status_text}!", show_alert=True)
+        # Шаг — общий с нижним подменю владельца (panel_prompts.flip_prompts_toggle).
+        said, alert = await flip_prompts_toggle("prompt", user_id, context.bot)
+        await query.answer(said, show_alert=alert)
         try:
             _, prompt_markup = _build_prompt_panel_text_and_keyboard(user_id)
             await query.edit_message_reply_markup(reply_markup=prompt_markup)
@@ -685,12 +680,9 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     if data == "toggle_ai_replies":
-        current_val = get_setting("ai_replies_enabled", "1")
-        new_val = "0" if current_val == "1" else "1"
-        set_setting("ai_replies_enabled", new_val)
-        status_text = "выключены (бот молчит в личке админа)" if new_val == "0" else "включены"
-        logger.info("🔧 Админ: ответы ИИ %s", "выключены" if new_val == "0" else "включены")
-        await query.answer(f"Ответы ИИ {status_text}!", show_alert=True)
+        # Шаг — общий с нижним подменю владельца (panel_prompts.flip_prompts_toggle).
+        said, alert = await flip_prompts_toggle("ai_replies", user_id, context.bot)
+        await query.answer(said, show_alert=alert)
         try:
             _, prompt_markup = _build_prompt_panel_text_and_keyboard(user_id)
             await query.edit_message_reply_markup(reply_markup=prompt_markup)
