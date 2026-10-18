@@ -73,7 +73,7 @@ def check_money():
     """
     from config import DEEPSEEK_PRICES, XIAOMI_PRICES, IMAGE_PRICES
     from services.gemini import (_deepseek_cost, _xiaomi_cost, _image_cost,
-                                 _deepseek_peak_now)
+                                 _final_image_b64, _deepseek_peak_now)
 
     problems = []
     done = 0
@@ -181,7 +181,7 @@ def check_money():
                         "иначе расход посчитается как ноль и незаметно потеряется")
 
     # ── Картинки: считаются по МОДАЛЬНОСТЯМ, картинка дороже текста ──
-    model = "gemini-3.1-flash-image"
+    model = "gemini-nano-banana-2.1"
     p = IMAGE_PRICES[model]
     usage = {"promptTokensDetails": [{"modality": "TEXT", "tokenCount": 20}],
              "candidatesTokensDetails": [{"modality": "IMAGE", "tokenCount": 1120},
@@ -194,6 +194,40 @@ def check_money():
              "candidatesTokensDetails": [{"modality": "IMAGE", "tokenCount": 1120}]}
     want = (20 * p["in"] + 1120 * p["img_out"]) / 1_000_000
     expect("Картинка, модальностей нет", _image_cost(model, usage), want)
+
+    # ── Картинки: раздумья и выход без модальности — платные, по цене текста ──
+    # Живой ответ Nano Banana 2.1 от 19.10.2026: candidatesTokenCount (1693)
+    # больше суммы по модальностям (1120), плюс 814 токенов раздумий. До этого
+    # дня оба куска не считались, и расход картинок был занижен.
+    usage = {"promptTokenCount": 24, "candidatesTokenCount": 1693,
+             "thoughtsTokenCount": 814,
+             "promptTokensDetails": [{"modality": "TEXT", "tokenCount": 24}],
+             "candidatesTokensDetails": [{"modality": "IMAGE", "tokenCount": 1120}]}
+    want = (24 * p["in"] + 1120 * p["img_out"] + (573 + 814) * p["txt_out"]) / 1_000_000
+    expect("Картинка, раздумья и выход без модальности", _image_cost(model, usage), want)
+
+    # ── Картинки: отдаём окончательную, а не черновик раздумий ──
+    # Модель может вернуть до двух черновиков (thought=true) перед итоговой.
+    done += 1
+    answer = {"candidates": [{"content": {"parts": [
+        {"thought": True, "inlineData": {"data": "ЧЕРНОВИК"}},
+        {"text": "подпись"},
+        {"inlineData": {"data": "ИТОГ"}, "thoughtSignature": "x"},
+    ]}}]}
+    got = _final_image_b64(answer)
+    if got != "ИТОГ":
+        problems.append(f"Картинка: из ответа взята не окончательная картинка, а «{got}» — "
+                        "человек получит черновик раздумий модели")
+    # Порядок частей Google не обещает: черновик ПОСЛЕ итоговой тоже не берём.
+    done += 1
+    answer = {"candidates": [{"content": {"parts": [
+        {"inlineData": {"data": "ИТОГ"}},
+        {"thought": True, "inlineData": {"data": "ЧЕРНОВИК"}},
+    ]}}]}
+    got = _final_image_b64(answer)
+    if got != "ИТОГ":
+        problems.append(f"Картинка: черновик раздумий после итоговой картинки не пропущен — "
+                        f"взято «{got}»")
 
     # ── Нули не должны падать: на бесплатных вариантах приходят именно они ──
     done += 1
@@ -768,7 +802,7 @@ _PRICES_EXPECTED = {
         "mimo-v2.6-pro":   {"cache_hit": 0.0036, "cache_miss": 0.435, "output": 0.87},
     },
     "IMAGE_PRICES": {
-        "gemini-3.1-flash-image":      {"in": 0.50, "img_out": 60.0, "txt_out": 1.50},
+        "gemini-nano-banana-2.1":      {"in": 1.50, "img_out": 30.0, "txt_out": 7.50},
         "gemini-3.1-flash-lite-image": {"in": 0.25, "img_out": 30.0, "txt_out": 1.50},
     },
 }

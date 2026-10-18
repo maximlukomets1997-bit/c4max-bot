@@ -55,6 +55,7 @@ from config import (
     XIAOMI_API_KEY,
     XIAOMI_PRICES,
     IMAGE_PRICES,
+    AVAILABLE_IMAGE_MODELS,
     FALLBACK_MODEL,
     AUDIO_FALLBACK_CHAIN,
     VIDEO_FALLBACK_CHAIN,
@@ -3489,8 +3490,13 @@ def ask_group_proactive(chat_id: int, bot_id: int, trigger_text: str,
 def _image_cost(model_name: str, usage: dict):
     """Точная стоимость генерации картинки в долларах по ценам IMAGE_PRICES.
     Google тарифицирует по токенам: текстовый вход (промпт) + графический выход
-    (картинка 1K = 1120 output-токенов). Токены берём из usageMetadata по
-    модальностям. None — модели нет в таблице цен."""
+    (картинка 1K = 1120 output-токенов) + раздумья по цене текста. Токены
+    берём из usageMetadata по модальностям. None — модели нет в таблице цен.
+
+    Раздумья (thoughtsTokenCount) до 19.10.2026 не считались вовсе — расход
+    картинок был занижен. Там же замечено: candidatesTokenCount у Nano Banana
+    2.1 больше суммы по модальностям (1693 против 1120 на картинке) — остаток
+    без модальности считаем по цене текста, а не теряем."""
     prices = IMAGE_PRICES.get(model_name)
     if not prices:
         return None
@@ -3500,13 +3506,34 @@ def _image_cost(model_name: str, usage: dict):
             text_in += d.get("tokenCount", 0) or 0
     if not text_in:
         text_in = usage.get("promptTokenCount", 0) or 0
-    img_out = text_out = 0
+    img_out = text_out = listed = 0
     for d in usage.get("candidatesTokensDetails", []):
+        count = d.get("tokenCount", 0) or 0
+        listed += count
         if d.get("modality") == "IMAGE":
-            img_out += d.get("tokenCount", 0) or 0
-        elif d.get("modality") == "TEXT":
-            text_out += d.get("tokenCount", 0) or 0
+            img_out += count
+        else:
+            text_out += count
+    text_out += max(0, (usage.get("candidatesTokenCount", 0) or 0) - listed)
+    text_out += usage.get("thoughtsTokenCount", 0) or 0
     return (text_in * prices["in"] + img_out * prices["img_out"] + text_out * prices["txt_out"]) / 1_000_000
+
+
+def _final_image_b64(data: dict):
+    """Окончательная картинка из ответа generateContent (base64) или None.
+    Берём ПОСЛЕДНЮЮ часть с картинкой первого кандидата, где она есть;
+    черновики раздумий (thought=true) пропускаем."""
+    for cand in data.get("candidates", []):
+        img_b64 = None
+        for part in cand.get("content", {}).get("parts", []):
+            if part.get("thought"):
+                continue
+            inline = part.get("inlineData") or part.get("inline_data")
+            if inline and inline.get("data"):
+                img_b64 = inline["data"]
+        if img_b64:
+            return img_b64
+    return None
 
 
 def generate_image(prompt: str) -> bytes:
@@ -3516,8 +3543,12 @@ def generate_image(prompt: str) -> bytes:
     поэтому формат другой: картинка возвращается как inlineData внутри parts
     ответа (у Nano Banana в parts рядом бывает thoughtSignature — берём именно
     часть с данными). Возвращает байты картинки или None при ошибке.
+
+    Модели картинок думают всегда и по документации Google могут вернуть до
+    двух черновиков (части с thought=true), а окончательная картинка — ПОСЛЕДНЯЯ.
+    Поэтому черновики пропускаем и берём последнюю картинку, а не первую.
     """
-    active_image_model = hist.get_setting("active_image_model", "gemini-3.1-flash-image")
+    active_image_model = hist.get_setting("active_image_model", next(iter(AVAILABLE_IMAGE_MODELS)))
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{active_image_model}:generateContent"
     headers = {
         "Content-Type": "application/json",
@@ -3538,15 +3569,7 @@ def generate_image(prompt: str) -> bytes:
         response.raise_for_status()
         data = response.json()
 
-        img_b64 = None
-        for cand in data.get("candidates", []):
-            for part in cand.get("content", {}).get("parts", []):
-                inline = part.get("inlineData") or part.get("inline_data")
-                if inline and inline.get("data"):
-                    img_b64 = inline["data"]
-                    break
-            if img_b64:
-                break
+        img_b64 = _final_image_b64(data)
 
         if not img_b64:
             # data обрезаем: в ответе могут быть мегабайты base64 — не заливаем лог.

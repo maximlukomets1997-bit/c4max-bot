@@ -837,7 +837,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             return
         # Та же защита от «Message is not modified», что и у текстовых моделей
         # (наступили на этом 2026-07-19 именно на кнопке картинок).
-        if get_setting("active_image_model", "gemini-3.1-flash-image") == new_model:
+        if get_setting("active_image_model", next(iter(AVAILABLE_IMAGE_MODELS))) == new_model:
             await query.answer(f"Модель картинок {AVAILABLE_IMAGE_MODELS[new_model]['name']} уже выбрана",
                                show_alert=False)
             return

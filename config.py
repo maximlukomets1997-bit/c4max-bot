@@ -1037,12 +1037,15 @@ PROACTIVE_OFF_MSGS_KEY = "proactive_off_msgs"
 
 # Модели генерации картинок «Nano Banana» (Google, эндпоинт generateContent).
 # Imagen (predict) отключён Google 17.08.2026 — заменён на gemini-*-image.
+# 2026-10-19: gemini-3.1-flash-image Google объявил устаревшей (06.10.2026),
+# замена — gemini-nano-banana-2.1; старая удалена целиком, решение Максима.
 # Обе модели работают в разрешении 1K (flash-lite поддерживает ТОЛЬКО 1K).
+# ПЕРВАЯ запись — заводская модель картинок (её же берёт preflight).
 # Меняешь состав → правь и раскладку `_IMAGE_BUTTON_ROW` в handlers/admin/panel_main.py.
 AVAILABLE_IMAGE_MODELS = {
-    "gemini-3.1-flash-image": {
-        "name": "🏞️Gemini 3.1 Flash",
-        "public_name": "3.1 Image",
+    "gemini-nano-banana-2.1": {
+        "name": "🏞️Nano Banana 2.1",
+        "public_name": "Banana 2.1",
         "limit": 0,
         "show_limit": False
     },
@@ -1058,11 +1061,14 @@ AVAILABLE_IMAGE_MODELS = {
 # 1 МЛН ТОКЕНОВ, тариф standard/pay-as-you-go (сверено тестом 2026-07-05:
 # картинка 1K = стабильно 1120 графических output-токенов, тариф standard).
 # "in" — текстовый вход (промпт), "img_out" — графический выход (сама картинка),
-# "txt_out" — текстовый выход (на чистой картинке = 0). Google тарифицирует
-# именно по токенам, стоимость = сумма (токены каждого вида × цена).
+# "txt_out" — текстовый выход И РАЗДУМЬЯ («text and thinking» в прайсе Google):
+# модели картинок думают всегда, отключить нельзя, и раздумья платные.
+# Google тарифицирует именно по токенам, стоимость = сумма (токены каждого
+# вида × цена). Сверено с прайсом 2026-10-19; замер того же дня — Nano Banana
+# 2.1, картинка 1K: 1120 графических токенов + 814 токенов раздумий.
 # ⚠️ Google изменит тарифы / сменится разрешение — обновить эти числа руками.
 IMAGE_PRICES = {
-    "gemini-3.1-flash-image":      {"in": 0.50, "img_out": 60.0, "txt_out": 1.50},
+    "gemini-nano-banana-2.1":      {"in": 1.50, "img_out": 30.0, "txt_out": 7.50},
     "gemini-3.1-flash-lite-image": {"in": 0.25, "img_out": 30.0, "txt_out": 1.50},
 }
 

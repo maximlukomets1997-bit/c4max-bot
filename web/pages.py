@@ -331,7 +331,7 @@ def _rows(items) -> str:
 def _models_block(csrf: str) -> str:
     import database.history as hist
     active = hist.get_setting("active_model", GEMINI_MODEL)
-    active_img = hist.get_setting("active_image_model", "")
+    active_img = hist.get_setting("active_image_model", next(iter(AVAILABLE_IMAGE_MODELS)))
 
     text_options = [
         (key, f'{PROVIDERS.get(info.get("provider", ""), {}).get("icon", "")} {info["name"]}'.strip())
@@ -431,7 +431,7 @@ def _tiles() -> str:
     active_title = AVAILABLE_MODELS.get(active, {}).get("name", active)
     icon = PROVIDERS.get(AVAILABLE_MODELS.get(active, {}).get("provider", ""), {}).get("icon", "")
 
-    img = hist.get_setting("active_image_model", "")
+    img = hist.get_setting("active_image_model", next(iter(AVAILABLE_IMAGE_MODELS)))
     img_title = AVAILABLE_IMAGE_MODELS.get(img, {}).get("name", img or "—")
 
     # Расход с последнего снимка (обычно с полуночи). Считается на лету и

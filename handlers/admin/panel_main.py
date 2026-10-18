@@ -46,7 +46,7 @@ _MODEL_BUTTON_ROWS = [
 ]
 
 # Ряд моделей картинок (Nano Banana, gemini-*-image).
-_IMAGE_BUTTON_ROW = ["gemini-3.1-flash-lite-image", "gemini-3.1-flash-image"]
+_IMAGE_BUTTON_ROW = ["gemini-3.1-flash-lite-image", "gemini-nano-banana-2.1"]
 
 
 def _build_model_panel_text_and_keyboard(active_model, active_image_model, user_id=None):
@@ -270,7 +270,7 @@ def _build_api_keyboard(user_id, full: bool = False):
     его меряет preflight и сторожат проверки надписей.
     """
     active_model = get_setting("active_model", GEMINI_MODEL)
-    active_image_model = get_setting("active_image_model", "gemini-3.1-flash-image")
+    active_image_model = get_setting("active_image_model", next(iter(AVAILABLE_IMAGE_MODELS)))
     _, model_markup = _build_model_panel_text_and_keyboard(active_model, active_image_model, user_id)
     # inline_keyboard у собранной клавиатуры — кортеж (tuple), складывать его
     # со списком нельзя — приводим всё к спискам.
