@@ -174,10 +174,68 @@ def build_text_and_entities(raw_answer: str, header: bool = True):
     return text, entities
 
 
+# ── Ссылки, которые Telegram не примет (19.10.2026) ──────────────────────
+# Модель иногда пишет ссылку-пустышку: «[Т-80](#)», «[статья](источник)».
+# telegramify превращает её в ссылку как есть, а Telegram такую ссылку не
+# принимает и отвергает ВСЁ оформление сообщения разом. Тогда send_formatted
+# уходил в запасную отправку голым текстом — и мысли, потеряв свёрнутую
+# цитату, вываливались сплошным текстом над ответом (жалоба Максима).
+# Правило — то же, что у самого Telegram (TDLib: LinkManager::check_link и
+# parse_url): http/https или без приставки, у адреса есть имя сайта с точкой,
+# в имени нет запрещённых знаков, порт — число. Служебные tg:/ton: — решает
+# сам Telegram. Ссылка не прошла — слово остаётся обычным текстом: она и так
+# никуда не вела.
+_LINK_HOST_EXTRA = set(".-_!$,~*'();&+=")
+
+
+def _link_accepted(url) -> bool:
+    """Примет ли Telegram этот адрес у скрытой ссылки (text_link)."""
+    url = (url or "").strip()
+    if not url:
+        return False
+    if url.lower().startswith(("tg:", "ton:", "tonsite:")):
+        return True
+    scheme = re.match(r"([^:/?#@\[\]]*)://", url)
+    if scheme:
+        if scheme.group(1).lower() not in ("http", "https"):
+            return False
+        url = url[scheme.end():]
+    host = re.split(r"[/?#]", url, maxsplit=1)[0].rsplit("@", 1)[-1]
+    if host.startswith("["):                 # адрес IPv6 — пусть решает Telegram
+        return True
+    if ":" in host:
+        host, port = host.rsplit(":", 1)
+        if not port.isdigit() or not 0 < int(port) <= 65535:
+            return False
+    if "." not in host or host == ".":
+        return False
+    i = 0
+    while i < len(host):
+        c = host[i]
+        if c == "%":
+            if not re.fullmatch(r"[0-9A-Fa-f]{2}", host[i + 1:i + 3]):
+                return False
+            i += 3
+            continue
+        if not (c.isalnum() or c in _LINK_HOST_EXTRA or ord(c) >= 128):
+            return False
+        i += 1
+    return True
+
+
 def _to_ptb(entities):
-    """telegramify MessageEntity → telegram.MessageEntity (для python-telegram-bot)."""
+    """
+    telegramify MessageEntity → telegram.MessageEntity (для python-telegram-bot).
+    Ссылки, которые Telegram не примет (_link_accepted), выбрасываются — текст
+    под ними остаётся. Через эту функцию идут ВСЕ отправки с разметкой: ответы,
+    черновик лички, правка в группе, мысли по ходу, новости.
+    """
     out = []
     for e in entities:
+        if e.type == "text_link" and not _link_accepted(getattr(e, "url", None)):
+            logger.debug("🔗 Ссылка «%s» не годится для Telegram — оставляю простым текстом",
+                         getattr(e, "url", None))
+            continue
         out.append(TgEntity(
             type=e.type,
             offset=e.offset,
@@ -250,26 +308,52 @@ async def send_formatted(bot, chat_id, raw_answer, reply_to=None, disable_previe
 
     first = True
     for chunk_text, chunk_entities in chunks:
+        reply = reply_to if first else None
+        first = False
         try:
             await bot.send_message(
                 chat_id=chat_id,
                 text=chunk_text,
                 entities=_to_ptb(chunk_entities),
                 link_preview_options=LinkPreviewOptions(is_disabled=disable_preview),
-                reply_to_message_id=reply_to if first else None,
+                reply_to_message_id=reply,
             )
+            continue
         except Exception as e:
-            logger.warning("⚠️ Не удалось отправить с разметкой: %s — отправляю без неё", e)
-            try:
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text=chunk_text,
-                    link_preview_options=LinkPreviewOptions(is_disabled=disable_preview),
-                    reply_to_message_id=reply_to if first else None,
-                )
-            except Exception as e2:
-                logger.error("⚠️ Не удалось отправить сообщение в чат %s: %s", chat_id, e2)
-        first = False
+            # ⚠️ СНАЧАЛА — ТОЛЬКО СВЁРНУТЫЕ МЫСЛИ, ГОЛЫЙ ТЕКСТ — ПОСЛЕДНИМ (19.10.2026).
+            # Telegram отвергает оформление ЦЕЛИКОМ из-за одной негодной его
+            # части. Раньше отсюда сразу уходил голый текст, и мысли вываливались
+            # сплошным текстом над ответом. Цитату Telegram принимает всегда —
+            # с ней одной и пробуем ещё раз; пропадёт только остальное
+            # оформление (жирный, ссылки). Так же и при сбое сети: повтор был и
+            # раньше (голым текстом), теперь он хотя бы держит мысли свёрнутыми,
+            # а лишняя, третья попытка бывает, только если не прошла и вторая.
+            quote = [x for x in chunk_entities if x.type == "expandable_blockquote"]
+            if not quote:
+                logger.warning("⚠️ Не удалось отправить с разметкой: %s — отправляю без неё", e)
+            else:
+                logger.warning("⚠️ Не удалось отправить с разметкой: %s — "
+                               "отправляю только со свёрнутыми мыслями", e)
+                try:
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text=chunk_text,
+                        entities=_to_ptb(quote),
+                        link_preview_options=LinkPreviewOptions(is_disabled=disable_preview),
+                        reply_to_message_id=reply,
+                    )
+                    continue
+                except Exception as e2:
+                    logger.warning("⚠️ Не ушло и со свёрнутыми мыслями: %s — отправляю без разметки", e2)
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=chunk_text,
+                link_preview_options=LinkPreviewOptions(is_disabled=disable_preview),
+                reply_to_message_id=reply,
+            )
+        except Exception as e3:
+            logger.error("⚠️ Не удалось отправить сообщение в чат %s: %s", chat_id, e3)
 
 
 # ───────────────────────────────────────────────

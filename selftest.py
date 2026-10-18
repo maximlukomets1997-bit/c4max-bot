@@ -1005,7 +1005,93 @@ def check_thoughts():
     if sent and "одни лишь мысли" in sent[0]:
         problems.append("аварийная отправка: показали человеку сами размышления")
 
-    return problems, f"{done} проверок: вырезание, тумблер, аварийная отправка"
+    # ── Негодная ссылка не разворачивает мысли (19.10.2026, жалоба Максима) ──
+    # Модель написала ссылку-пустышку «[Т-80](#)» — Telegram отверг ВСЁ
+    # оформление сообщения, бот отправил его голым текстом, и мысли легли
+    # сплошным текстом над ответом. Поддельный Telegram ниже отказывает так
+    # же целиком и по СВОЕМУ правилу (у адреса нет имени сайта с точкой —
+    # отказ), а не по проверке бота: иначе ошибка в ней прошла бы молча.
+    from telegram.error import BadRequest, TimedOut
+
+    class StrictBot:
+        def __init__(self, refuse_all=False, timeout_once=False):
+            self.sent = []                     # (текст, выделения)
+            self.refuse_all = refuse_all       # отказывать всему, кроме цитаты
+            self.timeout_once = timeout_once   # первая отправка — «сеть не ответила»
+
+        async def send_message(self, chat_id=None, text=None, entities=None, **kw):
+            if self.timeout_once:
+                self.timeout_once = False
+                raise TimedOut("нарочный сбой сети")
+            for e in entities or []:
+                if e.type == "text_link":
+                    host = (e.url or "").split("://", 1)[-1].split("/", 1)[0]
+                    if "." not in host:
+                        raise BadRequest(f"Entity URL '{e.url}' is invalid: Wrong HTTP URL")
+            if self.refuse_all and any(e.type != "expandable_blockquote" for e in entities or []):
+                raise BadRequest("нарочный отказ оформлению")
+            self.sent.append((text, list(entities or [])))
+
+    def quoted(text, ents):
+        """Текст под свёрнутой цитатой (смещения — в UTF-16, как у Telegram)."""
+        raw16 = text.encode("utf-16-le")
+        return "".join(raw16[e.offset * 2:(e.offset + e.length) * 2].decode("utf-16-le")
+                       for e in ents if e.type == "expandable_blockquote")
+
+    link_raw = ("<thought>Сравню Т-80 с соседями по рангу.</thought>"
+                "**Т-80** — хороший танк. Подробнее в статье [Т-80](#), "
+                "новости — на [сайте](https://wtmobile.com).")
+    bot = StrictBot()
+    asyncio.run(uf.send_formatted(bot, 1, link_raw))
+    done += 1
+    if len(bot.sent) != 1:
+        problems.append(f"негодная ссылка: ушло {len(bot.sent)} сообщений вместо одного")
+    elif "Сравню Т-80" not in quoted(*bot.sent[0]):
+        problems.append("негодная ссылка: мысли ушли НЕ свёрнутой цитатой, а текстом "
+                        "над ответом — Telegram отверг оформление из-за «[Т-80](#)»")
+    else:
+        text, ents = bot.sent[0]
+        done += 1
+        if not any(e.type == "text_link" and e.url == "https://wtmobile.com" for e in ents):
+            problems.append("негодная ссылка: вместе с ней пропала и настоящая ссылка на сайт")
+        done += 1
+        if sum(e.type == "bold" for e in ents) < 2:
+            problems.append("негодная ссылка: пропал жирный шрифт в ответе")
+        done += 1
+        if "Подробнее в статье Т-80," not in text:
+            problems.append(f"негодная ссылка: слово под ней потерялось: {text!r}")
+
+    # Та же сборка в черновике лички, правке в группе и новостях — через convert_md.
+    text, ents = uf.convert_md("Смотри [вики](wiki) и [сайт](https://wtmobile.com)")
+    done += 1
+    if any(e.type == "text_link" and "." not in (e.url or "") for e in ents):
+        problems.append("convert_md оставил ссылку без имени сайта — Telegram "
+                        "отвергнет черновик, правку в группе и новость целиком")
+    done += 1
+    if "вики" not in text or not any(e.type == "text_link" for e in ents):
+        problems.append(f"convert_md: потерялось слово или настоящая ссылка: {text!r}")
+
+    # Telegram отверг оформление по ЛЮБОЙ другой причине — мысли всё равно свёрнуты.
+    bot = StrictBot(refuse_all=True)
+    asyncio.run(uf.send_formatted(bot, 1, "<thought>долго думаю</thought>**Ответ** готов."))
+    done += 1
+    if len(bot.sent) != 1:
+        problems.append(f"отказ оформлению: ушло {len(bot.sent)} сообщений вместо одного")
+    elif "долго думаю" not in quoted(*bot.sent[0]):
+        problems.append("отказ оформлению: мысли ушли голым текстом над ответом, а не "
+                        "свёрнутой цитатой — запасной попытки с одной цитатой нет")
+
+    # Сбой сети на первой отправке: повтор один (как и раньше), и мысли в нём свёрнуты.
+    bot = StrictBot(timeout_once=True)
+    asyncio.run(uf.send_formatted(bot, 1, "<thought>думаю дальше</thought>Ответ."))
+    done += 1
+    if len(bot.sent) != 1:
+        problems.append(f"сбой сети: ушло {len(bot.sent)} сообщений вместо одного")
+    elif "думаю дальше" not in quoted(*bot.sent[0]):
+        problems.append("сбой сети: повтор ушёл голым текстом, мысли развёрнуты над ответом")
+
+    return problems, (f"{done} проверок: вырезание, тумблер, аварийная отправка, "
+                      f"негодная ссылка, отказ оформлению и сбой сети")
 
 
 # ───────────────────────────────────────────────
