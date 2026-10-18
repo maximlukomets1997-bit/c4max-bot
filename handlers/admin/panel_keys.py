@@ -177,13 +177,34 @@ SERVICE_ROWS = (
 )
 SERVICE_KEYS = tuple(key for row in SERVICE_ROWS for key in row)
 
-# Подменю: раскладка и текст сообщения, с которым оно стоит. None — текст
-# собирается в момент отправки: у prompts — сама панель раздела, у service —
-# сообщение с версией и цифрами.
-_MENUS = {"api": (API_ROWS, API_CARRIER_TEXT), "prompts": (PROMPTS_ROWS, None),
-          "service": (SERVICE_ROWS, None)}
+# Подменю «🛠 DDoS-Guard» (2026-10-19, решение Максима) — так же, как у
+# «⚙️ PROMPTы»: сообщение с подменю — сама панель раздела с её текстом
+# (panel_mod.send_mod_panel у владельца), под ней кнопок нет. Переключатели и
+# регуляторы — те же шаги, что под панелью (panel_mod.flip_mod_toggle /
+# step_mod), надписи — panel_mod.mod_toggle_text. Тумблеры по два в ряд, с
+# короткими надписями — так утвердил Максим по макету 19.10.
+# Последний ряд — MOD_LAST_ROW; «📜 Улики» встаёт рядом с «⬅️ Назад», только
+# когда у последних действий есть улики (owner_keyboard). «🧹 Очистить журнал»
+# сначала спрашивает — журнал стирается вместе с уликами.
+MOD_ROWS = (
+    (("🛡 DDoS-Guard", "m_guard"), ("🔗 Фильтр ссылок", "m_linkfilter")),
+    (("➖ сообщ.", "m_count_dec"), ("📨 сообщ.", "m_count_info"), ("➕ сообщ.", "m_count_inc")),
+    (("➖ окно", "m_window_dec"), ("⏱ окно", "m_window_info"), ("➕ окно", "m_window_inc")),
+    (("➖ мут", "m_mute_dec"), ("🔇 мут", "m_mute_info"), ("➕ мут", "m_mute_inc")),
+    (("👋 Приветствие", "m_greet"), ("🤖 «Я не бот»", "m_captcha")),
+    (("➖ срок", "m_time_dec"), ("⏳ срок", "m_time_info"), ("➕ срок", "m_time_inc")),
+    (("👢 Кикать", "m_kick"), ("🧹 Очистить журнал", "m_clearlog")),
+)
+MOD_EVIDENCE_KEY = ("📜 Улики", "m_evidence")
+MOD_KEYS = tuple(key for row in MOD_ROWS for key in row) + (MOD_EVIDENCE_KEY,)
 
-_ALL_KEYS = KEYS + API_KEYS + PROMPTS_KEYS + SERVICE_KEYS
+# Подменю: раскладка и текст сообщения, с которым оно стоит. None — текст
+# собирается в момент отправки: у prompts и mod — сама панель раздела, у
+# service — сообщение с версией и цифрами.
+_MENUS = {"api": (API_ROWS, API_CARRIER_TEXT), "prompts": (PROMPTS_ROWS, None),
+          "service": (SERVICE_ROWS, None), "mod": (MOD_ROWS, None)}
+
+_ALL_KEYS = KEYS + API_KEYS + PROMPTS_KEYS + SERVICE_KEYS + MOD_KEYS
 # «💬 Статистика» ушла из панели 18.10.2026; если её кнопка осталась на
 # экране от прежней панели, нажатие — то же, что «🎛 Админ-панель», а не
 # вопрос модели.
@@ -204,6 +225,15 @@ _STATEFUL = {
     "p_mm_info": r"💬 \d+ сообщ\.",
     "p_ctx_info": r"📜 \d+ сообщ\.",
     "s_digest_auto": "📰 Дайджест по понедельникам: .+",
+    "m_guard": "🛡 DDoS-Guard: .+",
+    "m_linkfilter": "🔗 Фильтр ссылок: .+",
+    "m_greet": "👋 Приветствие: .+",
+    "m_captcha": "🤖 «Я не бот»: .+",
+    "m_kick": "👢 Кикать: .+",
+    "m_count_info": r"📨 \d+ сообщ\.",
+    "m_window_info": r"⏱ \d+ сек",
+    "m_mute_info": r"🔇 \d+ сек",
+    "m_time_info": r"⏳ \d+ мин",
 }
 _STATEFUL_RX = {code: re.compile(pattern) for code, pattern in _STATEFUL.items()}
 
@@ -225,6 +255,9 @@ def _shown(label: str, code: str, user_id: int | None = None) -> str:
     if code == "s_digest_auto":
         from .panel_digest import digest_toggle_text
         return digest_toggle_text()
+    if code.startswith("m_") and code in _STATEFUL:
+        from .panel_mod import mod_toggle_text
+        return mod_toggle_text(code[2:].removesuffix("_info"))
     if code in _STATEFUL:
         from .panel_main import api_toggle_text
         return api_toggle_text(code)
@@ -252,9 +285,15 @@ def owner_keyboard(menu: str = "main", user_id: int | None = None) -> ReplyKeybo
     """
     Сама панель, компактная, не сворачивается сама. main — «🎛 Админ-панель»
     во всю ширину, остальные разделы по две кнопки в ряд; api, prompts и
-    service — подменю по своим рядам.
+    service — подменю по своим рядам; у mod последний ряд — «⬅️ Назад», а при
+    уликах рядом с ним «📜 Улики».
     """
-    if menu in _MENUS:
+    if menu == "mod":
+        from .panel_mod import _evidence_buttons
+        last = ((MOD_EVIDENCE_KEY, ("⬅️ Назад", "back")) if _evidence_buttons()
+                else (("⬅️ Назад", "back"),))
+        layout = MOD_ROWS + (last,)
+    elif menu in _MENUS:
         layout = _MENUS[menu][0]
     else:
         layout = [KEYS[:1]] + [KEYS[i:i + 2] for i in range(1, len(KEYS), 2)]
@@ -317,26 +356,31 @@ async def send_owner_keys(bot, chat_id: int, user_id: int | None = None,
     владелец или не личка — ничего не делает. Тихая: панель — удобство, из-за
     неё не должны падать ни /start, ни запуск бота.
 
-    prompts — это САМА ПАНЕЛЬ ПРОМПТОВ с нижними кнопками (18.10.2026): она
-    заменяет открытый раздел так же, как заменяла его прежде через гигиену
-    панелей, — только сама в гигиену не попадает (см. шапку файла).
+    prompts — это САМА ПАНЕЛЬ ПРОМПТОВ с нижними кнопками (18.10.2026), mod —
+    так же сама панель «🛠 DDoS-Guard» (19.10.2026): она заменяет открытый
+    раздел так же, как заменяла его прежде через гигиену панелей, — только
+    сама в гигиену не попадает (см. шапку файла).
     """
     uid = chat_id if user_id is None else user_id
     if not _is_owner_private(chat_id, uid):
         return
     keyboard = owner_keyboard(menu, uid)
-    if menu == "prompts":
-        from .panel_prompts import prompts_panel_text
-        text = prompts_panel_text(uid, getattr(bot, "username", None))
+    if menu in ("prompts", "mod"):
+        if menu == "prompts":
+            from .panel_prompts import prompts_panel_text
+            text = prompts_panel_text(uid, getattr(bot, "username", None))
+        else:
+            from .panel_mod import _build_mod_panel_text_and_keyboard
+            text = _build_mod_panel_text_and_keyboard(uid)[0]
         try:
             await _post(bot, chat_id, text, keyboard)
         except Exception as e:
-            logger.warning("⚠️ Панель промптов с разметкой не ушла: %s — отправляю без разметки", e)
+            logger.warning("⚠️ Панель раздела с разметкой не ушла: %s — отправляю без разметки", e)
             try:
                 await _post(bot, chat_id, re.sub(r"<[^>]+>", "", text)[:4000], keyboard, html=False)
             except Exception as e2:
-                logger.warning("⚠️ Не удалось поставить панель промптов владельцу %s: %s",
-                               chat_id, e2)
+                logger.warning("⚠️ Не удалось поставить панель раздела (%s) владельцу %s: %s",
+                               menu, chat_id, e2)
                 return
         await clean_bot_messages(bot, chat_id)
         return
@@ -444,8 +488,50 @@ async def _run(code: str, context, chat_id: int, user_id: int) -> None:
     elif code == "back":
         await send_owner_keys(bot, chat_id, user_id)
     elif code == "mod":
+        # Панель раздела — сама с нижними кнопками подменю (send_mod_panel у
+        # владельца зовёт send_owner_keys(menu="mod")). Второй раз
+        # send_owner_keys здесь НЕ звать — панель пришла бы дважды.
         from .panel_mod import send_mod_panel
         await send_mod_panel(bot, chat_id, user_id)
+    elif code in ("m_guard", "m_linkfilter", "m_greet", "m_captcha", "m_kick"):
+        from .panel_mod import flip_mod_toggle
+        await _notice(bot, chat_id, flip_mod_toggle(code[2:], user_id))
+        await send_owner_keys(bot, chat_id, user_id, menu="mod")
+    elif code in ("m_count_dec", "m_count_inc", "m_window_dec", "m_window_inc",
+                  "m_mute_dec", "m_mute_inc", "m_time_dec", "m_time_inc"):
+        from .panel_mod import step_mod
+        said = step_mod(code[2:-4], 1 if code.endswith("inc") else -1, user_id)
+        if said is None:
+            # Упёрлись в предел — надписи те же, панель заново не нужна.
+            await _notice(bot, chat_id, "Это крайнее значение.")
+            return
+        await _notice(bot, chat_id, said)
+        await send_owner_keys(bot, chat_id, user_id, menu="mod")
+    elif code in ("m_count_info", "m_window_info", "m_mute_info", "m_time_info"):
+        from .panel_mod import mod_step_info
+        await _notice(bot, chat_id, mod_step_info(code[2:-5]), _INFO_TTL_SEC)
+    elif code == "m_clearlog":
+        # Сначала вопрос: журнал стирается ЦЕЛИКОМ и вместе с уликами. «❗️ Да» —
+        # та же ветка mod:clearlog_yes, что под панелью (у владельца она потом
+        # убирает вопрос и присылает панель заново).
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        sent = await bot.send_message(
+            chat_id=chat_id, parse_mode=ParseMode.HTML,
+            text="🧹 <b>Очистить журнал модерации?</b>\n<i>Сотрутся все записи и "
+                 "улики — вернуть их нельзя.</i>",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❗️ Да, очистить журнал", callback_data="mod:clearlog_yes"),
+                InlineKeyboardButton("Отмена", callback_data="keys:cancel"),
+            ]]))
+        if sent:
+            await register_and_clean_bot_message(bot, chat_id, sent.message_id)
+    elif code == "m_evidence":
+        from .panel_mod import evidence_list_view
+        text, markup = evidence_list_view()
+        sent = await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML,
+                                      reply_markup=markup)
+        if sent:
+            await register_and_clean_bot_message(bot, chat_id, sent.message_id)
     elif code == "users":
         from .panel_users import send_users_panel
         await send_users_panel(bot, chat_id, user_id)
@@ -493,10 +579,11 @@ async def _run(code: str, context, chat_id: int, user_id: int) -> None:
 
 async def handle_keys_callback(query, data: str) -> None:
     """
-    Кнопки под сообщениями нижней панели (router.py, ветка «keys:»). Сейчас
-    одна — «Отмена» у вопроса о перезапуске: вопрос убирается.
+    Кнопки под сообщениями нижней панели (router.py, ветка «keys:»): «Отмена»
+    у вопроса о перезапуске (keys:restart_no) и у вопроса об очистке журнала
+    модерации (keys:cancel, 19.10.2026) — вопрос убирается.
     """
-    if data == "keys:restart_no":
+    if data in ("keys:restart_no", "keys:cancel"):
         await query.answer("Отменено.")
         try:
             await query.message.delete()

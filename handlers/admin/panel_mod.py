@@ -45,7 +45,164 @@ MOD_ACTIONS_WITH_EVIDENCE = ("mute", "linkdel")
 
 
 
-def _build_mod_panel_text_and_keyboard(viewer_id: int = 0):
+# ─────────────────────────────────────────────
+#  Переключатели и регуляторы панели — ОБЩИЕ шаги (2026-10-19)
+#
+#  Кнопки под панелью (ветки ниже) и нижнее подменю владельца «🛠 DDoS-Guard»
+#  (panel_keys.py) переключают одними шагами: настройка, строка лога, журнал
+#  персонала и ответ — одни. Надпись кнопки — тоже одна (mod_toggle_text).
+# ─────────────────────────────────────────────
+
+# Регуляторы: код → ключ настройки (шаг и пределы — services/settings_spec.py,
+# тот же регулятор на сайте), строка лога и запись журнала.
+_MOD_STEPS = {
+    "count":  ("antispam_msg_count",  "🛡 /mod: порог сообщений = %d", "общий порог = {} сообщ."),
+    "window": ("antispam_window_sec", "🛡 /mod: окно засчёта = %d сек", "общее окно = {} сек"),
+    "mute":   ("antispam_mute_sec",   "🛡 /mod: длительность мута = %d сек",
+               "общая длительность мута = {} сек"),
+    "time":   ("greet_timeout_sec",   "👋 /mod: срок проверки «я не бот» = %d сек",
+               "срок проверки = {} сек"),
+}
+
+# Тумблеры приветствия: код кнопки → (ключ в settings, читалка, слова для
+# ответа и журнала).
+def _greet_toggles():
+    from services import greeter
+    return {
+        "greet":   ("greet_enabled", greeter.is_enabled,      "приветствие новичков"),
+        "captcha": ("greet_captcha", greeter.captcha_enabled, "проверка «я не бот»"),
+        "kick":    ("greet_kick",    greeter.kick_enabled,    "кик не прошедших проверку"),
+    }
+
+
+def mod_toggle_text(code: str) -> str:
+    """
+    Надпись переключателя или числа регулятора — одна под панелью и внизу.
+    code: guard | linkfilter | greet | captcha | kick | count | window | mute | time.
+
+    Надписи тумблеров приветствия короче названий в тексте панели (19.10.2026,
+    решение Максима): внизу они стоят по две в ряд. У чисел — свои значки:
+    без них окно и мут оба были бы «… сек», и при равных значениях нижнюю
+    кнопку одного нельзя было бы отличить от другой.
+    """
+    from services.antispam import get_thresholds, is_enabled, is_linkfilter_enabled
+    from services import greeter
+    if code == "guard":
+        return f"🛡 DDoS-Guard: {_onoff(is_enabled())}"
+    if code == "linkfilter":
+        return f"🔗 Фильтр ссылок: {_onoff(is_linkfilter_enabled())}"
+    if code == "greet":
+        return f"👋 Приветствие: {_onoff(greeter.is_enabled())}"
+    if code == "captcha":
+        return f"🤖 «Я не бот»: {_onoff(greeter.captcha_enabled())}"
+    if code == "kick":
+        return f"👢 Кикать: {_onoff(greeter.kick_enabled())}"
+    msg_count, window_sec, mute_sec = get_thresholds()
+    if code == "count":
+        return f"📨 {msg_count} сообщ."
+    if code == "window":
+        return f"⏱ {window_sec} сек"
+    if code == "mute":
+        return f"🔇 {mute_sec} сек"
+    if code == "time":
+        return f"⏳ {max(1, greeter.timeout_sec() // 60)} мин"
+    raise ValueError(f"нет такой кнопки панели модерации: {code}")
+
+
+def flip_mod_toggle(code: str, user_id: int) -> str:
+    """
+    Переключить (code: guard | linkfilter | greet | captcha | kick). Общие
+    настройки на ВСЕ группы — каждая правка попадает в журнал персонала.
+    Возвращает, что сказать.
+    """
+    if code in ("guard", "linkfilter"):
+        from services.antispam import is_enabled, is_linkfilter_enabled
+        key, reader, title = (("antispam_enabled", is_enabled, "антиспам") if code == "guard"
+                              else ("linkfilter_enabled", is_linkfilter_enabled, "фильтр ссылок"))
+        new_val = "0" if reader() else "1"
+        set_setting(key, new_val)
+        state = "включён" if new_val == "1" else "выключен"
+        logger.info("🛡 /mod: %s %s", title, state)
+        _audit(user_id, "antispam", 0, f"{title} {state}")
+        return f"{title.capitalize()} {state}"
+    toggles = _greet_toggles()
+    if code in toggles:
+        key, reader, title = toggles[code]
+        new_val = "0" if reader() else "1"
+        set_setting(key, new_val)
+        state = "включено" if new_val == "1" else "выключено"
+        logger.info("👋 /mod: %s — %s", title, state)
+        _audit(user_id, "greet", 0, f"{title}: {state}")
+        return f"👋 {title.capitalize()}: {state}"
+    raise ValueError(f"нет такого переключателя панели модерации: {code}")
+
+
+def step_mod(code: str, steps: int, user_id: int) -> str | None:
+    """
+    Шаг регулятора (code: count | window | mute | time). Возвращает, что
+    сказать; None — упёрлись в предел и ничего не поменялось.
+    """
+    from services.settings_spec import SPEC, read
+    key, log_line, audit_line = _MOD_STEPS[code]
+    before = read(key)
+    after = _adjust_setting(key, steps)
+    if after == before:
+        return None
+    logger.info(log_line, after)
+    _audit(user_id, "greet" if code == "time" else "antispam", 0, audit_line.format(after))
+    return f"{SPEC[key]['title']}: {mod_toggle_text(code)}"
+
+
+def mod_step_info(code: str) -> str:
+    """Что за число на средней кнопке регулятора — теми же словами, что на сайте."""
+    from services.settings_spec import SPEC
+    key = _MOD_STEPS[code][0]
+    return f"{mod_toggle_text(code)} — {SPEC[key]['title']}: {SPEC[key]['hint']}."
+
+
+def mod_toggles_below(viewer_id: int) -> bool:
+    """
+    Переключатели панели стоят в нижнем подменю владельца (2026-10-19)? Тогда
+    под панелью их нет. Нижние кнопки у владельца есть всегда; у модератора
+    этих кнопок и так нет (они владельческие). full=True — полный вариант для
+    preflight.
+    """
+    from services.roles import is_owner
+    return is_owner(viewer_id)
+
+
+def _evidence_buttons() -> list:
+    """Кнопки «📜» улик у последних действий: у мутов за флуд и удалённых ссылок."""
+    from services.antispam import get_recent_actions
+    buttons = []
+    for a in get_recent_actions(5):
+        if a["action"] in MOD_ACTIONS_WITH_EVIDENCE and a.get("id"):
+            t = _fmt_mod_time(a["ts"])
+            nm = (a.get("name") or str(a["user_id"]))[:24]
+            buttons.append(InlineKeyboardButton(f"📜 {t} {nm}"[:30],
+                                                callback_data=f"mod:evidence:{a['id']}"))
+    return buttons
+
+
+def evidence_list_view():
+    """
+    Список улик для владельца — отдельным сообщением с нижней кнопки «📜 Улики»
+    (2026-10-19): у его панели кнопок под сообщением нет, на ней держатся
+    нижние. С экрана улики «⬅️ Назад к панели» возвращает сюда.
+    """
+    from services.antispam import MOD_STATS_DAYS
+    buttons = _evidence_buttons()
+    text = ("📜 <b>Улики</b>\n"
+            "───────────────────────────\n")
+    if buttons:
+        text += ("Удалённые сообщения за последние муты и ссылки — нажми, чтобы "
+                 f"посмотреть.\n<i>Хранится {MOD_STATS_DAYS} дней.</i>")
+    else:
+        text += "<i>Среди последних действий улик нет.</i>"
+    return text, InlineKeyboardMarkup([buttons[i:i + 2] for i in range(0, len(buttons), 2)])
+
+
+def _build_mod_panel_text_and_keyboard(viewer_id: int = 0, full: bool = False):
     """
     Текст + клавиатура панели модерации. Читает живые настройки из settings.
 
@@ -54,6 +211,11 @@ def _build_mod_panel_text_and_keyboard(viewer_id: int = 0):
     (команда /mod и кнопка из /adm) и четыре перерисовки; забыть передать viewer_id хотя
     бы в одном означает, что кнопка пропадёт у владельца после первого же
     нажатия ➖/➕.
+
+    ⚠️ У ВЛАДЕЛЬЦА ПЕРЕКЛЮЧАТЕЛЕЙ ПОД ПАНЕЛЬЮ НЕТ (2026-10-19, решение
+    Максима): они в нижнем подменю «🛠 DDoS-Guard» (panel_keys.py), под
+    панелью — только кнопки улик. full=True — полный вариант: его меряет
+    preflight. Надписи — mod_toggle_text, одни с нижними.
     """
     from services.antispam import (is_enabled, is_linkfilter_enabled, get_thresholds, get_mute_stats,
                                    get_recent_actions, linkfilter_window_text, MOD_STATS_DAYS)
@@ -111,7 +273,6 @@ def _build_mod_panel_text_and_keyboard(viewer_id: int = 0):
                  f"⛔ банов: <b>{stats.get('bans', 0)}</b>\n")
 
     recent = get_recent_actions(5)
-    evidence_buttons = []
     if recent:
         lines = []
         for a in recent:
@@ -129,57 +290,50 @@ def _build_mod_panel_text_and_keyboard(viewer_id: int = 0):
                 word = "снял" if action in ("unmute", "unban") else "админ"
                 line += f" ({word}: {html.escape(adm[:24])})"
             lines.append(line)
-            # Кнопка просмотра удалённого — для мутов и ссылок (у них есть улики).
-            if action in MOD_ACTIONS_WITH_EVIDENCE and a.get("id"):
-                evidence_buttons.append(
-                    InlineKeyboardButton(f"📜 {t} {nm}"[:30],
-                                         callback_data=f"mod:evidence:{a['id']}")
-                )
         text += "\n<b>Последние действия:</b>\n" + "\n".join(lines) + "\n"
 
     text += "\n<i>Настройки общие для всех групп, где бот — админ.</i>"
 
+    # Кнопка просмотра удалённого — для мутов и ссылок (у них есть улики),
+    # по 2 в ряд.
+    evidence_buttons = _evidence_buttons()
+    evidence_rows = [evidence_buttons[i:i + 2] for i in range(0, len(evidence_buttons), 2)]
+    if not full and mod_toggles_below(viewer_id):
+        return text, InlineKeyboardMarkup(evidence_rows)
+
     # Кнопки показывают СОСТОЯНИЕ (метка — общий _onoff), а не действие:
     # прежние «🔴 Выключить антиспам» читались наоборот — красный кружок при
     # РАБОТАЮЩЕЙ защите (переделано 2026-07-20).
-    toggle_label = f"🛡 DDoS-Guard: {_onoff(enabled)}"
-    lf_label = f"🔗 Фильтр ссылок: {_onoff(lf_enabled)}"
     keyboard = [
-        [InlineKeyboardButton(toggle_label, callback_data="mod:antispam:toggle")],
-        [InlineKeyboardButton(lf_label, callback_data="mod:antispam:linkfilter_toggle")],
+        [InlineKeyboardButton(mod_toggle_text("guard"), callback_data="mod:antispam:toggle")],
+        [InlineKeyboardButton(mod_toggle_text("linkfilter"),
+                              callback_data="mod:antispam:linkfilter_toggle")],
         [
             InlineKeyboardButton("➖ сообщ.", callback_data="mod:antispam:count_dec"),
-            InlineKeyboardButton(f"{msg_count} сообщ.", callback_data="mod:antispam:noop"),
+            InlineKeyboardButton(mod_toggle_text("count"), callback_data="mod:antispam:noop"),
             InlineKeyboardButton("➕ сообщ.", callback_data="mod:antispam:count_inc"),
         ],
         [
             InlineKeyboardButton("➖ окно", callback_data="mod:antispam:window_dec"),
-            InlineKeyboardButton(f"{window_sec} сек", callback_data="mod:antispam:noop"),
+            InlineKeyboardButton(mod_toggle_text("window"), callback_data="mod:antispam:noop"),
             InlineKeyboardButton("➕ окно", callback_data="mod:antispam:window_inc"),
         ],
         [
             InlineKeyboardButton("➖ мут", callback_data="mod:antispam:mute_dec"),
-            InlineKeyboardButton(f"{mute_sec} сек", callback_data="mod:antispam:noop"),
+            InlineKeyboardButton(mod_toggle_text("mute"), callback_data="mod:antispam:noop"),
             InlineKeyboardButton("➕ мут", callback_data="mod:antispam:mute_inc"),
         ],
-        # 👋 Приветствие новичков. Свои ряды у каждого тумблера: надписи
-        # длинные, в половину ширины не влезают (то же правило, что у
-        # «⬇️ ОБНОВЛЕНИЕ» и «🧠 МЫСЛИ ПОД КАПОТОМ»).
-        [InlineKeyboardButton(f"👋 Приветствие новичков: {_onoff(greet_on)}",
-                              callback_data="mod:greet:toggle")],
-        [InlineKeyboardButton(f"🤖 Проверка «я не бот»: {_onoff(greet_captcha)}",
-                              callback_data="mod:greet:captcha")],
+        # 👋 Приветствие новичков. Свои ряды у каждого тумблера (внизу у
+        # владельца — по два, с короткими надписями).
+        [InlineKeyboardButton(mod_toggle_text("greet"), callback_data="mod:greet:toggle")],
+        [InlineKeyboardButton(mod_toggle_text("captcha"), callback_data="mod:greet:captcha")],
         [
             InlineKeyboardButton("➖ срок", callback_data="mod:greet:time_dec"),
-            InlineKeyboardButton(f"{greet_min} мин", callback_data="mod:greet:noop"),
+            InlineKeyboardButton(mod_toggle_text("time"), callback_data="mod:greet:noop"),
             InlineKeyboardButton("➕ срок", callback_data="mod:greet:time_inc"),
         ],
-        [InlineKeyboardButton(f"👢 Кикать не прошедших: {_onoff(greet_kick)}",
-                              callback_data="mod:greet:kick")],
-    ]
-    # Ряды кнопок просмотра удалённого (по 2 в ряд), если есть недавние муты.
-    for i in range(0, len(evidence_buttons), 2):
-        keyboard.append(evidence_buttons[i:i + 2])
+        [InlineKeyboardButton(mod_toggle_text("kick"), callback_data="mod:greet:kick")],
+    ] + evidence_rows
 
     # Очистка журнала — надзорный инструмент: модератор не должен иметь
     # возможности стереть записи о собственных действиях. Уровень владельца
@@ -267,6 +421,18 @@ async def _handle_clearlog_callback(query, confirmed: bool, user_id: int):
     _audit(user_id, "modlog_clear", 0, f"журнал модерации: {deleted} записей")
     await query.answer(f"🧹 Журнал модерации очищен: {deleted} записей.", show_alert=True)
 
+    chat = getattr(query.message, "chat", None)
+    if chat is not None and chat.id == user_id and mod_toggles_below(user_id):
+        # Владелец спрашивал с нижней кнопки (19.10.2026): вопрос — отдельным
+        # сообщением, панель держит нижние кнопки. Вопрос убираем, панель
+        # присылаем заново — с обнулёнными цифрами журнала.
+        try:
+            await query.message.delete()
+        except Exception as e:
+            logger.debug("🛡 Не удалось убрать вопрос об очистке журнала: %s", e)
+        await send_mod_panel(query.get_bot(), user_id, user_id)
+        return
+
     text, markup = _build_mod_panel_text_and_keyboard(user_id)
     try:
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
@@ -285,36 +451,14 @@ async def _handle_antispam_callback(update, query, parts):
         await query.answer()
         return
 
-    if action == "toggle":
-        from services.antispam import is_enabled
-        new_val = "0" if is_enabled() else "1"
-        set_setting("antispam_enabled", new_val)
-        state = "включён" if new_val == "1" else "выключен"
-        logger.info("🛡 /mod: антиспам %s", state)
-        _audit(actor_id, "antispam", 0, f"антиспам {state}")
-        await query.answer(f"Антиспам {state}", show_alert=False)
-    elif action == "linkfilter_toggle":
-        from services.antispam import is_linkfilter_enabled
-        new_val = "0" if is_linkfilter_enabled() else "1"
-        set_setting("linkfilter_enabled", new_val)
-        state = "включён" if new_val == "1" else "выключен"
-        logger.info("🛡 /mod: фильтр ссылок %s", state)
-        _audit(actor_id, "antispam", 0, f"фильтр ссылок {state}")
-        await query.answer(f"Фильтр ссылок {state}", show_alert=False)
-    elif action in ("count_inc", "count_dec"):
-        new_count = _adjust_setting("antispam_msg_count", 1 if action.endswith("inc") else -1)
-        logger.info("🛡 /mod: порог сообщений = %d", new_count)
-        _audit(actor_id, "antispam", 0, f"общий порог = {new_count} сообщ.")
-        await query.answer()
-    elif action in ("window_inc", "window_dec"):
-        new_window = _adjust_setting("antispam_window_sec", 1 if action.endswith("inc") else -1)
-        logger.info("🛡 /mod: окно засчёта = %d сек", new_window)
-        _audit(actor_id, "antispam", 0, f"общее окно = {new_window} сек")
-        await query.answer()
-    elif action in ("mute_inc", "mute_dec"):
-        new_mute = _adjust_setting("antispam_mute_sec", 1 if action.endswith("inc") else -1)
-        logger.info("🛡 /mod: длительность мута = %d сек", new_mute)
-        _audit(actor_id, "antispam", 0, f"общая длительность мута = {new_mute} сек")
+    # Тумблеры и регуляторы — общие шаги с нижним подменю владельца
+    # (flip_mod_toggle / step_mod выше).
+    if action in ("toggle", "linkfilter_toggle"):
+        await query.answer(flip_mod_toggle("guard" if action == "toggle" else "linkfilter",
+                                           actor_id), show_alert=False)
+    elif action in ("count_inc", "count_dec", "window_inc", "window_dec",
+                    "mute_inc", "mute_dec"):
+        step_mod(action[:-4], 1 if action.endswith("inc") else -1, actor_id)
         await query.answer()
     else:
         await query.answer()
@@ -346,33 +490,19 @@ async def _handle_greet_callback(query, parts):
         await query.answer()
         return
 
-    # Тумблеры: ключ в settings, читалка состояния и слова для попапа/журнала.
-    toggles = {
-        "toggle":  ("greet_enabled", greeter.is_enabled,      "приветствие новичков"),
-        "captcha": ("greet_captcha", greeter.captcha_enabled, "проверка «я не бот»"),
-        "kick":    ("greet_kick",    greeter.kick_enabled,    "кик не прошедших проверку"),
-    }
-
-    if action in toggles:
-        key, reader, title = toggles[action]
-        new_val = "0" if reader() else "1"
-        set_setting(key, new_val)
-        state = "включено" if new_val == "1" else "выключено"
-        logger.info("👋 /mod: %s — %s", title, state)
-        _audit(actor_id, "greet", 0, f"{title}: {state}")
-        await query.answer(f"👋 {title.capitalize()}: {state}", show_alert=False)
+    # Тумблеры и срок — общие шаги с нижним подменю владельца (flip_mod_toggle
+    # / step_mod выше). «toggle» под панелью — это «greet» у общего шага.
+    if action in ("toggle", "captcha", "kick"):
+        await query.answer(flip_mod_toggle("greet" if action == "toggle" else action, actor_id),
+                           show_alert=False)
     elif action in ("time_inc", "time_dec"):
         before = greeter.timeout_sec()
-        after = _adjust_setting("greet_timeout_sec",
-                                1 if action.endswith("inc") else -1)
-        if after == before:
+        if step_mod("time", 1 if action.endswith("inc") else -1, actor_id) is None:
             # Упёрлись в границу: панель получилась бы точь-в-точь прежней, а
             # Telegram на такую перерисовку отвечает ошибкой «Message is not
             # modified» — кнопка выглядела бы мёртвой, а в логе копился шум.
             await query.answer(f"Уже {max(1, before // 60)} мин — дальше некуда.")
             return
-        logger.info("👋 /mod: срок проверки «я не бот» = %d сек", after)
-        _audit(actor_id, "greet", 0, f"срок проверки = {after} сек")
         await query.answer()
     else:
         await query.answer()
@@ -432,9 +562,14 @@ async def _handle_evidence_callback(update, query, parts):
     """
     action = parts[2] if len(parts) > 2 else ""
 
-    # Возврат к панели (сюда же ведёт «Отмена» подтверждения очистки журнала)
+    # Возврат к панели (сюда же ведёт «Отмена» подтверждения очистки журнала).
+    # У владельца — к списку улик (2026-10-19): экран улики открыт из него, а
+    # сама панель держит нижние кнопки и стоит отдельным сообщением.
     if action == "back":
-        text, markup = _build_mod_panel_text_and_keyboard(query.from_user.id)
+        if mod_toggles_below(query.from_user.id):
+            text, markup = evidence_list_view()
+        else:
+            text, markup = _build_mod_panel_text_and_keyboard(query.from_user.id)
         try:
             await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
         except Exception as e:
@@ -500,8 +635,19 @@ async def send_mod_panel(bot, chat_id: int, viewer_id: int | None = None):
 
     viewer_id по умолчанию равен chat_id: панель открывается только в личке,
     где это одно и то же число (так же сделано в /adm и /users).
+
+    ⚠️ У ВЛАДЕЛЬЦА В ЛИЧКЕ ПАНЕЛЬ — ЭТО СООБЩЕНИЕ НИЖНЕГО ПОДМЕНЮ (2026-10-19,
+    решение Максима, как у «⚙️ PROMPTы»): к тексту панели прикреплены нижние
+    кнопки «🛠 DDoS-Guard» (panel_keys.send_owner_keys(menu="mod")), прежнее
+    такое сообщение удаляется, в гигиену панелей оно НЕ попадает — иначе
+    первый же раздел стёр бы его вместе с кнопками.
     """
-    text, markup = _build_mod_panel_text_and_keyboard(chat_id if viewer_id is None else viewer_id)
+    viewer = chat_id if viewer_id is None else viewer_id
+    if chat_id == viewer and mod_toggles_below(viewer):
+        from .panel_keys import send_owner_keys
+        await send_owner_keys(bot, chat_id, viewer, menu="mod")
+        return
+    text, markup = _build_mod_panel_text_and_keyboard(viewer)
     sent_msg = await bot.send_message(
         chat_id=chat_id, text=text, parse_mode=ParseMode.HTML, reply_markup=markup
     )

@@ -9935,6 +9935,10 @@ def check_owner_keys():
     from services import group_digest
     saved_dig = hist.get_setting(group_digest.ENABLED_KEY, "")
     saved_svc = (pd.send_digest_panel, pu.send_updates_panel, pm.send_db_backup, pm.get_bot_stats)
+    MOD_KEYS_DB = ("antispam_enabled", "linkfilter_enabled", "antispam_msg_count",
+                   "antispam_window_sec", "antispam_mute_sec", "greet_enabled", "greet_captcha",
+                   "greet_kick", "greet_timeout_sec")
+    saved_mod = {k: hist.get_setting(k, "") for k in MOD_KEYS_DB}
     targets = {
         "adm": (pm, "send_adm_panel"), "stats": (pm, "send_stats_panel"),
         "prompts": (pp, "send_prompts_panel"), "api": (pm, "send_api_panel"),
@@ -10801,7 +10805,209 @@ def check_owner_keys():
             bot, gone, _ = press(uid, "💾 Копия базы")
             expect(f"«💾 Копия базы» от {title} перехвачена — а это обычный вопрос модели",
                    not calls and asked == ["💾 Копия базы"])
+
+        # ═══ 11. Подменю «🛠 DDoS-Guard» (19.10.2026) ═══
+        # Как у PROMPTы: панель с нижними кнопками — одно сообщение, под ним
+        # кнопок нет; каждая нижняя — тот же шаг, что кнопка под панелью;
+        # «📜 Улики» — только когда они есть; очистка журнала спрашивает.
+        for k, v in (("antispam_enabled", "1"), ("linkfilter_enabled", "1"),
+                     ("antispam_msg_count", "4"), ("antispam_window_sec", "60"),
+                     ("antispam_mute_sec", "300"), ("greet_enabled", "1"),
+                     ("greet_captcha", "1"), ("greet_kick", "1"), ("greet_timeout_sec", "300")):
+            hist.set_setting(k, v)
+        hist.clear_moderation_log()
+        WANT_MOD = [["🛡 DDoS-Guard: 🟢ВКЛ", "🔗 Фильтр ссылок: 🟢ВКЛ"],
+                    ["➖ сообщ.", "📨 4 сообщ.", "➕ сообщ."],
+                    ["➖ окно", "⏱ 60 сек", "➕ окно"],
+                    ["➖ мут", "🔇 300 сек", "➕ мут"],
+                    ["👋 Приветствие: 🟢ВКЛ", "🤖 «Я не бот»: 🟢ВКЛ"],
+                    ["➖ срок", "⏳ 5 мин", "➕ срок"],
+                    ["👢 Кикать: 🟢ВКЛ", "🧹 Очистить журнал"], ["⬅️ Назад"]]
+        mkb = pk.owner_keyboard("mod", OWNER)
+        expect(f"подменю «DDoS-Guard»: надписи или ряды не те: {rows_of(mkb)}",
+               rows_of(mkb) == WANT_MOD)
+        expect("подменю «DDoS-Guard» не компактное или сворачивается само",
+               mkb.resize_keyboard is True and mkb.is_persistent is True)
+        seen = {}
+        clash = [label for label, code in pk.KEYS + pk.API_KEYS + pk.PROMPTS_KEYS
+                 + pk.SERVICE_KEYS + pk.MOD_KEYS if seen.setdefault(label, code) != code]
+        expect(f"одна надпись у двух разных нижних кнопок: {clash}", not clash)
+        full_mod = panel_mod._build_mod_panel_text_and_keyboard(OWNER, full=True)[1]
+        full_texts = [b.text for row in full_mod.inline_keyboard for b in row]
+        for label in sum(WANT_MOD[:-1], []):
+            if label.startswith(("➖", "➕")) or label == "🧹 Очистить журнал":
+                continue
+            expect(f"«{label}» внизу есть, а под панелью — другая надпись", label in full_texts)
+        for label in sum(WANT_MOD, []):
+            expect(f"нижняя «{label}» не узнаётся — нажатие ушло бы модели",
+                   pk._code_of(label) is not None)
+        hist.set_setting("antispam_mute_sec", "60")      # окно и мут — по 60 сек
+        expect("при равных окне и муте их числа внизу не различить",
+               pk._code_of("⏱ 60 сек") == "m_window_info"
+               and pk._code_of("🔇 60 сек") == "m_mute_info")
+        hist.set_setting("antispam_mute_sec", "300")
+        for text_, code in (("📨 9 сообщ.", "m_count_info"), ("💬 9 сообщ.", "p_mm_info"),
+                            ("🛡 DDoS-Guard: 🔴ВЫКЛ", "m_guard"), ("🛠 DDoS-Guard", "mod")):
+            expect(f"«{text_}» узнаётся как «{pk._code_of(text_)}», а не «{code}»",
+                   pk._code_of(text_) == code)
+
+        # Вход: панель с текстом раздела и нижними кнопками — одно сообщение.
+        hist.set_setting(SLOT, "555")
+        bot = Bot(start_id=1800)
+        asyncio.run(reg(bot, OWNER, 4747))           # открытый раздел — через гигиену
+        bot.events.clear()
+        asyncio.run(saved_targets["mod"](bot, OWNER, OWNER))
+        sent = [e for e in bot.events if e[0] == "send"]
+        expect(f"«🛠 DDoS-Guard» владельца — не одно сообщение с текстом раздела и подменю "
+               f"внизу: {[(e[2][:30], type(e[3]).__name__) for e in sent]}",
+               len(sent) == 1 and isinstance(sent[0][3], ReplyKeyboardMarkup)
+               and "НАСТРОЙКИ —🛡DDoS-Guard" in sent[0][2] and rows_of(sent[0][3]) == WANT_MOD)
+        expect("«🛠 DDoS-Guard» не убрала прежнее сообщение с нижними кнопками и открытый раздел",
+               ("delete", OWNER, 555) in bot.events and ("delete", OWNER, 4747) in bot.events)
+        mtext, mmarkup = panel_mod._build_mod_panel_text_and_keyboard(OWNER)
+        expect(f"у владельца под панелью DDoS-Guard остались кнопки: {datas_of(mmarkup)}",
+               datas_of(mmarkup) == [])
+        expect("полный вариант панели DDoS-Guard (его меряет preflight) потерял кнопки",
+               {"mod:antispam:toggle", "mod:greet:kick", "mod:clearlog", "adm_back"}
+               <= set(datas_of(full_mod)))
+        bot = Bot()
+        asyncio.run(saved_targets["mod"](bot, MOD, MOD))
+        msent = [e for e in bot.events if e[0] == "send"]
+        expect("у модератора панель DDoS-Guard ушла в нижние кнопки или потеряла возврат",
+               not keyboards(bot) and bool(msent) and "adm_back" in datas_of(msent[-1][3])
+               and "mod:antispam:toggle" not in datas_of(msent[-1][3]))
+        bot, gone, _ = press(OWNER, "🛠 DDoS-Guard")
+        expect("нижняя «🛠 DDoS-Guard» не открыла раздел", opened == ["mod"] and not asked)
+
+        # Переключатели: та же настройка и тот же код журнала, надпись следует,
+        # прежняя надпись работает.
+        for label_on, key, audit, label_off in (
+                ("🛡 DDoS-Guard: 🟢ВКЛ", "antispam_enabled", "antispam", "🛡 DDoS-Guard: 🔴ВЫКЛ"),
+                ("🔗 Фильтр ссылок: 🟢ВКЛ", "linkfilter_enabled", "antispam",
+                 "🔗 Фильтр ссылок: 🔴ВЫКЛ"),
+                ("👋 Приветствие: 🟢ВКЛ", "greet_enabled", "greet", "👋 Приветствие: 🔴ВЫКЛ"),
+                ("🤖 «Я не бот»: 🟢ВКЛ", "greet_captcha", "greet", "🤖 «Я не бот»: 🔴ВЫКЛ"),
+                ("👢 Кикать: 🟢ВКЛ", "greet_kick", "greet", "👢 Кикать: 🔴ВЫКЛ")):
+            bot, gone, _ = press(OWNER, label_on)
+            rows, text, _ = last_keys(bot)
+            expect(f"нижняя «{label_on}» не выключила свою настройку или ушла модели",
+                   hist.get_setting(key, "") == "0" and not asked and bool(gone))
+            expect(f"после «{label_on}» панель не пришла заново с новой надписью: {rows}",
+                   bool(rows) and label_off in sum(rows, []) and "DDoS-Guard" in text)
+            expect(f"после «{label_on}» нет короткого ответа, что произошло", bool(notices(bot)))
+            last = hist.get_recent_staff_actions(1)
+            expect(f"нижняя «{label_on}» не записана в журнал персонала кодом «{audit}»",
+                   bool(last) and last[0].get("action") == audit)
+            press(OWNER, label_on)                   # прежняя надпись на экране
+            expect(f"нажатие «{label_on}» с прежней надписью не вернуло настройку",
+                   hist.get_setting(key, "") == "1" and not asked)
+
+        # Регуляторы: шаг, край и пояснение.
+        from services.settings_spec import SPEC as _MSPEC
+        for plus, minus, key, before, after, label_after in (
+                ("➕ сообщ.", "➖ сообщ.", "antispam_msg_count", "4", "5", "📨 5 сообщ."),
+                ("➕ мут", "➖ мут", "antispam_mute_sec", "300", "360", "🔇 360 сек"),
+                ("➕ срок", "➖ срок", "greet_timeout_sec", "300", "360", "⏳ 6 мин")):
+            bot, gone, _ = press(OWNER, plus)
+            rows, _, _ = last_keys(bot)
+            expect(f"нижний «{plus}» не прибавил шаг или надпись не следует: {rows}",
+                   hist.get_setting(key, "") == after and bool(rows)
+                   and label_after in sum(rows, []) and not asked)
+            press(OWNER, minus)
+            expect(f"нижний «{minus}» не убавил шаг", hist.get_setting(key, "") == before)
+        bot, gone, _ = press(OWNER, "➕ окно")           # окно уже на верхнем пределе (60)
+        expect("«➕ окно» на пределе: не сказано «крайнее значение» или прислана панель "
+               "«в то же самое»", hist.get_setting("antispam_window_sec", "") == "60"
+               and not keyboards(bot) and notices(bot) == ["Это крайнее значение."])
+        for label, key in (("📨 9 сообщ.", "antispam_msg_count"), ("⏱ 45 сек", "antispam_window_sec"),
+                           ("🔇 600 сек", "antispam_mute_sec"), ("⏳ 2 мин", "greet_timeout_sec")):
+            bot, gone, _ = press(OWNER, label)       # прежнее число на экране
+            said = notices(bot)
+            expect(f"средняя «{label}» не пояснила словами сайта, что это за число, или что-то "
+                   f"поменяла: {said}",
+                   len(said) == 1 and _MSPEC[key]["hint"] in said[0] and not keyboards(bot)
+                   and hist.get_setting("antispam_msg_count", "") == "4" and not asked)
+
+        # Очистка журнала: сначала вопрос; «Да» — та же ветка, после неё панель заново.
+        hist.log_moderation_action("mute", -100777060, 777060050, "Флудер")
+        bot, gone, _ = press(OWNER, "🧹 Очистить журнал")
+        ask = [e for e in bot.events if e[0] == "send" and hasattr(e[3], "inline_keyboard")]
+        expect(f"нижняя «🧹 Очистить журнал» не спросила «Да / Отмена»: "
+               f"{[datas_of(e[3]) for e in ask]}",
+               len(ask) == 1 and datas_of(ask[0][3]) == ["mod:clearlog_yes", "keys:cancel"]
+               and hist.get_recent_moderation_actions(5))
+        expect("«Да» и «Отмена» у вопроса об очистке журнала может нажать не только владелец",
+               _perm("mod:clearlog_yes") == "owner" and _perm("keys:cancel") == "owner")
+        cancelled.clear()
+        asyncio.run(pk.handle_keys_callback(query, "keys:cancel"))
+        expect("«Отмена» у вопроса об очистке журнала не убрала вопрос",
+               cancelled == ["answer", "delete"])
+        answers = []
+
+        async def _qa(text=None, **kw):
+            answers.append(text)
+
+        async def _qdel():
+            answers.append("delete")
+        mq = types.SimpleNamespace(answer=_qa, get_bot=lambda: qbot, from_user=types.SimpleNamespace(id=OWNER),
+                                   message=types.SimpleNamespace(chat=types.SimpleNamespace(id=OWNER),
+                                                                 delete=_qdel))
+        qbot = Bot(start_id=1900)
+        panel_mod.send_mod_panel = saved_targets["mod"]
+        asyncio.run(panel_mod._handle_clearlog_callback(mq, True, OWNER))
+        expect("«Да» у вопроса об очистке журнала не стёрло журнал, не убрало вопрос или не "
+               "прислало панель заново",
+               not hist.get_recent_moderation_actions(5) and "delete" in answers
+               and len(keyboards(qbot)) == 1 and "DDoS-Guard" in keyboards(qbot)[0][2])
+        panel_mod.send_mod_panel = recorder("mod")
+
+        # «📜 Улики» — только при уликах; список и возврат к нему.
+        expect("улик нет, а внизу «📜 Улики»",
+               "📜 Улики" not in sum(rows_of(pk.owner_keyboard("mod", OWNER)), []))
+        log_id = hist.log_moderation_action("mute", -100777060, 777060050, "Флудер")
+        hist.save_mute_evidence(log_id, [{"text": "спам спам", "has_photo": False}])
+        last_row = rows_of(pk.owner_keyboard("mod", OWNER))[-1]
+        expect(f"улики есть, а последнего ряда «📜 Улики» и «⬅️ Назад» нет: {last_row}",
+               last_row == ["📜 Улики", "⬅️ Назад"])
+        bot, gone, _ = press(OWNER, "📜 Улики")
+        lists = [e for e in bot.events if e[0] == "send" and hasattr(e[3], "inline_keyboard")]
+        expect("нижняя «📜 Улики» не прислала список с кнопкой улики",
+               bool(lists) and f"mod:evidence:{log_id}" in datas_of(lists[-1][3]) and not asked)
+        edited = []
+
+        async def _qedit(text, **kw):
+            edited.append((text, kw.get("reply_markup")))
+
+        async def _qans(*a, **kw):
+            return None
+        eq = types.SimpleNamespace(answer=_qans, edit_message_text=_qedit,
+                                   from_user=types.SimpleNamespace(id=OWNER))
+        asyncio.run(panel_mod._handle_evidence_callback(None, eq, ["mod", "evidence", "back"]))
+        expect("с экрана улики владельца «⬅️ Назад к панели» вернул не к списку улик",
+               bool(edited) and f"mod:evidence:{log_id}" in datas_of(edited[-1][1])
+               and "Улики" in edited[-1][0])
+        eq.from_user = types.SimpleNamespace(id=MOD)
+        asyncio.run(panel_mod._handle_evidence_callback(None, eq, ["mod", "evidence", "back"]))
+        expect("у модератора «⬅️ Назад к панели» с улики вернул не к панели",
+               "DDoS-Guard" in edited[-1][0] and "adm_back" in datas_of(edited[-1][1]))
+        hist.clear_moderation_log()
+
+        # Кнопки под панелью — тем же шагом; чужой такой же текст — модели.
+        mod_src = inspect.getsource(panel_mod._handle_antispam_callback)
+        greet_src = inspect.getsource(panel_mod._handle_greet_callback)
+        expect("кнопки DDoS-Guard под панелью переключают не общими шагами с нижним подменю",
+               "flip_mod_toggle(" in mod_src and "step_mod(" in mod_src
+               and "flip_mod_toggle(" in greet_src and "step_mod(" in greet_src)
+        for title, uid in (("постороннего", PLAIN), ("модератора", MOD)):
+            bot, gone, _ = press(uid, "🛡 DDoS-Guard: 🟢ВКЛ")
+            expect(f"«🛡 DDoS-Guard» от {title} перехвачена — а это обычный вопрос модели",
+                   asked == ["🛡 DDoS-Guard: 🟢ВКЛ"] and hist.get_setting("antispam_enabled", "") == "1")
     finally:
+        for k, v in saved_mod.items():
+            if v == "":
+                hist.delete_setting(k)
+            else:
+                hist.set_setting(k, v)
         pd.send_digest_panel, pu.send_updates_panel, pm.send_db_backup, pm.get_bot_stats = saved_svc
         if saved_dig == "":
             hist.delete_setting(group_digest.ENABLED_KEY)
@@ -10828,6 +11034,8 @@ def check_owner_keys():
                       f"сообщение с версией, раздел убирает, а сам в уборку панелей не "
                       f"попадает; подменю «Настройки API» — "
                       f"те же переключатели и надписи, что под панелью, а под панелью их нет; "
+                      f"подменю «DDoS-Guard» — одно сообщение с панелью, те же шаги, улики "
+                      f"и вопрос перед очисткой журнала; "
                       f"«🎛 Админ-панель» — это и статистика: цифры в сообщении с версией, "
                       f"кнопки статистики внизу; "
                       f"подменю «PROMPTы» — так же, с объявлением группам у «Сам в разговор», "

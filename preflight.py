@@ -514,7 +514,9 @@ def check_panels():
         # а мерить надо самый полный вариант.
         "промпты": lambda: _build_prompt_panel_text_and_keyboard(owner, "c4max_bot", full=True),
         "итоги участия": _build_proactive_stats_panel,
-        "модерация": lambda: _build_mod_panel_text_and_keyboard(owner),
+        # full=True: у владельца переключатели DDoS-Guard внизу (19.10.2026),
+        # а мерить надо самый полный вариант.
+        "модерация": lambda: _build_mod_panel_text_and_keyboard(owner, full=True),
         "список пользователей": lambda: _build_users_panel(owner, 999),
         "журнал персонала": _build_staff_log_panel,
         # ⬇️ Список записей обращений (21.09.2026): кнопок столько, сколько
