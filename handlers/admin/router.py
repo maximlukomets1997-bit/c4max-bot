@@ -28,7 +28,7 @@ from .common import (_LOG_FILE_TTL, _TG_FILE_MAX, _adm_back_row, _audit,
                      _read_current_log, _read_file_bytes)
 from .panel_balance import _handle_balance_callback
 from .panel_digest import _handle_digest_callback
-from .panel_main import (_build_api_keyboard,
+from .panel_main import (BATCH_INFO_TEXT, _build_api_keyboard, flip_api_toggle, step_batch,
                          send_adm_panel, send_api_panel,
                          send_daily_report_panel, send_weekly_report_panel,
                          send_stats_panel)
@@ -722,18 +722,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         # «Сам в разговор»; применяется в utils_format.build_text_and_entities.
         # ⚠️ Модели при этом продолжают думать: тумблер про ПОКАЗ, а не про
         # расход токенов — обещать здесь экономию нельзя.
-        from utils_format import THOUGHTS_SETTING_KEY, thoughts_enabled
-        cur_on = thoughts_enabled()
-        new_val = "0" if cur_on else "1"
-        set_setting(THOUGHTS_SETTING_KEY, new_val)
-        state = "показываются" if new_val == "1" else "скрыты"
-        logger.info("🔧 Админ %s: мысли под капотом %s (для всех)", user_id, state)
-        _audit(user_id, "thoughts", 0, f"мысли под капотом {state}")
-        await query.answer(
-            f"🧠 Мысли под капотом {state}."
-            + ("" if new_val == "1" else " Модели всё равно думают — прячется только цитата."),
-            show_alert=True,
-        )
+        # Шаг — общий с нижним подменю владельца (panel_main.flip_api_toggle).
+        await query.answer(flip_api_toggle("thoughts", user_id), show_alert=True)
         try:
             # Кнопка живёт в панели «📡 Настройки API» (переехала туда
             # 2026-08-04) — перерисовываем ЕЁ клавиатуру, а не панели промптов.
@@ -748,18 +738,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         # сообщения (services/live_answer.py). Один на личку и группы. Тот же
         # выключатель, что на странице настроек сайта, и тот же код
         # журнала — правка называется одинаково, где бы её ни сделали.
-        from services.live_answer import SETTING_KEY, live_answer_enabled
-        new_val = "0" if live_answer_enabled() else "1"
-        set_setting(SETTING_KEY, new_val)
-        state = "включён" if new_val == "1" else "выключен"
-        logger.info("🔧 Админ %s: ответ на глазах %s", user_id, state)
-        _audit(user_id, "live_answer", 0, f"ответ на глазах {state}")
-        await query.answer(
-            "✍️ Ответ на глазах включён: в личке и в группах ответ дописывается по ходу."
-            if new_val == "1" else
-            "✍️ Ответ на глазах выключен: везде снова «печатает…» и готовый ответ.",
-            show_alert=True,
-        )
+        # Шаг — общий с нижним подменю владельца (panel_main.flip_api_toggle).
+        await query.answer(flip_api_toggle("live_answer", user_id), show_alert=True)
         try:
             await query.edit_message_reply_markup(reply_markup=_build_api_keyboard(user_id))
         except Exception as e:
@@ -801,19 +781,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         # Тумблер «🧠 МЫСЛИ В ЧЕРНОВИКЕ» (2026-10-14, решение Максима): в личке
         # мысли модели видны по ходу над ответом (services/live_answer.py).
         # Он же откат без выкатки. Тот же выключатель и код журнала, что на сайте.
-        from services.live_answer import THOUGHTS_SETTING_KEY, live_thoughts_enabled
-        new_val = "0" if live_thoughts_enabled() else "1"
-        set_setting(THOUGHTS_SETTING_KEY, new_val)
-        state = "включены" if new_val == "1" else "выключены"
-        logger.info("🔧 Админ %s: мысли в черновике %s", user_id, state)
-        _audit(user_id, "live_thoughts", 0, f"мысли в черновике {state}")
-        await query.answer(
-            "🧠 Мысли в черновике включены: в личке мысли видны по ходу над ответом. "
-            "Нужны включённые «Мысли под капотом» и «Ответ на глазах»."
-            if new_val == "1" else
-            "🧠 Мысли в черновике выключены: мысли снова только в готовом ответе.",
-            show_alert=True,
-        )
+        # Шаг — общий с нижним подменю владельца (panel_main.flip_api_toggle).
+        await query.answer(flip_api_toggle("live_thoughts", user_id), show_alert=True)
         try:
             await query.edit_message_reply_markup(reply_markup=_build_api_keyboard(user_id))
         except Exception as e:
@@ -825,25 +794,17 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         # ждать, не допишет ли человек ещё, прежде чем ответить одним
         # сообщением на всё (services/message_batch.py). Пределы и шаг —
         # services/settings_spec.py, тот же регулятор на сайте; 0 — выключено.
-        from services.message_batch import SETTING_KEY, wait_sec
+        # Шаг — общий с нижним подменю владельца (panel_main.step_batch).
         if data == "batch_info":
-            await query.answer(
-                "🧩 Склейка: бот ждёт столько секунд, не допишет ли человек ещё, и "
-                "отвечает одним сообщением на всё. 0 — выключено: ответ на каждое сразу.",
-                show_alert=True,
-            )
+            await query.answer(BATCH_INFO_TEXT, show_alert=True)
             return
-        from services.settings_spec import adjust
-        before = wait_sec()
-        after = adjust(SETTING_KEY, 1 if data == "batch_inc" else -1)
-        if after == before:
+        said = step_batch(user_id, 1 if data == "batch_inc" else -1)
+        if said is None:
             # Упёрлись в предел — клавиатура та же, перерисовка дала бы ошибку
             # Telegram «Message is not modified».
             await query.answer("Это крайнее значение.")
             return
-        logger.info("🔧 Админ %s: склейка сообщений %s → %s с", user_id, before, after)
-        _audit(user_id, "batch", 0, f"склейка сообщений: {after} с" if after else "склейка выключена")
-        await query.answer(f"🧩 Склейка: {after} с" if after else "🧩 Склейка выключена")
+        await query.answer(said)
         try:
             await query.edit_message_reply_markup(reply_markup=_build_api_keyboard(user_id))
         except Exception as e:

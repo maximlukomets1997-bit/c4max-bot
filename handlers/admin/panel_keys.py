@@ -29,6 +29,8 @@
 #   • Номер сообщения с панелью — в settings 'owner_keys_msg_<номер владельца>':
 #     по нему удаляется предыдущее. ⚠️ Telegram не даёт ботам удалять сообщения
 #     старше двух суток — тогда старое остаётся, и в чате их два.
+#   • Подменю «📡 Настройки API» (18.10.2026, пилот) — API_ROWS: та же панель,
+#     другие кнопки; сообщение с ним — тот же один в чате. Подробности — у API_ROWS.
 #
 #  ⚠️ «🌐 Сайт» — НЕ кнопка-мини-приложение (проба 17.10.2026): открытый с
 #  нижней кнопки сайт не получает от Telegram, кто его открыл, и пишет «Вход
@@ -80,10 +82,33 @@ KEYS = (
     ("⬇️ ОБНОВЛЕНИЕ", "autoupdate"),
     ("🔄 ПЕРЕЗАПУСК", "restart"),
 )
-_BY_LABEL = {label: code for label, code in KEYS}
+
+# Подменю «📡 Настройки API» (2026-10-18, пилот по решению Максима): нижняя
+# «📡 Настройки API» присылает панель раздела, как раньше, а нижняя панель на
+# время становится переключателями раздела. Ряды — раскладка; «⬅️ Назад»
+# возвращает главную. Переключатели — ТЕ ЖЕ шаги, что кнопки под панелью
+# (panel_main.flip_api_toggle / step_batch), а под самой панелью их тогда нет
+# (panel_main.api_toggles_below). /start, перезапуск бота и выключатель всегда
+# ставят главную: какое подменю открыто, бот не помнит и помнить не обязан.
+API_ROWS = (
+    (("🧠 МЫСЛИ ПОД КАПОТОМ", "thoughts"),),
+    (("✍️ ОТВЕТ НА ГЛАЗАХ", "live_answer"),),
+    (("🧠 МЫСЛИ В ЧЕРНОВИКЕ", "live_thoughts"),),
+    (("➖ склейка", "batch_dec"), ("🧩 СКЛЕЙКА", "batch_info"), ("➕ склейка", "batch_inc")),
+    (("⬅️ Назад", "back"),),
+)
+API_CARRIER_TEXT = "📡 Настройки API — переключатели внизу. «⬅️ Назад» — к разделам."
+API_KEYS = tuple(key for row in API_ROWS for key in row)
+
+_BY_LABEL = {label: code for label, code in KEYS + API_KEYS}
+# У этих кнопок к надписи дописано состояние («…: 🟢ВКЛ», «…: 3 с») — узнаются
+# по началу надписи.
+_STATEFUL = ("autoupdate", "thoughts", "live_answer", "live_thoughts", "batch_info")
 
 # Сколько живут короткие ответы очисток — как у /clear.
 _NOTICE_TTL_SEC = 7
+# Пояснение склейки длиннее — живёт дольше.
+_INFO_TTL_SEC = 20
 
 
 def keys_enabled() -> bool:
@@ -95,34 +120,48 @@ def keys_enabled() -> bool:
 
 
 def _shown(label: str, code: str) -> str:
-    """Надпись на кнопке: у «⬇️ ОБНОВЛЕНИЕ» — с состоянием, как в /adm."""
+    """
+    Надпись на кнопке с состоянием, как в /adm и под панелью API. У
+    переключателей API надпись целиком берётся у кнопки под панелью
+    (panel_main.api_toggle_text) — разойтись им нельзя.
+    """
     if code == "autoupdate":
         from .common import _onoff
         from .panel_main import autoupdate_on
         return f"{label}: {_onoff(autoupdate_on())}"
+    if code in _STATEFUL:
+        from .panel_main import api_toggle_text
+        return api_toggle_text(code)
     return label
 
 
 def _code_of(text: str) -> str | None:
     """
-    Какая кнопка нажата. «⬇️ ОБНОВЛЕНИЕ» узнаётся при ЛЮБОМ состоянии в
-    надписи: панель с прежней надписью могла остаться на экране, и её
-    нажатие обязано сработать, а не уйти модели вопросом.
+    Какая кнопка нажата. Кнопки с состоянием узнаются при ЛЮБОМ состоянии в
+    надписи: панель с прежней надписью могла остаться на экране (а
+    переключатель — поменяться на сайте), и её нажатие обязано сработать, а
+    не уйти модели вопросом.
     """
     text = (text or "").strip()
     code = _BY_LABEL.get(text)
     if code:
         return code
-    for label, key in KEYS:
-        if key == "autoupdate" and text.startswith(label + ":"):
+    for label, key in KEYS + API_KEYS:
+        if key in _STATEFUL and text.startswith(label + ":"):
             return key
     return None
 
 
-def owner_keyboard() -> ReplyKeyboardMarkup:
-    """Сама панель: по две кнопки в ряд, компактная, не сворачивается сама."""
-    rows = [[KeyboardButton(_shown(label, code)) for label, code in KEYS[i:i + 2]]
-            for i in range(0, len(KEYS), 2)]
+def owner_keyboard(menu: str = "main") -> ReplyKeyboardMarkup:
+    """
+    Сама панель, компактная, не сворачивается сама. main — разделы по две
+    кнопки в ряд; api — подменю «📡 Настройки API» по своим рядам.
+    """
+    if menu == "api":
+        layout = API_ROWS
+    else:
+        layout = [KEYS[i:i + 2] for i in range(0, len(KEYS), 2)]
+    rows = [[KeyboardButton(_shown(label, code)) for label, code in row] for row in layout]
     return ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True)
 
 
@@ -166,17 +205,20 @@ async def _post(bot, chat_id: int, text: str, markup) -> None:
         await _delete(bot, chat_id, previous)
 
 
-async def send_owner_keys(bot, chat_id: int, user_id: int | None = None) -> None:
+async def send_owner_keys(bot, chat_id: int, user_id: int | None = None,
+                          menu: str = "main") -> None:
     """
-    Поставить нижние кнопки в личке владельца. Не владелец, не личка или
-    кнопки выключены — ничего не делает. Тихая: панель — удобство, из-за неё
-    не должны падать ни /start, ни запуск бота.
+    Поставить нижние кнопки в личке владельца: главную панель (main) или
+    подменю «📡 Настройки API» (api). Не владелец, не личка или кнопки
+    выключены — ничего не делает. Тихая: панель — удобство, из-за неё не
+    должны падать ни /start, ни запуск бота.
     """
     uid = chat_id if user_id is None else user_id
     if not _is_owner_private(chat_id, uid) or not keys_enabled():
         return
+    text = API_CARRIER_TEXT if menu == "api" else CARRIER_TEXT
     try:
-        await _post(bot, chat_id, CARRIER_TEXT, owner_keyboard())
+        await _post(bot, chat_id, text, owner_keyboard(menu))
     except Exception as e:
         logger.warning("⚠️ Не удалось поставить нижние кнопки владельцу %s: %s", chat_id, e)
 
@@ -197,11 +239,11 @@ async def remove_owner_keys(bot, chat_id: int) -> None:
         logger.warning("⚠️ Не удалось убрать нижние кнопки у %s: %s", chat_id, e)
 
 
-async def _notice(bot, chat_id: int, text: str) -> None:
-    """Короткий ответ очистки — сам исчезает, как ответ /clear."""
+async def _notice(bot, chat_id: int, text: str, ttl: int = _NOTICE_TTL_SEC) -> None:
+    """Короткий ответ очистки или переключателя — сам исчезает, как ответ /clear."""
     msg = await bot.send_message(chat_id=chat_id, text=text)
     if msg:
-        schedule_delete(bot, chat_id, msg.message_id, _NOTICE_TTL_SEC)
+        schedule_delete(bot, chat_id, msg.message_id, ttl)
 
 
 async def _run(code: str, context, chat_id: int, user_id: int) -> None:
@@ -221,8 +263,28 @@ async def _run(code: str, context, chat_id: int, user_id: int) -> None:
         from .panel_prompts import send_prompts_panel
         await send_prompts_panel(bot, chat_id, user_id)
     elif code == "api":
+        # Панель раздела — как раньше, а внизу — его переключатели.
         from .panel_main import send_api_panel
         await send_api_panel(bot, chat_id, user_id)
+        await send_owner_keys(bot, chat_id, user_id, menu="api")
+    elif code in ("thoughts", "live_answer", "live_thoughts"):
+        from .panel_main import flip_api_toggle
+        await _notice(bot, chat_id, flip_api_toggle(code, user_id))
+        await send_owner_keys(bot, chat_id, user_id, menu="api")
+    elif code in ("batch_dec", "batch_inc"):
+        from .panel_main import step_batch
+        said = step_batch(user_id, 1 if code == "batch_inc" else -1)
+        if said is None:
+            # Упёрлись в предел — надписи те же, панель заново не нужна.
+            await _notice(bot, chat_id, "Это крайнее значение.")
+            return
+        await _notice(bot, chat_id, said)
+        await send_owner_keys(bot, chat_id, user_id, menu="api")
+    elif code == "batch_info":
+        from .panel_main import BATCH_INFO_TEXT
+        await _notice(bot, chat_id, BATCH_INFO_TEXT, _INFO_TTL_SEC)
+    elif code == "back":
+        await send_owner_keys(bot, chat_id, user_id)
     elif code == "mod":
         from .panel_mod import send_mod_panel
         await send_mod_panel(bot, chat_id, user_id)

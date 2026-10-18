@@ -175,62 +175,154 @@ def _thinking_rows():
     return rows
 
 
-def _build_api_keyboard(user_id):
+# ─── Переключатели показа ответа и склейка в «📡 Настройках API» ───
+# Общие шаги кнопок под панелью (router.py) и нижнего подменю владельца
+# (2026-10-18, panel_keys.py): надпись, переключение, строка лога, журнал и
+# ответ — одни на обе кнопки. Второго набора правил «как переключать» быть
+# не должно — как у самообновления (flip_autoupdate).
+
+def api_toggle_text(code: str) -> str:
+    """
+    Надпись переключателя с состоянием — одна под панелью и внизу.
+    code: thoughts | live_answer | live_thoughts | batch_info.
+    """
+    if code == "thoughts":
+        # Мысли под капотом (2026-08-03; 2026-08-04 переехал сюда из панели
+        # промптов по просьбе Максима — его место рядом с выбором модели).
+        # Настройка ОБЩАЯ: выключена — свёрнутой цитаты с рассуждениями нет ни
+        # в личке, ни в группах, ни в режиме «Сам в разговор». Состояние
+        # читаем через utils_format — там же, где оно и применяется.
+        from utils_format import thoughts_enabled
+        return f"🧠 МЫСЛИ ПОД КАПОТОМ: {_onoff(thoughts_enabled())}"
+    if code == "live_answer":
+        # Ответ на глазах (2026-10-08) — тот же выключатель, что на сайте.
+        from services.live_answer import live_answer_enabled
+        return f"✍️ ОТВЕТ НА ГЛАЗАХ: {_onoff(live_answer_enabled())}"
+    if code == "live_thoughts":
+        # Мысли в черновике лички (2026-10-14) — свой выключатель, чтобы
+        # вернуть «как было» без выкатки; тот же, что на сайте.
+        from services.live_answer import live_thoughts_enabled
+        return f"🧠 МЫСЛИ В ЧЕРНОВИКЕ: {_onoff(live_thoughts_enabled())}"
+    if code == "batch_info":
+        # Склейка сообщений подряд (2026-10-09, services/message_batch.py).
+        from services.message_batch import wait_sec
+        batch = wait_sec()
+        return f"🧩 СКЛЕЙКА: {f'{batch} с' if batch else '🔴ВЫКЛ'}"
+    raise ValueError(f"нет такого переключателя: {code}")
+
+
+def flip_api_toggle(code: str, user_id: int) -> str:
+    """
+    Переключить выключатель показа (code: thoughts | live_answer |
+    live_thoughts). Возвращает, что сказать: под панелью — всплывающим
+    окном, внизу — коротким сообщением. Коды журнала — те же, что у сайта.
+
+    ⚠️ «Мысли под капотом» — про ПОКАЗ, а не про расход: модели думают и
+    тратят токены по-прежнему — обещать здесь экономию нельзя.
+    """
+    from database.history import set_setting
+    from .common import _audit
+    if code == "thoughts":
+        from utils_format import THOUGHTS_SETTING_KEY, thoughts_enabled
+        new_val = "0" if thoughts_enabled() else "1"
+        set_setting(THOUGHTS_SETTING_KEY, new_val)
+        state = "показываются" if new_val == "1" else "скрыты"
+        logger.info("🔧 Админ %s: мысли под капотом %s (для всех)", user_id, state)
+        _audit(user_id, "thoughts", 0, f"мысли под капотом {state}")
+        return (f"🧠 Мысли под капотом {state}."
+                + ("" if new_val == "1" else " Модели всё равно думают — прячется только цитата."))
+    if code == "live_answer":
+        from services.live_answer import SETTING_KEY, live_answer_enabled
+        new_val = "0" if live_answer_enabled() else "1"
+        set_setting(SETTING_KEY, new_val)
+        state = "включён" if new_val == "1" else "выключен"
+        logger.info("🔧 Админ %s: ответ на глазах %s", user_id, state)
+        _audit(user_id, "live_answer", 0, f"ответ на глазах {state}")
+        return ("✍️ Ответ на глазах включён: в личке и в группах ответ дописывается по ходу."
+                if new_val == "1" else
+                "✍️ Ответ на глазах выключен: везде снова «печатает…» и готовый ответ.")
+    if code == "live_thoughts":
+        from services.live_answer import THOUGHTS_SETTING_KEY, live_thoughts_enabled
+        new_val = "0" if live_thoughts_enabled() else "1"
+        set_setting(THOUGHTS_SETTING_KEY, new_val)
+        state = "включены" if new_val == "1" else "выключены"
+        logger.info("🔧 Админ %s: мысли в черновике %s", user_id, state)
+        _audit(user_id, "live_thoughts", 0, f"мысли в черновике {state}")
+        return ("🧠 Мысли в черновике включены: в личке мысли видны по ходу над ответом. "
+                "Нужны включённые «Мысли под капотом» и «Ответ на глазах»."
+                if new_val == "1" else
+                "🧠 Мысли в черновике выключены: мысли снова только в готовом ответе.")
+    raise ValueError(f"нет такого переключателя: {code}")
+
+
+BATCH_INFO_TEXT = ("🧩 Склейка: бот ждёт столько секунд, не допишет ли человек ещё, и "
+                   "отвечает одним сообщением на всё. 0 — выключено: ответ на каждое сразу.")
+
+
+def step_batch(user_id: int, steps: int) -> str | None:
+    """
+    Шаг регулятора склейки (+1 / −1). Пределы и шаг — services/settings_spec.py,
+    тот же регулятор на сайте. Возвращает, что сказать; None — упёрлись в
+    предел и ничего не поменялось (перерисовка «в то же самое» дала бы ошибку
+    Telegram «Message is not modified»).
+    """
+    from services.message_batch import SETTING_KEY, wait_sec
+    from services.settings_spec import adjust
+    from .common import _audit
+    before = wait_sec()
+    after = adjust(SETTING_KEY, steps)
+    if after == before:
+        return None
+    logger.info("🔧 Админ %s: склейка сообщений %s → %s с", user_id, before, after)
+    _audit(user_id, "batch", 0, f"склейка сообщений: {after} с" if after else "склейка выключена")
+    return f"🧩 Склейка: {after} с" if after else "🧩 Склейка выключена"
+
+
+def api_toggles_below(user_id: int) -> bool:
+    """
+    Переключатели раздела стоят в нижнем подменю владельца (2026-10-18)?
+    Тогда под панелью их нет. Выключил нижние кнопки — они снова под панелью:
+    это и откат без выкатки.
+    """
+    from services.roles import is_owner
+    from .panel_keys import keys_enabled
+    return is_owner(user_id) and keys_enabled()
+
+
+def _build_api_keyboard(user_id, full: bool = False):
     """
     Клавиатура панели «📡 Настройки API»: кнопки выбора моделей + глубина
-    раздумий по провайдерам + отчёты о расходах + вход на экран
-    «💰 Счета и квоты» + возврат в /adm.
+    раздумий по провайдерам + переключатели показа и склейка + отчёты о
+    расходах + вход на экран «💰 Счета и квоты» + возврат в /adm.
     Вызывается при открытии панели и при обновлении клавиатуры после смены
     модели или глубины.
+
+    ⚠️ У владельца с нижними кнопками переключателей под панелью НЕТ — они в
+    нижнем подменю (api_toggles_below). full=True — полный вариант всегда:
+    его меряет preflight и сторожат проверки надписей.
     """
     active_model = get_setting("active_model", GEMINI_MODEL)
     active_image_model = get_setting("active_image_model", "gemini-3.1-flash-image")
     _, model_markup = _build_model_panel_text_and_keyboard(active_model, active_image_model, user_id)
-    # Тумблер показа «мыслей под капотом» (2026-08-03; 2026-08-04 переехал сюда
-    # из панели промптов по просьбе Максима — его место рядом с выбором модели,
-    # а не рядом с текстами промптов). Настройка ОБЩАЯ: выключена — свёрнутой
-    # цитаты с рассуждениями нет ни в личке, ни в группах, ни в режиме
-    # «Сам в разговор». Состояние читаем через utils_format — там же, где оно
-    # и применяется, своей строки `"thoughts_enabled"` здесь не заводим.
-    # ⚠️ Тумблер про ПОКАЗ, а не про расход: модели думают и тратят токены
-    # по-прежнему — обещать рядом с кнопками моделей экономию нельзя.
-    # Своим рядом: надпись длинная, в половину ширины не влезает.
-    from utils_format import thoughts_enabled
-    thoughts_row = [InlineKeyboardButton(
-        f"🧠 МЫСЛИ ПОД КАПОТОМ: {_onoff(thoughts_enabled())}",
-        callback_data="toggle_thoughts")]
-    # Тумблер «ответа на глазах» (2026-10-08, просьба Максима — рядом с
-    # мыслями: оба про то, КАК показывается ответ). Тот же выключатель, что
-    # на странице настроек сайта (services/live_answer.SETTING_KEY).
-    from services.live_answer import live_answer_enabled
-    live_row = [InlineKeyboardButton(
-        f"✍️ ОТВЕТ НА ГЛАЗАХ: {_onoff(live_answer_enabled())}",
-        callback_data="toggle_live_answer")]
-    # Мысли в черновике лички (2026-10-14, решение Максима): мысли видны по
-    # ходу над ответом. Свой выключатель — чтобы вернуть «как было» без
-    # выкатки; тот же, что на странице настроек сайта.
-    from services.live_answer import live_thoughts_enabled
-    live_thoughts_row = [InlineKeyboardButton(
-        f"🧠 МЫСЛИ В ЧЕРНОВИКЕ: {_onoff(live_thoughts_enabled())}",
-        callback_data="toggle_live_thoughts")]
-    # Склейка сообщений подряд (2026-10-09, services/message_batch.py): сколько
-    # секунд ждать, не допишет ли человек ещё. Пределы и шаг — settings_spec
-    # (тот же регулятор на странице настроек сайта); 0 — выключено.
-    from services.message_batch import wait_sec
-    batch = wait_sec()
-    batch_row = [
-        InlineKeyboardButton("➖", callback_data="batch_dec"),
-        InlineKeyboardButton(f"🧩 СКЛЕЙКА: {f'{batch} с' if batch else '🔴ВЫКЛ'}",
-                             callback_data="batch_info"),
-        InlineKeyboardButton("➕", callback_data="batch_inc"),
-    ]
     # inline_keyboard у собранной клавиатуры — кортеж (tuple), складывать его
     # со списком нельзя — приводим всё к спискам.
-    rows = list(model_markup.inline_keyboard) + _thinking_rows() + [
-        thoughts_row,
-        live_row,
-        live_thoughts_row,
-        batch_row,
+    rows = list(model_markup.inline_keyboard) + _thinking_rows()
+    if full or not api_toggles_below(user_id):
+        # Своими рядами: надписи длинные, в половину ширины не влезают.
+        # Все про то, КАК показывается ответ, — потому рядом друг с другом.
+        rows += [
+            [InlineKeyboardButton(api_toggle_text("thoughts"), callback_data="toggle_thoughts")],
+            [InlineKeyboardButton(api_toggle_text("live_answer"),
+                                  callback_data="toggle_live_answer")],
+            [InlineKeyboardButton(api_toggle_text("live_thoughts"),
+                                  callback_data="toggle_live_thoughts")],
+            [
+                InlineKeyboardButton("➖", callback_data="batch_dec"),
+                InlineKeyboardButton(api_toggle_text("batch_info"), callback_data="batch_info"),
+                InlineKeyboardButton("➕", callback_data="batch_inc"),
+            ],
+        ]
+    rows += [
         list(_REPORT_BUTTON_ROW),
         [InlineKeyboardButton("💰 СЧЕТА И КВОТЫ", callback_data="bal:panel")],
         _adm_back_row(),
@@ -367,6 +459,9 @@ async def send_api_panel(bot, chat_id: int, user_id: int):
         f"  • Всего: <b>{stats['api_calls_total']}</b>\n"
         f"  • Сегодня: <b>{stats['api_calls_today']}</b>"
     )
+    if api_toggles_below(user_id):
+        # Переключателей под панелью нет — сказать, где они (2026-10-18).
+        text += "\n\n⌨️ <i>Мысли, ответ на глазах и склейка — в нижних кнопках.</i>"
     await _send_panel_message(bot, chat_id, text, _build_api_keyboard(user_id))
 
 

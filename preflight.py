@@ -505,7 +505,9 @@ def check_panels():
     panels = {
         "/adm": lambda: ("", build_adm_keyboard(owner)),
         "модели и API": lambda: _build_model_panel_text_and_keyboard(active, active_image, owner),
-        "клавиатура API": lambda: ("", _build_api_keyboard(owner)),
+        # full=True: у владельца с нижними кнопками переключатели уходят вниз
+        # (18.10.2026), а мерить надо самый полный вариант.
+        "клавиатура API": lambda: ("", _build_api_keyboard(owner, full=True)),
         "счета и квоты": _build_balance_panel,
         "правка «потрачено»": _build_cost_panel,
         "промпты": lambda: _build_prompt_panel_text_and_keyboard(owner, "c4max_bot"),
