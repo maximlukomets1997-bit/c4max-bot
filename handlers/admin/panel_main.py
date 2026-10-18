@@ -9,8 +9,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LinkPre
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 from config import (AVAILABLE_MODELS, AVAILABLE_IMAGE_MODELS, GEMINI_MODEL, PROVIDERS,
-                    BOT_VERSION_HTML, AUTO_UPDATE_ENABLED_DEFAULT, THINKING_LEVELS,
-                    THINKING_PHASES)
+                    BOT_VERSION_HTML, THINKING_LEVELS, THINKING_PHASES)
 from database.history import get_setting, get_bot_stats, get_qwen_tokens
 from utils import register_and_clean_bot_message, delete_user_message_safe
 
@@ -179,7 +178,7 @@ def _thinking_rows():
 # Общие шаги кнопок под панелью (router.py) и нижнего подменю владельца
 # (2026-10-18, panel_keys.py): надпись, переключение, строка лога, журнал и
 # ответ — одни на обе кнопки. Второго набора правил «как переключать» быть
-# не должно — как у самообновления (flip_autoupdate).
+# не должно.
 
 def api_toggle_text(code: str) -> str:
     """
@@ -574,7 +573,7 @@ def _adm_rows():
     """
     Ряды кнопок главной панели ДО фильтра по правам. Вынесены отдельно, чтобы
     ту же раскладку могла собрать ветка, которая ВОЗВРАЩАЕТ клавиатуру /adm
-    после действия (тумблер самообновления — router.py), не отправляя панель заново.
+    после действия (выключатель нижних кнопок — router.py), не отправляя панель заново.
     """
     return _web_row() + [
         [InlineKeyboardButton("💬 Статистика", callback_data="adm_open_stats")],
@@ -609,52 +608,15 @@ def _adm_rows():
             InlineKeyboardButton("🧹 Очистить РАЗГОВОРЫ", callback_data="adm:wipe"),
             InlineKeyboardButton("🗑 Очистить мой диалог", callback_data="clear_history_btn"),
         ],
-        # Самообновление (2026-07-27): бот сам раз в 5 минут смотрит, нет ли
-        # на GitHub новой версии, и забирает её в тишине. Тумблер нужен, чтобы
-        # можно было спокойно отправлять правки пачками, не выкатывая каждую.
-        # Надпись — только через _onoff (стандарт тумблеров, см. его докстринг в common.py).
-        # Оба — управление самим ботом, поэтому стоят одним рядом в два столбца
-        # (решение Максима 2026-07-27). Надпись перезапуска укорочена с
-        # «ПЕРЕЗАПУСТИТЬ БОТА»: в половину ширины длинная не влезает.
-        # Обе кнопки владельческие (в _CALLBACK_RULES их нет) — у модератора
-        # ряд пропадает целиком, заглушек в нём нет.
-        [
-            InlineKeyboardButton(
-                f"⬇️ ОБНОВЛЕНИЕ: {_onoff(get_setting('auto_update_enabled', AUTO_UPDATE_ENABLED_DEFAULT) == '1')}",
-                callback_data="adm_autoupdate"),
-            InlineKeyboardButton("🔄 ПЕРЕЗАПУСК", callback_data="system_restart"),
-        ],
+        # Перезапуск — владельческая кнопка (в _CALLBACK_RULES её нет), у
+        # модератора ряда нет. До 18.10.2026 рядом стоял тумблер
+        # «⬇️ ОБНОВЛЕНИЕ»; по решению Максима самообновление теперь включено
+        # всегда (jobs/update.py), и тумблер убран отовсюду — не возвращать.
+        [InlineKeyboardButton("🔄 ПЕРЕЗАПУСК", callback_data="system_restart")],
         # Нижние кнопки владельца под полем ввода (2026-10-17, panel_keys.py).
         # Владельческая (в _CALLBACK_RULES её нет) — у модератора ряда нет.
         [_owner_keys_button()],
     ]
-
-
-def autoupdate_on() -> bool:
-    """Самообновление включено? Тот же ключ и то же начальное значение, что у
-    кнопки /adm, страницы настроек сайта и jobs/update.py."""
-    return get_setting("auto_update_enabled", AUTO_UPDATE_ENABLED_DEFAULT) == "1"
-
-
-def flip_autoupdate(user_id: int) -> bool:
-    """
-    Переключить самообновление — общий шаг кнопки «⬇️ ОБНОВЛЕНИЕ» в /adm и
-    такой же нижней кнопки владельца (2026-10-18, panel_keys.py): второго
-    набора правил «как переключать» быть не должно. Возвращает НОВОЕ состояние.
-    """
-    from database.history import set_setting
-    from .common import _audit
-    now_on = autoupdate_on()
-    set_setting("auto_update_enabled", "0" if now_on else "1")
-    logger.info("🔧 Админ %s %s самообновление", user_id, "выключил" if now_on else "включил")
-    _audit(user_id, "autoupdate", None, "выключено" if now_on else "включено")
-    return not now_on
-
-
-def autoupdate_notice(on: bool) -> str:
-    """Что сказать после переключения — одинаково в /adm и у нижней кнопки."""
-    return ("⬇️ Самообновление включено — раз в 5 минут бот проверяет GitHub." if on else
-            "⬇️ Самообновление выключено — правки с GitHub бот сам забирать не будет.")
 
 
 def _owner_keys_button():
@@ -718,8 +680,8 @@ def adm_view(user_id: int):
 
 async def redraw_adm(query, user_id: int) -> None:
     """
-    Перерисовать /adm на месте после нажатия в нём (тумблеры самообновления и
-    нижних кнопок): текст И кнопки, по adm_view. Одних кнопок мало — после
+    Перерисовать /adm на месте после нажатия в нём (выключатель нижних
+    кнопок): текст И кнопки, по adm_view. Одних кнопок мало — после
     переключения нижних кнопок /adm меняет вид целиком (короткий ↔ полный).
     """
     text, markup = adm_view(user_id)

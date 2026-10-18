@@ -32,8 +32,7 @@
 import logging
 
 from config import (ANTISPAM_ENABLED_DEFAULT, ANTISPAM_MSG_COUNT,
-                    ANTISPAM_MUTE_SEC, ANTISPAM_WINDOW_SEC,
-                    AUTO_UPDATE_ENABLED_DEFAULT, GREET_CAPTCHA_DEFAULT,
+                    ANTISPAM_MUTE_SEC, ANTISPAM_WINDOW_SEC, GREET_CAPTCHA_DEFAULT,
                     GREET_ENABLED_DEFAULT, GREET_KICK_DEFAULT,
                     GREET_TIMEOUT_SEC, LINKFILTER_ENABLED_DEFAULT,
                     PROACTIVE_CONTEXT_MSGS, PROACTIVE_ENABLED_DEFAULT,
@@ -52,7 +51,6 @@ SECTIONS = (
     ("greet",     "👋 Приветствие новичков"),
     ("rag",       "📚 База знаний"),
     ("proactive", "🗣 Сам в разговор"),
-    ("system",    "⚙️ Обслуживание"),
 )
 
 
@@ -224,13 +222,6 @@ SPEC = {
         "min": 5, "max": 50, "step": 5, "unit": "сообщ.",
         "title": "Стенограмма",
         "hint": "сколько последних сообщений видит модель",
-    },
-
-    # ─── ⚙️ Обслуживание ───
-    "auto_update_enabled": {
-        "section": "system", "kind": "toggle", "default": AUTO_UPDATE_ENABLED_DEFAULT,
-        "title": "Самообновление",
-        "hint": "забирать новый код с GitHub раз в 5 минут",
     },
 }
 

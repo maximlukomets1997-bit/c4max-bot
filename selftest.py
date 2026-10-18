@@ -5529,8 +5529,74 @@ def check_update_notice():
         problems.append("отправка уведомления не кладёт в след время — "
                         "сообщение повиснет навсегда")
 
+    # ── 6. Самообновление включено ВСЕГДА (18.10.2026, решение Максима) ──
+    # Тумблер убран отовсюду, а запись 'auto_update_enabled' в базе сервера
+    # могла остаться любой. Тихая поломка тут одна: цикл снова начнёт её
+    # слушаться — и при «0» бот перестанет обновляться, ни о чём не сказав.
+    # Гоняем НАСТОЯЩИЙ цикл: в базе «выключено», а он обязан забрать новый код
+    # и перезапуститься. Подделаны только сон, GitHub и Телеграм.
+    import types
+    from database.history import delete_setting, get_setting
+    from services import deploy
+
+    real_sleep = asyncio.sleep
+
+    async def _fast_sleep(_sec):
+        await real_sleep(0)
+
+    pulls, stopped, told = [], [], []
+
+    async def _fake_update(quiet_nochange=False):
+        pulls.append(quiet_nochange)
+        return {"STATUS": "UPDATED", "MSG": "v9.99 — проба", "VERSION": "9.99"}
+
+    class _LoopBot:
+        @staticmethod
+        async def send_message(chat_id, text):
+            told.append(text)
+            return types.SimpleNamespace(message_id=1)
+
+        @staticmethod
+        async def delete_message(chat_id, message_id):
+            pass
+
+    app = types.SimpleNamespace(bot=_LoopBot(), bot_data={},
+                                stop_running=lambda: stopped.append(True))
+    saved_loop = (upd.asyncio, deploy.can_update, deploy.quiet_for, deploy.update,
+                  cfg.AUTO_UPDATE_INTERVAL_SEC, cfg.ADMIN_IDS)
+    saved_flag = get_setting("auto_update_enabled", "")
+    saved_notice = get_setting(UPDATE_NOTICE_MSGS_KEY, "")
+    hung = False
+    try:
+        upd.asyncio = types.SimpleNamespace(sleep=_fast_sleep)
+        deploy.can_update = lambda: True
+        deploy.quiet_for = lambda: float("inf")
+        deploy.update = _fake_update
+        cfg.AUTO_UPDATE_INTERVAL_SEC = 0
+        cfg.ADMIN_IDS = (777060001,)
+        set_setting("auto_update_enabled", "0")
+        try:
+            asyncio.run(asyncio.wait_for(upd.auto_update_loop(app), timeout=3))
+        except asyncio.TimeoutError:
+            hung = True
+    finally:
+        (upd.asyncio, deploy.can_update, deploy.quiet_for, deploy.update,
+         cfg.AUTO_UPDATE_INTERVAL_SEC, cfg.ADMIN_IDS) = saved_loop
+        if saved_flag == "":
+            delete_setting("auto_update_enabled")
+        else:
+            set_setting("auto_update_enabled", saved_flag)
+        set_setting(UPDATE_NOTICE_MSGS_KEY, saved_notice)
+    expect("в базе «выключено» — цикл не забрал новый код (снова слушается тумблера)",
+           (bool(pulls), hung), (True, False))
+    expect("забрал новый код, но не перезапустил бота",
+           (stopped, app.bot_data.get("shutdown_reason")), ([True], "restart"))
+    expect("забрал новый код, но владельцу не сказал",
+           [t.split(":")[0] for t in told], ["⬇️ Обновился сам"])
+
     return problems, (f"{done} проверок: расчёт срока и точки отсчёта, срок из "
-                      f"config, три формата следа, удаление и его отсутствие")
+                      f"config, три формата следа, удаление и его отсутствие; "
+                      f"самообновление не слушается старого тумблера")
 
 
 def check_quiz_score():
@@ -9987,12 +10053,12 @@ def check_owner_keys():
             problems.append(title)
 
     OWNER, MOD, PLAIN = 777060001, 777060002, 777060011
-    # Две последние — с 18.10.2026: копии кнопок /adm. У «ОБНОВЛЕНИЯ» в
-    # надписи состояние — здесь при включённом самообновлении.
+    # Последняя — с 18.10.2026: копия кнопки /adm. Тумблера «⬇️ ОБНОВЛЕНИЕ»
+    # рядом с ней больше нет — самообновление включено всегда.
     WANT = ["🎛 Админ-панель", "💬 Статистика", "⚙️ PROMPTы", "📡 Настройки API",
             "🛠 DDoS-Guard", "👥 Пользователи", "📚 База знаний", "🎮 Викторина",
             "📜 Логи бота", "🌐 Сайт", "🧹 Очистить РАЗГОВОРЫ", "🗑 Очистить мой диалог",
-            "⬇️ ОБНОВЛЕНИЕ: 🟢ВКЛ", "🔄 ПЕРЕЗАПУСК"]
+            "🔄 ПЕРЕЗАПУСК"]
 
     class Bot:
         username = "c4max_test_bot"
@@ -10044,7 +10110,7 @@ def check_owner_keys():
     SLOT = f"{pk.MSG_KEY_PREFIX}{OWNER}"
     import utils_format as uf
     saved_settings = {k: hist.get_setting(k, "") for k in
-                      (pk.SETTING_KEY, la.SETTING_KEY, SLOT, "auto_update_enabled",
+                      (pk.SETTING_KEY, la.SETTING_KEY, SLOT,
                        uf.THOUGHTS_SETTING_KEY, la.THOUGHTS_SETTING_KEY, mb.SETTING_KEY)}
     targets = {
         "adm": (pm, "send_adm_panel"), "stats": (pm, "send_stats_panel"),
@@ -10082,13 +10148,14 @@ def check_owner_keys():
         mb.wait_sec = lambda: 0
         hist.set_setting(la.SETTING_KEY, "0")        # показ по ходу сторожит своя группа
         hist.set_setting(pk.SETTING_KEY, "1")
-        hist.set_setting("auto_update_enabled", "1")
 
         # ═══ 1. Панель: надписи, порядок, вид ═══
         kb = pk.owner_keyboard()
         labels = [b.text for row in kb.keyboard for b in row]
         expect(f"надписи или порядок нижних кнопок не те: {labels}", labels == WANT)
-        expect("нижние кнопки не по две в ряд", all(len(row) == 2 for row in kb.keyboard))
+        sizes = [len(row) for row in kb.keyboard]
+        expect(f"нижние кнопки не по две в ряд (нечётная последняя — одна): {sizes}",
+               sizes == [2] * (len(WANT) // 2) + [1] * (len(WANT) % 2))
         expect("панель не компактная или сворачивается сама",
                kb.resize_keyboard is True and kb.is_persistent is True)
         expect("у нижней кнопки «🌐 Сайт» мини-приложение — с неё сайт не пускает (проба 17.10)",
@@ -10188,28 +10255,18 @@ def check_owner_keys():
         expect("«🗑 Очистить мой диалог» не очистил память бота о владельце",
                not hist.get_history(OWNER) and not asked)
 
-        # «⬇️ ОБНОВЛЕНИЕ» (18.10.2026): переключает самообновление тем же шагом,
-        # что кнопка /adm, и присылает панель заново — надпись следует за ним.
-        def auto_label(bot):
-            labels = [b.text for e in keyboards(bot) for row in e[3].keyboard for b in row]
-            return next((t for t in labels if t.startswith("⬇️ ОБНОВЛЕНИЕ")), "")
-
-        bot, gone, _ = press(OWNER, "⬇️ ОБНОВЛЕНИЕ: 🟢ВКЛ")
-        expect("нижняя «⬇️ ОБНОВЛЕНИЕ» не выключила самообновление или ушла модели",
-               hist.get_setting("auto_update_enabled", "") == "0" and not asked and bool(gone))
-        expect(f"после нажатия панель не пришла заново с новой надписью: «{auto_label(bot)}»",
-               auto_label(bot) == "⬇️ ОБНОВЛЕНИЕ: 🔴ВЫКЛ")
-        expect("нижняя «⬇️ ОБНОВЛЕНИЕ» не записана в журнал персонала тем же кодом, что в /adm",
-               any(r.get("action") == "autoupdate" for r in hist.get_recent_staff_actions(20)))
-        bot, gone, _ = press(OWNER, "⬇️ ОБНОВЛЕНИЕ: 🟢ВКЛ")      # прежняя надпись на экране
-        expect("нажатие «⬇️ ОБНОВЛЕНИЕ» с прежней надписью не сработало",
-               hist.get_setting("auto_update_enabled", "") == "1" and not asked)
+        # Тумблера самообновления нет НИГДЕ (18.10.2026, решение Максима:
+        # обновления включены всегда). Внизу его нет по WANT; здесь — /adm и
+        # сайт. Вернётся хоть один — бота снова можно молча снять с обновлений.
+        from services import settings_spec as spec
+        adm_texts = [b.text for row in pm.build_adm_keyboard(OWNER).inline_keyboard
+                     for b in row]
+        expect(f"в /adm снова есть тумблер самообновления: {adm_texts}",
+               not any("ОБНОВЛЕНИЕ" in t for t in adm_texts) and "🔄 ПЕРЕЗАПУСК" in adm_texts)
+        expect("на странице настроек сайта снова есть тумблер самообновления",
+               "auto_update_enabled" not in spec.SPEC)
         router_src = open(os.path.join(ROOT, "handlers", "admin", "router.py"),
                           encoding="utf-8").read()
-        branch = router_src[router_src.find('if data == "adm_autoupdate"'):]
-        branch = branch[:branch.find("\n    if data ==", 10)]
-        expect("кнопка /adm «⬇️ ОБНОВЛЕНИЕ» переключает не общим шагом или не освежает "
-               "нижнюю панель", "flip_autoupdate(" in branch and "send_owner_keys(" in branch)
 
         # «🔄 ПЕРЕЗАПУСК» — сначала вопрос, сам бот не перезапускается.
         restarted = []
@@ -10338,11 +10395,11 @@ def check_owner_keys():
         asyncio.run(pm.redraw_adm(q, OWNER))
         expect("после включения нижних кнопок /adm не стал коротким (текст и кнопки)",
                "нижних кнопках" in edits[-1][0] and datas_of(edits[-1][1]) == ["toggle_owner_keys"])
-        for name in ('if data == "toggle_owner_keys"', 'if data == "adm_autoupdate"'):
-            branch = router_src[router_src.find(name):]
-            branch = branch[:branch.find("\n    if data", 10)]
-            expect(f"ветка «{name}» перерисовывает /adm одними кнопками — текст разошёлся бы "
-                   f"с видом панели", "redraw_adm(" in branch)
+        name = 'if data == "toggle_owner_keys"'
+        branch = router_src[router_src.find(name):]
+        branch = branch[:branch.find("\n    if data", 10)]
+        expect(f"ветка «{name}» перерисовывает /adm одними кнопками — текст разошёлся бы "
+               f"с видом панели", "redraw_adm(" in branch)
 
         # ═══ 8. Подменю «📡 Настройки API» (18.10.2026, пилот) ═══
         # Нижняя «📡 Настройки API» присылает панель и ставит внизу её

@@ -105,8 +105,7 @@ async def forget_update_notice(application, stale_only: bool = False) -> None:
         Отправка с ПК Максима (`.bat` → deploy-restart.sh) и кнопка
         «🔄 ПЕРЕЗАПУСК» обновляют код молча, ничего не удаляя, — и уведомление
         от прошлого САМОобновления висело в чате до следующего самообновления,
-        то есть могло не исчезнуть никогда (например, при выключенном тумблере
-        самообновления).
+        то есть могло не исчезнуть никогда.
 
     ⚠️ ЧТО ЗНАЧИТ stale_only. При запуске нельзя стирать всё подряд: сразу
     после самообновления в чате лежит СВЕЖЕЕ «⬇️ Обновился сам…», и бот,
@@ -282,10 +281,9 @@ async def auto_update_loop(application):
     Дома цикл завершается сразу (can_update() = False): там лежат ещё не
     отправленные правки Максима, и скачивание дралось бы с его работой.
     """
-    from config import (ADMIN_IDS, AUTO_UPDATE_ENABLED_DEFAULT, AUTO_UPDATE_INTERVAL_SEC,
-                        AUTO_UPDATE_QUIET_SEC, AUTO_UPDATE_TICK_SEC)
+    from config import (ADMIN_IDS, AUTO_UPDATE_INTERVAL_SEC, AUTO_UPDATE_QUIET_SEC,
+                        AUTO_UPDATE_TICK_SEC)
     from config import read_build_mark
-    from database.history import get_setting
     from services import deploy
 
     await asyncio.sleep(20)  # даём боту подняться (как у остальных циклов)
@@ -329,18 +327,16 @@ async def auto_update_loop(application):
     while True:
         await asyncio.sleep(AUTO_UPDATE_TICK_SEC)
         try:
-            # Уборка отвисевшего уведомления — СВОИМ try и ДО тумблера
-            # самообновления. Своим — потому что сорвавшееся удаление не должно
-            # мешать самим обновлениям. До тумблера — потому что уведомление
-            # уже отправлено, и выключенное самообновление не повод оставлять
-            # его в личке навсегда.
+            # Уборка отвисевшего уведомления — СВОИМ try: сорвавшееся удаление
+            # не должно мешать самим обновлениям.
             try:
                 await drop_expired_notice(application)
             except Exception as e:
                 logger.warning("⚠️ Не удалось прибрать уведомление об обновлении: %s", e)
 
-            if get_setting("auto_update_enabled", AUTO_UPDATE_ENABLED_DEFAULT) != "1":
-                continue
+            # ⚠️ ТУМБЛЕРА НЕТ (18.10.2026, решение Максима): самообновление
+            # включено всегда. Прежняя настройка 'auto_update_enabled' в базе
+            # никем не читается — «0» в ней цикл не остановит.
             if time.monotonic() - last_check < AUTO_UPDATE_INTERVAL_SEC:
                 continue
             if deploy.quiet_for() < AUTO_UPDATE_QUIET_SEC:

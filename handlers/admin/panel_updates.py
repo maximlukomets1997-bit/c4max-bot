@@ -17,8 +17,7 @@ import html
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from config import AUTO_UPDATE_ENABLED_DEFAULT, BOT_VERSION_HTML
-from database.history import get_setting
+from config import BOT_VERSION_HTML
 
 from .common import _adm_back_row, _send_panel_message
 
@@ -87,8 +86,9 @@ def _build_updates_panel(page: int = 0):
     from services import update_log
 
     items = update_log.recent()
-    auto_on = get_setting("auto_update_enabled", AUTO_UPDATE_ENABLED_DEFAULT) == "1"
 
+    # Строки «🤖 Самообновление: ВКЛ/ВЫКЛ» здесь больше нет (18.10.2026):
+    # самообновление включено всегда, и строка показывала бы одно и то же.
     head = (
         f"{_ICON} <b>ОБНОВЛЕНИЯ</b>\n"
         f"───────────────────────────\n"
@@ -101,8 +101,7 @@ def _build_updates_panel(page: int = 0):
         # поломка, просто рассказывать нечего.
         why = ("журнала git рядом с ботом нет"
                if not update_log.available() else "не удалось прочитать журнал git")
-        text = (f"{head}"
-                f"🤖 <b>Самообновление:</b> {'🟢 ВКЛЮЧЕНО' if auto_on else '🔴 ВЫКЛЮЧЕНО'}\n\n"
+        text = (f"{head}\n"
                 f"История обновлений недоступна: {why}.")
         return text, InlineKeyboardMarkup(_back_rows())
 
@@ -124,7 +123,6 @@ def _build_updates_panel(page: int = 0):
         f"📦 <b>Правок:</b> за сутки {st['day']} · за неделю {st['week']} · "
         f"за месяц {st['month']}\n"
         f"🗂 <b>В списке:</b> {st['total']}\n"
-        f"🤖 <b>Самообновление:</b> {'🟢 ВКЛЮЧЕНО' if auto_on else '🔴 ВЫКЛЮЧЕНО'}\n"
         f"───────────────────────────\n"
         f"<i>Нажми на обновление — откроется его страница на GitHub "
         f"(слияние или коммит).</i>\n"

@@ -587,23 +587,6 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await _handle_kb_callback(query, context, data, chat_id, user_id)
         return
 
-    # ── Тумблер самообновления ──────────────────────────────────────────
-    # Выключенный тумблер не мешает обновляться вручную (кнопка перезапуска
-    # и .bat) — он гасит только автоматический цикл.
-    if data == "adm_autoupdate":
-        # Само переключение — общий шаг с нижней кнопкой владельца
-        # (panel_main.flip_autoupdate, 2026-10-18).
-        from handlers.admin.panel_main import autoupdate_notice, flip_autoupdate, redraw_adm
-        now_on = flip_autoupdate(user_id)
-        await query.answer(autoupdate_notice(now_on), show_alert=True)
-        await redraw_adm(query, user_id)
-        # На нижней кнопке «⬇️ ОБНОВЛЕНИЕ» тоже видно состояние, а свою надпись
-        # она сама не меняет — присылаем панель заново (прежнее сообщение уберётся).
-        from .panel_keys import send_owner_keys
-        await send_owner_keys(context.bot, chat_id, user_id)
-        return
-
-
     # ── Кнопка перезапуска бота ─────────────────────────────────────────
     if data == "system_restart":
         logger.info("🔧 Админ %s запросил перезапуск бота", user_id)
