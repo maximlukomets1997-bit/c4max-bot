@@ -737,29 +737,6 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await handle_keys_callback(query, data)
         return
 
-    if data == "toggle_owner_keys":
-        # Выключатель «⌨️ НИЖНИЕ КНОПКИ» в /adm (2026-10-17, решение Максима):
-        # панель кнопок под полем ввода в личке владельца (panel_keys.py).
-        # Включили — панель ставится сразу, выключили — убирается.
-        from .panel_keys import SETTING_KEY, keys_enabled, remove_owner_keys, send_owner_keys
-        from handlers.admin.panel_main import redraw_adm
-        new_val = "0" if keys_enabled() else "1"
-        set_setting(SETTING_KEY, new_val)
-        state = "включены" if new_val == "1" else "выключены"
-        logger.info("🔧 Админ %s: нижние кнопки %s", user_id, state)
-        _audit(user_id, "owner_keys", 0, f"нижние кнопки {state}")
-        await query.answer(
-            "⌨️ Нижние кнопки включены: панель под полем ввода." if new_val == "1"
-            else "⌨️ Нижние кнопки выключены: панель убрана.")
-        if new_val == "1":
-            await send_owner_keys(context.bot, chat_id, user_id)
-        else:
-            await remove_owner_keys(context.bot, chat_id)
-        # /adm меняет вид целиком (2026-10-18): нижние кнопки включены — один
-        # выключатель, выключены — полная панель (panel_main.adm_view).
-        await redraw_adm(query, user_id)
-        return
-
     if data == "toggle_live_thoughts":
         # Тумблер «🧠 МЫСЛИ В ЧЕРНОВИКЕ» (2026-10-14, решение Максима): в личке
         # мысли модели видны по ходу над ответом (services/live_answer.py).

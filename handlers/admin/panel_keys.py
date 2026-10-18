@@ -9,7 +9,7 @@
 #  Как устроено:
 #   • send_owner_keys — шлёт короткое сообщение с панелью и ОСТАВЛЯЕТ его, а
 #     предыдущее такое сообщение удаляет: в чате всегда одно. Зовут /start
-#     владельца, автопанель при запуске бота (main.py) и включение выключателем.
+#     владельца и автопанель при запуске бота (main.py).
 #     ⚠️ СООБЩЕНИЕ С ПАНЕЛЬЮ УДАЛЯТЬ НЕЛЬЗЯ (v5.71 → v5.72, 18.10.2026). В v5.71
 #     бот удалял его в ту же секунду — по пробе 17.10, где кнопки пережили
 #     удаление, сделанное через несколько минут. При мгновенном удалении
@@ -23,9 +23,10 @@
 #     зовёт handlers/messages.py ДО модели и до склейки: текст совпал с
 #     кнопкой и пишет владелец в личке — сообщение удаляется (как команда),
 #     открывается раздел. Тот же текст от кого угодно другого — обычный вопрос.
-#   • Выключатель «⌨️ НИЖНИЕ КНОПКИ» в /adm (settings 'owner_keys_enabled',
-#     по умолчанию включён). Выключен — сообщение с панелью удаляется, и
-#     панель уходит вместе с ним; нажатия больше не перехватываются.
+#   • ВЫКЛЮЧАТЕЛЯ НЕТ (18.10.2026, решение Максима): у владельца панель есть
+#     всегда. До этого дня в /adm стоял «⌨️ НИЖНИЕ КНОПКИ» (settings
+#     'owner_keys_enabled'); запись в базе никем не читается, «0» в ней панель
+#     не уберёт — не возвращать.
 #   • Номер сообщения с панелью — в settings 'owner_keys_msg_<номер владельца>':
 #     по нему удаляется предыдущее. ⚠️ Telegram не даёт ботам удалять сообщения
 #     старше двух суток — тогда старое остаётся, и в чате их два.
@@ -43,7 +44,7 @@
 
 import logging
 
-from telegram import KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram import KeyboardButton, ReplyKeyboardMarkup
 from telegram.constants import ParseMode
 
 from database.history import get_setting, set_setting
@@ -51,7 +52,6 @@ from utils import delete_user_message_safe, register_and_clean_bot_message, sche
 
 logger = logging.getLogger(__name__)
 
-SETTING_KEY = "owner_keys_enabled"
 # Номер сообщения, с которым стоит панель: owner_keys_msg_<номер владельца>.
 MSG_KEY_PREFIX = "owner_keys_msg_"
 CARRIER_TEXT = "⌨️ Панель управления — кнопки внизу, под полем ввода."
@@ -86,8 +86,8 @@ KEYS = (
 # время становится переключателями раздела. Ряды — раскладка; «⬅️ Назад»
 # возвращает главную. Переключатели — ТЕ ЖЕ шаги, что кнопки под панелью
 # (panel_main.flip_api_toggle / step_batch), а под самой панелью их тогда нет
-# (panel_main.api_toggles_below). /start, перезапуск бота и выключатель всегда
-# ставят главную: какое подменю открыто, бот не помнит и помнить не обязан.
+# (panel_main.api_toggles_below). /start и перезапуск бота всегда ставят
+# главную: какое подменю открыто, бот не помнит и помнить не обязан.
 API_ROWS = (
     (("🧠 МЫСЛИ ПОД КАПОТОМ", "thoughts"),),
     (("✍️ ОТВЕТ НА ГЛАЗАХ", "live_answer"),),
@@ -107,14 +107,6 @@ _STATEFUL = ("thoughts", "live_answer", "live_thoughts", "batch_info")
 _NOTICE_TTL_SEC = 7
 # Пояснение склейки длиннее — живёт дольше.
 _INFO_TTL_SEC = 20
-
-
-def keys_enabled() -> bool:
-    """Выключатель «⌨️ НИЖНИЕ КНОПКИ» (по умолчанию включён). Сбой чтения — выключен."""
-    try:
-        return get_setting(SETTING_KEY, "1") == "1"
-    except Exception:
-        return False
 
 
 def _shown(label: str, code: str) -> str:
@@ -187,8 +179,8 @@ async def _delete(bot, chat_id: int, message_id: int) -> bool:
 
 async def _post(bot, chat_id: int, text: str, markup) -> None:
     """
-    Прислать сообщение, с которым стоит панель (или её снятие), запомнить его и
-    убрать предыдущее — уже ПОСЛЕ нового: панель живёт по последнему сообщению.
+    Прислать сообщение, с которым стоит панель, запомнить его и убрать
+    предыдущее — уже ПОСЛЕ нового: панель живёт по последнему сообщению.
     Без звука — служебное сообщение будить телефон не должно.
     """
     previous = _stored_msg(chat_id)
@@ -203,34 +195,18 @@ async def send_owner_keys(bot, chat_id: int, user_id: int | None = None,
                           menu: str = "main") -> None:
     """
     Поставить нижние кнопки в личке владельца: главную панель (main) или
-    подменю «📡 Настройки API» (api). Не владелец, не личка или кнопки
-    выключены — ничего не делает. Тихая: панель — удобство, из-за неё не
-    должны падать ни /start, ни запуск бота.
+    подменю «📡 Настройки API» (api). Не владелец или не личка — ничего не
+    делает. Тихая: панель — удобство, из-за неё не должны падать ни /start,
+    ни запуск бота.
     """
     uid = chat_id if user_id is None else user_id
-    if not _is_owner_private(chat_id, uid) or not keys_enabled():
+    if not _is_owner_private(chat_id, uid):
         return
     text = API_CARRIER_TEXT if menu == "api" else CARRIER_TEXT
     try:
         await _post(bot, chat_id, text, owner_keyboard(menu))
     except Exception as e:
         logger.warning("⚠️ Не удалось поставить нижние кнопки владельцу %s: %s", chat_id, e)
-
-
-async def remove_owner_keys(bot, chat_id: int) -> None:
-    """
-    Убрать нижние кнопки (выключатель погасили): удалить сообщение, с которым
-    они стоят, — панель уйдёт вместе с ним. Не удалилось (старше двух суток)
-    или номера нет — прислать снятие панели отдельным сообщением; оно
-    остаётся в чате и уберётся при следующем включении. Тихая.
-    """
-    try:
-        if await _delete(bot, chat_id, _stored_msg(chat_id)):
-            set_setting(f"{MSG_KEY_PREFIX}{chat_id}", "0")
-            return
-        await _post(bot, chat_id, "⌨️ Нижние кнопки убраны.", ReplyKeyboardRemove())
-    except Exception as e:
-        logger.warning("⚠️ Не удалось убрать нижние кнопки у %s: %s", chat_id, e)
 
 
 async def _notice(bot, chat_id: int, text: str, ttl: int = _NOTICE_TTL_SEC) -> None:
@@ -355,8 +331,7 @@ async def handle_owner_key(update, context, text: str) -> bool:
     Нажатие нижней кнопки владельца. Возвращает True, если это была она —
     тогда сообщение уже обработано и модели не уходит.
 
-    Перехватывает ТОЛЬКО: личку, владельца, включённые кнопки и текст ровно
-    как на кнопке. Как любая команда, гасит ожидание числа (экраны счетов и
+    Перехватывает ТОЛЬКО: личку, владельца и текст ровно как на кнопке. Как любая команда, гасит ожидание числа (экраны счетов и
     счёта викторины) и режимы панели базы знаний.
     """
     code = _code_of(text)
@@ -364,8 +339,6 @@ async def handle_owner_key(update, context, text: str) -> bool:
         return False
     chat, user = update.effective_chat, update.effective_user
     if chat is None or user is None or not _is_owner_private(chat.id, user.id):
-        return False
-    if not keys_enabled():
         return False
     await delete_user_message_safe(update.message)
     for key in ("balance_edit", "quiz_edit", "kb_add_mode", "kb_replace_target"):

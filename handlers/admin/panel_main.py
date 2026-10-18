@@ -280,12 +280,12 @@ def step_batch(user_id: int, steps: int) -> str | None:
 def api_toggles_below(user_id: int) -> bool:
     """
     Переключатели раздела стоят в нижнем подменю владельца (2026-10-18)?
-    Тогда под панелью их нет. Выключил нижние кнопки — они снова под панелью:
-    это и откат без выкатки.
+    Тогда под панелью их нет. С 18.10.2026 нижние кнопки у владельца есть
+    всегда, значит и это — всегда; под панелью переключатели остаются только
+    в полном варианте (_build_api_keyboard(…, full=True)) для preflight.
     """
     from services.roles import is_owner
-    from .panel_keys import keys_enabled
-    return is_owner(user_id) and keys_enabled()
+    return is_owner(user_id)
 
 
 def _build_api_keyboard(user_id, full: bool = False):
@@ -571,9 +571,11 @@ def _web_row():
 
 def _adm_rows():
     """
-    Ряды кнопок главной панели ДО фильтра по правам. Вынесены отдельно, чтобы
-    ту же раскладку могла собрать ветка, которая ВОЗВРАЩАЕТ клавиатуру /adm
-    после действия (выключатель нижних кнопок — router.py), не отправляя панель заново.
+    Ряды кнопок главной панели ДО фильтра по правам: из них собирают полную
+    клавиатуру для preflight (build_adm_keyboard) и /adm модератора (adm_view).
+    ⚠️ Владелец этих кнопок с 18.10.2026 в /adm не видит — его разделы в
+    нижней панели (panel_keys.py); владельческие ряды здесь остались ради
+    сверки проводки кнопок и роутера.
     """
     return _web_row() + [
         [InlineKeyboardButton("💬 Статистика", callback_data="adm_open_stats")],
@@ -613,25 +615,17 @@ def _adm_rows():
         # «⬇️ ОБНОВЛЕНИЕ»; по решению Максима самообновление теперь включено
         # всегда (jobs/update.py), и тумблер убран отовсюду — не возвращать.
         [InlineKeyboardButton("🔄 ПЕРЕЗАПУСК", callback_data="system_restart")],
-        # Нижние кнопки владельца под полем ввода (2026-10-17, panel_keys.py).
-        # Владельческая (в _CALLBACK_RULES её нет) — у модератора ряда нет.
-        [_owner_keys_button()],
+        # До 18.10.2026 последним рядом стоял выключатель «⌨️ НИЖНИЕ КНОПКИ»;
+        # по решению Максима нижние кнопки теперь есть всегда — не возвращать.
     ]
-
-
-def _owner_keys_button():
-    """Выключатель «⌨️ НИЖНИЕ КНОПКИ» — надпись следует за настройкой."""
-    from .panel_keys import keys_enabled
-    return InlineKeyboardButton(f"⌨️ НИЖНИЕ КНОПКИ: {_onoff(keys_enabled())}",
-                                callback_data="toggle_owner_keys")
 
 
 def build_adm_keyboard(user_id: int):
     """
     ПОЛНАЯ клавиатура /adm по правам смотрящего. Её меряет preflight (самый
     полный вариант панели) и сторожат проверки поведения. Что /adm показывает
-    на самом деле — решает adm_view: у владельца с включёнными нижними
-    кнопками там один выключатель.
+    на самом деле — решает adm_view: владельцу — ни одной кнопки (разделы
+    внизу), модератору — его часть этой клавиатуры.
     """
     return InlineKeyboardMarkup(_filter_keyboard(_adm_rows(), user_id))
 
@@ -640,11 +634,11 @@ def adm_view(user_id: int):
     """
     Что показывает /adm этому человеку: (текст, клавиатура или None).
 
-    ⚠️ У ВЛАДЕЛЬЦА С ВКЛЮЧЁННЫМИ НИЖНИМИ КНОПКАМИ — ОДИН ВЫКЛЮЧАТЕЛЬ (2026-10-18,
-    решение Максима): все разделы и так стоят внизу под полем ввода
-    (panel_keys.py). Выключил нижние кнопки — /adm снова полный: без разделов
-    владелец не остаётся ни при каком положении выключателя, и это же —
-    откат без выкатки. Модераторов это не касается: нижней панели у них нет.
+    ⚠️ У ВЛАДЕЛЬЦА — БЕЗ КНОПОК (2026-10-18, решения Максима): все разделы
+    стоят внизу под полем ввода (panel_keys.py), а выключателя нижних кнопок
+    больше нет — они есть всегда. Пропала панель из чата — её вернёт /start.
+    Остаётся заголовок с версией и подсказка, где разделы. Модераторов это не
+    касается: нижней панели у них нет, /adm у них — по правам.
 
     Версия в заголовке — способ увидеть, какая сборка РЕАЛЬНО работает (на
     сервере она меняется только после того, как он забрал правки). Синей
@@ -652,20 +646,14 @@ def adm_view(user_id: int):
     синим рисуются только ссылки.
     """
     from services import roles
-    from .panel_keys import keys_enabled
-    owner = roles.is_owner(user_id)
-    if owner and keys_enabled():
+    if roles.is_owner(user_id):
         return ((f"🎛 <b>АДМИН-ПАНЕЛЬ</b> · {BOT_VERSION_HTML}\n"
                  "───────────────────────────\n"
                  "<i>Разделы — в нижних кнопках под полем ввода.</i>"),
-                InlineKeyboardMarkup([[_owner_keys_button()]]))
+                None)
 
     keyboard = _filter_keyboard(_adm_rows(), user_id)
-    if owner:
-        text = (f"🎛 <b>АДМИН-ПАНЕЛЬ</b> · {BOT_VERSION_HTML}\n"
-                "───────────────────────────\n"
-                "<i>Выберите раздел управления:</i>")
-    elif keyboard:
+    if keyboard:
         text = (f"🛡 <b>ПАНЕЛЬ МОДЕРАТОРА</b> · {BOT_VERSION_HTML}\n"
                 "───────────────────────────\n"
                 "<i>Доступны разделы по твоим правам:</i>")
@@ -678,21 +666,6 @@ def adm_view(user_id: int):
     return text, (InlineKeyboardMarkup(keyboard) if keyboard else None)
 
 
-async def redraw_adm(query, user_id: int) -> None:
-    """
-    Перерисовать /adm на месте после нажатия в нём (выключатель нижних
-    кнопок): текст И кнопки, по adm_view. Одних кнопок мало — после
-    переключения нижних кнопок /adm меняет вид целиком (короткий ↔ полный).
-    """
-    text, markup = adm_view(user_id)
-    try:
-        await query.edit_message_text(
-            text, parse_mode=ParseMode.HTML, reply_markup=markup,
-            link_preview_options=LinkPreviewOptions(is_disabled=True))
-    except Exception as e:
-        logger.warning("⚠️ Не удалось перерисовать /adm: %s", e)
-
-
 async def send_adm_panel(bot, chat_id: int, user_id: int | None = None):
     """
     Главная панель — единая точка входа во все разделы управления ботом.
@@ -700,7 +673,7 @@ async def send_adm_panel(bot, chat_id: int, user_id: int | None = None):
     Собирается ПО ПРАВАМ смотрящего: список разделов один на всех, а лишнее
     отсекает фильтр по таблице прав (services/roles.py). Владельческие разделы
     в таблице не значатся вовсе — им достаётся запрет по умолчанию. Вид — по
-    adm_view (у владельца с нижними кнопками — короткий).
+    adm_view (у владельца — без кнопок, разделы внизу).
     user_id по умолчанию = chat_id: панель всегда открывается в личке, где
     это одно и то же число.
     """

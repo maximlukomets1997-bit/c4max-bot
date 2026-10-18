@@ -10021,7 +10021,8 @@ def check_owner_keys():
     у них нет callback_data, по которому он считает кнопки. А сломаться тихо
     они могут так: нажатие уходит модели вопросом (и стоит денег), кнопка
     открывает не тот раздел, панель приходит модератору или постороннему,
-    перехват ловит чужой такой же текст, выключатель не убирает панель.
+    перехват ловит чужой такой же текст. С 18.10.2026 выключателя у панели
+    нет — и старая запись «выключено» в базе не должна её убирать.
 
     Гоняются настоящие: панель и её отправка (`panel_keys`), обработчик
     `handlers/messages.py::handle_message`, `/start` и `/adm`; поддельные —
@@ -10108,9 +10109,12 @@ def check_owner_keys():
     import services.roles  # noqa: F401 — модуль прав грузим ДО подмены владельцев
     saved_roles = (roles.ADMIN_IDS, dict(roles._cache), roles._loaded)
     SLOT = f"{pk.MSG_KEY_PREFIX}{OWNER}"
+    # Запись прежнего выключателя «⌨️ НИЖНИЕ КНОПКИ» (убран 18.10.2026): бот
+    # её больше не читает, и «0» в ней ничего не должно выключать.
+    OLD_KEY = "owner_keys_enabled"
     import utils_format as uf
     saved_settings = {k: hist.get_setting(k, "") for k in
-                      (pk.SETTING_KEY, la.SETTING_KEY, SLOT,
+                      (OLD_KEY, la.SETTING_KEY, SLOT,
                        uf.THOUGHTS_SETTING_KEY, la.THOUGHTS_SETTING_KEY, mb.SETTING_KEY)}
     targets = {
         "adm": (pm, "send_adm_panel"), "stats": (pm, "send_stats_panel"),
@@ -10147,7 +10151,7 @@ def check_owner_keys():
         hm.ask_gemini = fake_ask
         mb.wait_sec = lambda: 0
         hist.set_setting(la.SETTING_KEY, "0")        # показ по ходу сторожит своя группа
-        hist.set_setting(pk.SETTING_KEY, "1")
+        hist.delete_setting(OLD_KEY)
 
         # ═══ 1. Панель: надписи, порядок, вид ═══
         kb = pk.owner_keyboard()
@@ -10193,27 +10197,12 @@ def check_owner_keys():
         for title, chat_id, uid in (("модератору", MOD, MOD), ("постороннему", PLAIN, PLAIN),
                                     ("в группе", -100777060, OWNER)):
             expect(f"нижние кнопки пришли {title}", not asyncio.run(put(chat_id, uid)).events)
-        hist.set_setting(pk.SETTING_KEY, "0")
-        expect("кнопки выключены, а панель всё равно пришла",
-               not asyncio.run(put(OWNER, OWNER)).events)
-        current = int(hist.get_setting(SLOT, "0") or 0)
-        bot = Bot()
-        asyncio.run(pk.remove_owner_keys(bot, OWNER))
-        expect("выключатель не удалил сообщение с панелью — панель не ушла бы",
-               ("delete", OWNER, current) in bot.events
-               and not any(e[0] == "send" for e in bot.events))
-        # Старое (старше двух суток) удалить нельзя — тогда снятие панели
-        # отдельным сообщением, и его уберёт следующее включение.
-        hist.set_setting(SLOT, "123")
-        bot = Bot(delete_fail=True, start_id=900)
-        asyncio.run(pk.remove_owner_keys(bot, OWNER))
-        removal = [e for e in bot.events if e[0] == "send" and isinstance(e[3], ReplyKeyboardRemove)]
-        expect("сообщение с панелью не удалилось, а снятия панели нет — панель осталась бы",
-               len(removal) == 1 and hist.get_setting(SLOT, "") == str(removal[0][4]))
-        hist.set_setting(pk.SETTING_KEY, "1")
+        # Выключателя нет (18.10.2026): старая запись «выключено» панель не убирает.
+        hist.set_setting(OLD_KEY, "0")
         bot = asyncio.run(put(OWNER, OWNER, Bot(start_id=950)))
-        expect("включение не убрало сообщение о снятии панели",
-               bool(removal) and ("delete", OWNER, removal[0][4]) in bot.events)
+        expect("в базе старая запись «нижние кнопки выключены» — и панель не пришла",
+               len(keyboards(bot)) == 1)
+        hist.delete_setting(OLD_KEY)
 
         # ═══ 3. Каждая кнопка — в свой раздел ═══
         def press(user_id, text, chat_type="private", user_data=None):
@@ -10304,11 +10293,11 @@ def check_owner_keys():
             bot, gone, _ = press(uid, "💬 Статистика")
             expect(f"текст кнопки от {title} перехвачен — а это обычный вопрос модели",
                    not opened and asked == ["💬 Статистика"])
-        hist.set_setting(pk.SETTING_KEY, "0")
+        hist.set_setting(OLD_KEY, "0")
         bot, gone, _ = press(OWNER, "💬 Статистика")
-        expect("кнопки выключены, а нажатие всё равно перехвачено",
-               not opened and asked == ["💬 Статистика"])
-        hist.set_setting(pk.SETTING_KEY, "1")
+        expect("в базе старая запись «нижние кнопки выключены» — и нажатие ушло модели",
+               opened == ["stats"] and not asked)
+        hist.delete_setting(OLD_KEY)
         bot, gone, _ = press(OWNER, "привет, как дела")
         expect("обычное сообщение владельца не дошло до модели",
                not opened and asked == ["привет, как дела"])
@@ -10337,76 +10326,39 @@ def check_owner_keys():
         expect("после запуска бота нижние кнопки не ставятся вместе с панелью (main.py)",
                0 <= at_panel < at_keys)
 
-        # ═══ 6. Выключатель в /adm ═══
-        from services.roles import perm_for_callback
-        expect("выключатель нижних кнопок может нажать не только владелец",
-               perm_for_callback("toggle_owner_keys") == "owner")
-        found = {}
-        for raw in ("1", "0"):
-            hist.set_setting(pk.SETTING_KEY, raw)
-            found[raw] = [b.text for row in pm.build_adm_keyboard(OWNER).inline_keyboard
-                          for b in row if b.callback_data == "toggle_owner_keys"]
-        expect("в /adm нет выключателя нижних кнопок, или надпись не следует за настройкой",
-               bool(found["1"]) and bool(found["0"]) and found["1"] != found["0"]
-               and "НИЖНИЕ КНОПКИ" in found["1"][0])
-        expect("выключатель нижних кнопок виден модератору",
-               not any(b.callback_data == "toggle_owner_keys"
-                       for row in pm.build_adm_keyboard(MOD).inline_keyboard for b in row))
-
-        # ═══ 7. Короткий /adm у владельца с нижними кнопками (18.10.2026) ═══
-        # Все разделы стоят внизу — в /adm один выключатель. Выключил нижние
-        # кнопки — /adm снова полный: без разделов владелец не остаётся.
+        # ═══ 6–7. /adm: выключателя нет, у владельца — без кнопок (18.10.2026) ═══
+        # Все разделы стоят внизу, а выключателя нижних кнопок больше нет: у
+        # владельца /adm — заголовок с версией и подсказка, без кнопок, при
+        # любой старой записи в базе. Модератору — его часть /adm по правам.
         def datas_of(markup):
             return [b.callback_data for row in (markup.inline_keyboard if markup else [])
                     for b in row]
 
-        hist.set_setting(pk.SETTING_KEY, "1")
-        text, markup = pm.adm_view(OWNER)
-        expect(f"нижние кнопки включены, а /adm владельца не из одного выключателя: "
-               f"{datas_of(markup)}",
-               datas_of(markup) == ["toggle_owner_keys"] and "нижних кнопках" in text)
-        hist.set_setting(pk.SETTING_KEY, "0")
-        text, markup = pm.adm_view(OWNER)
-        expect("нижние кнопки выключены, а /adm не полный — владелец остался бы без разделов",
-               {"adm_open_stats", "system_restart", "toggle_owner_keys"} <= set(datas_of(markup))
-               and "Выберите раздел" in text)
-        hist.set_setting(pk.SETTING_KEY, "1")
+        for who in (OWNER, MOD):
+            expect("выключатель нижних кнопок вернулся в /adm",
+                   "toggle_owner_keys" not in datas_of(pm.build_adm_keyboard(who)))
+        for raw in ("1", "0"):
+            hist.set_setting(OLD_KEY, raw)
+            text, markup = pm.adm_view(OWNER)
+            expect(f"/adm владельца не без кнопок (старая запись выключателя «{raw}»): "
+                   f"{datas_of(markup)}", markup is None and "нижних кнопках" in text)
+        hist.delete_setting(OLD_KEY)
         text, markup = pm.adm_view(MOD)
-        expect("у модератора /adm стал коротким — нижней панели у него нет",
-               "adm_open_mod" in datas_of(markup) and "toggle_owner_keys" not in datas_of(markup))
+        expect("у модератора /adm стал как у владельца — нижней панели у него нет",
+               "adm_open_mod" in datas_of(markup) and "Выберите раздел" not in text
+               and "adm_open_stats" not in datas_of(markup))
         # Настоящая отправка /adm (в этой группе её подменяет записная книжка).
         bot = Bot()
         asyncio.run(saved_targets["adm"](bot, OWNER, OWNER))
         sent = [e for e in bot.events if e[0] == "send"]
-        expect("/adm владельца с нижними кнопками пришёл не коротким",
-               bool(sent) and datas_of(sent[-1][3]) == ["toggle_owner_keys"])
-        # Перерисовка после выключателя: текст И кнопки, короткий ↔ полный.
-        edits = []
-
-        async def _edit(text, **kw):
-            edits.append((text, kw.get("reply_markup")))
-        q = types.SimpleNamespace(edit_message_text=_edit)
-        hist.set_setting(pk.SETTING_KEY, "0")
-        asyncio.run(pm.redraw_adm(q, OWNER))
-        expect("после выключения нижних кнопок /adm не стал полным (текст и кнопки)",
-               bool(edits) and "Выберите раздел" in edits[-1][0]
-               and "adm_open_stats" in datas_of(edits[-1][1]))
-        hist.set_setting(pk.SETTING_KEY, "1")
-        asyncio.run(pm.redraw_adm(q, OWNER))
-        expect("после включения нижних кнопок /adm не стал коротким (текст и кнопки)",
-               "нижних кнопках" in edits[-1][0] and datas_of(edits[-1][1]) == ["toggle_owner_keys"])
-        name = 'if data == "toggle_owner_keys"'
-        branch = router_src[router_src.find(name):]
-        branch = branch[:branch.find("\n    if data", 10)]
-        expect(f"ветка «{name}» перерисовывает /adm одними кнопками — текст разошёлся бы "
-               f"с видом панели", "redraw_adm(" in branch)
+        expect("/adm владельца пришёл с кнопками",
+               bool(sent) and sent[-1][3] is None and "нижних кнопках" in sent[-1][2])
 
         # ═══ 8. Подменю «📡 Настройки API» (18.10.2026, пилот) ═══
         # Нижняя «📡 Настройки API» присылает панель и ставит внизу её
         # переключатели; каждый — тот же шаг, что кнопка под панелью; под
         # панелью их тогда нет. «⬅️ Назад» — главная.
         mb.wait_sec = saved_h[1]                     # регулятору нужна настоящая склейка
-        hist.set_setting(pk.SETTING_KEY, "1")
         hist.set_setting(uf.THOUGHTS_SETTING_KEY, "1")
         hist.set_setting(la.SETTING_KEY, "0")
         hist.set_setting(la.THOUGHTS_SETTING_KEY, "1")
@@ -10518,8 +10470,9 @@ def check_owner_keys():
         expect("/start после подменю поставил не главную нижнюю панель",
                rows is not None and sum(rows, []) == WANT)
 
-        # Под панелью переключателей нет, пока они внизу; выключил нижние
-        # кнопки — снова под панелью (это и откат без выкатки).
+        # Под панелью переключателей нет — они внизу. С 18.10.2026 выключателя
+        # нижних кнопок нет, и старая запись «выключено» их под панель не
+        # возвращает: под панелью они только в полном варианте для preflight.
         TOGGLES = {"toggle_thoughts", "toggle_live_answer", "toggle_live_thoughts",
                    "batch_dec", "batch_info", "batch_inc"}
         compact = set(datas_of(pm._build_api_keyboard(OWNER)))
@@ -10533,19 +10486,14 @@ def check_owner_keys():
         expect("панель API с переключателями внизу не говорит, где они",
                bool(sent) and "в нижних кнопках" in sent[-1][2]
                and not TOGGLES & set(datas_of(sent[-1][3])))
-        hist.set_setting(pk.SETTING_KEY, "0")
-        expect("нижние кнопки выключены, а переключателей под панелью API нет — "
-               "до них не добраться", TOGGLES <= set(datas_of(pm._build_api_keyboard(OWNER))))
-        bot = Bot()
-        asyncio.run(saved_targets["api"](bot, OWNER, OWNER))
-        sent = [e for e in bot.events if e[0] == "send"]
-        expect("нижние кнопки выключены, а панель API всё равно отсылает к ним",
-               bool(sent) and "в нижних кнопках" not in sent[-1][2])
+        hist.set_setting(OLD_KEY, "0")
+        expect("старая запись «нижние кнопки выключены» вернула переключатели под панель API",
+               not TOGGLES & set(datas_of(pm._build_api_keyboard(OWNER))))
+        hist.set_setting(uf.THOUGHTS_SETTING_KEY, "1")
         bot, gone, _ = press(OWNER, "🧠 МЫСЛИ ПОД КАПОТОМ: 🟢ВКЛ")
-        expect("нижние кнопки выключены, а нажатие переключателя всё равно перехвачено",
-               hist.get_setting(uf.THOUGHTS_SETTING_KEY, "") == "1"
-               and asked == ["🧠 МЫСЛИ ПОД КАПОТОМ: 🟢ВКЛ"])
-        hist.set_setting(pk.SETTING_KEY, "1")
+        expect("старая запись «нижние кнопки выключены» — и нажатие переключателя ушло модели",
+               hist.get_setting(uf.THOUGHTS_SETTING_KEY, "") == "0" and not asked)
+        hist.delete_setting(OLD_KEY)
         for title, uid in (("постороннего", PLAIN), ("модератора", MOD)):
             bot, gone, _ = press(uid, "⬅️ Назад")
             expect(f"«⬅️ Назад» от {title} перехвачен — а это обычный вопрос модели",
@@ -10575,8 +10523,9 @@ def check_owner_keys():
     return problems, (f"{done} проверок: надписи, порядок и вид панели; приходит только "
                       f"владельцу в личке, её сообщение остаётся одно — новое убирает "
                       f"прежнее; каждая кнопка — в свой раздел, мимо модели; чужой такой же "
-                      f"текст и выключенные кнопки — модели; /start и запуск ставят панель, "
-                      f"/adm — нет; выключатель удаляет её сообщение; подменю «Настройки API» — "
+                      f"текст — модели; выключателя нет, старая запись «выключено» ничего не "
+                      f"гасит; /start и запуск ставят панель, /adm — нет, у владельца он без "
+                      f"кнопок; подменю «Настройки API» — "
                       f"те же переключатели и надписи, что под панелью, а под панелью их нет")
 
 
