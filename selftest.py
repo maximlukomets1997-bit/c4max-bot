@@ -11105,6 +11105,17 @@ def check_owner_keys():
         q_saved_auto = hist.get_setting(qd.ENABLED_KEY, "")
         q_saved_stats = qb.stats
         HOURS = qd.hours_label()
+        # Своя пустая папка статей (как в check_quiz_queue): на ПК и сервере в
+        # knowledge/ лежат настоящие статьи, и без подмены у «пустого банка»
+        # появлялась «📋 Статьи без вопросов (120)» — проверка краснела от
+        # содержимого машины, а не от кода (найдено на ПК 19.10.2026).
+        import tempfile as _qtmp
+        import services.knowledge_store as _qks
+        q_art_dir = _qtmp.mkdtemp(prefix="c4max-selftest-keys-")
+        q_saved_folders = dict(_qks._FOLDERS)
+        for _sub in ("pending", "approved"):
+            _qks._FOLDERS[_sub] = os.path.join(q_art_dir, _sub)
+            os.makedirs(_qks._FOLDERS[_sub], exist_ok=True)
         try:
             hist.delete_all_quiz_questions()
             hist.reset_all_quiz_stats()
@@ -11296,6 +11307,9 @@ def check_owner_keys():
                        asked == ["📝 Черновики (5)"])
         finally:
             qb.stats = q_saved_stats
+            _qks._FOLDERS.update(q_saved_folders)
+            import shutil as _qsh
+            _qsh.rmtree(q_art_dir, ignore_errors=True)
             panel_quiz.send_quiz_panel = recorder("quiz")
             with hist._lock:
                 qconn = hist._get_connection()
