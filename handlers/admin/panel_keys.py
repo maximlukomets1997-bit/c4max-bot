@@ -210,13 +210,33 @@ MOD_KEYS = tuple(key for row in MOD_ROWS for key in row) + (MOD_EVIDENCE_KEY,)
 # Здесь — надписи без чисел; с числом узнаются по образцу (_STATEFUL).
 QUIZ_KEYS = (("🗑 Очистить черновики", "q_wipe"), ("🗑 Стереть ВСЕ вопросы", "q_nuke"))
 
+# Подменю «📚 База знаний» и «⚙️ Настройки поиска» (2026-10-19, решение
+# Максима): ряды собирают panel_rag.rag_keys_rows / rag_settings_rows в момент
+# отправки — разделы с живыми счётчиками, регуляторы с живыми числами. Здесь —
+# надписи без чисел; с числом узнаются по образцу (_STATEFUL). ⚠️ «🧹 Очистить
+# журнал» и «➖/➕ порог» уже заняты (DDoS-Guard, PROMPTы) — отсюда «… RAG».
+# «⬅️ К базе знаний» — из настроек в подменю базы, а «⬅️ Назад» — в главную.
+RAG_KEYS = (("➕ Добавить RAG", "r_add"), ("🔄 Пересобрать RAG", "r_rebuild"),
+            ("⚙️ Настройки поиска", "r_settings"), ("🧹 Очистить журнал RAG", "r_clearlog"),
+            ("➖ порог RAG", "r_thr_dec"), ("➕ порог RAG", "r_thr_inc"),
+            ("➖ статей", "r_topk_dec"), ("➕ статей", "r_topk_inc"),
+            ("➖ запас", "r_margin_dec"), ("➕ запас", "r_margin_inc"),
+            ("🔍 Проверить поиск", "r_test"), ("⏹️ Завершить проверку", "r_test"),
+            ("⬅️ К базе знаний", "r_back"))
+# Нажатия ВНУТРИ базы знаний не обрывают проверку поиска: «спросил → подкрутил
+# порог → спросил снова» — основной способ настроить поиск (как под панелью).
+_KEEP_KB_TEST = {"rag", "r_settings", "r_back", "r_kb", "r_test",
+                 "r_thr_dec", "r_thr_inc", "r_thr_info", "r_topk_dec", "r_topk_inc",
+                 "r_topk_info", "r_margin_dec", "r_margin_inc", "r_margin_info",
+                 "r_pending", "r_ground", "r_sub", "r_ship", "r_guide", "r_air", "r_other"}
+
 # Подменю: раскладка и текст сообщения, с которым оно стоит. None — текст
 # собирается в момент отправки: у prompts и mod — сама панель раздела, у
 # service — сообщение с версией и цифрами.
 _MENUS = {"api": (API_ROWS, API_CARRIER_TEXT), "prompts": (PROMPTS_ROWS, None),
           "service": (SERVICE_ROWS, None), "mod": (MOD_ROWS, None)}
 
-_ALL_KEYS = KEYS + API_KEYS + PROMPTS_KEYS + SERVICE_KEYS + MOD_KEYS + QUIZ_KEYS
+_ALL_KEYS = KEYS + API_KEYS + PROMPTS_KEYS + SERVICE_KEYS + MOD_KEYS + QUIZ_KEYS + RAG_KEYS
 # «💬 Статистика» ушла из панели 18.10.2026; если её кнопка осталась на
 # экране от прежней панели, нажатие — то же, что «🎛 Админ-панель», а не
 # вопрос модели.
@@ -255,6 +275,18 @@ _STATEFUL = {
     "q_reseed": r"♻️ Обновить из файла \(\d+\)",
     "q_seed": r"📥 Новые вопросы \(\d+\)",
     "q_zero": r"🧹 Обнулить статистику \(\d+\)",
+    # База знаний: разделы со счётчиками, тумблер и числа регуляторов.
+    "r_pending": r"🕐 Ждут одобрения \(\d+\)",
+    "r_ground": r"🚜 Наземная \(\d+\)",
+    "r_sub": r"⚓ Подлодки \(\d+\)",
+    "r_ship": r"🛥️? Корабли \(\d+\)",
+    "r_guide": r"📘 Механики \(\d+\)",
+    "r_air": r"✈️? Авиация \(\d+\)",
+    "r_other": r"📄 Без типа \(\d+\)",
+    "r_kb": "📖 База знаний: .+",
+    "r_thr_info": r"🎯 \d+%",
+    "r_topk_info": r"📦 \d+ стат(ья|ьи|ей)",
+    "r_margin_info": r"📈 \d+%",
 }
 _STATEFUL_RX = {code: re.compile(pattern) for code, pattern in _STATEFUL.items()}
 
@@ -270,8 +302,9 @@ def _shown(label: str, code: str, user_id: int | None = None) -> str:
     (panel_main.api_toggle_text, panel_prompts.prompts_toggle_text): разойтись
     им нельзя. user_id нужен личному тумблеру «⚙️ PROMPT».
     """
-    if code.startswith("q_"):
-        # Надпись викторины уже живая: её собрал panel_quiz.quiz_keys_rows.
+    if code.startswith(("q_", "r_")):
+        # Надписи викторины и базы знаний уже живые: их собрали
+        # panel_quiz.quiz_keys_rows и panel_rag.rag_keys_rows / rag_settings_rows.
         return label
     if code.startswith("p_") and code in _STATEFUL:
         from .panel_prompts import prompts_toggle_text
@@ -305,7 +338,8 @@ def _code_of(text: str) -> str | None:
     return None
 
 
-def owner_keyboard(menu: str = "main", user_id: int | None = None) -> ReplyKeyboardMarkup:
+def owner_keyboard(menu: str = "main", user_id: int | None = None,
+                   context=None) -> ReplyKeyboardMarkup:
     """
     Сама панель, компактная, не сворачивается сама. main — «🎛 Админ-панель»
     во всю ширину, остальные разделы по две кнопки в ряд; api, prompts и
@@ -320,6 +354,13 @@ def owner_keyboard(menu: str = "main", user_id: int | None = None) -> ReplyKeybo
     elif menu == "quiz":
         from .panel_quiz import quiz_keys_rows
         layout = quiz_keys_rows()
+    elif menu == "rag":
+        # context — ради метки проверки поиска (она в user_data владельца).
+        from .panel_rag import rag_keys_rows
+        layout = rag_keys_rows(context)
+    elif menu == "rag_settings":
+        from .panel_rag import rag_settings_rows
+        layout = rag_settings_rows(context)
     elif menu in _MENUS:
         layout = _MENUS[menu][0]
     else:
@@ -376,7 +417,7 @@ async def _post(bot, chat_id: int, text: str, markup, html: bool = True) -> None
 
 
 async def send_owner_keys(bot, chat_id: int, user_id: int | None = None,
-                          menu: str = "main") -> None:
+                          menu: str = "main", context=None) -> None:
     """
     Поставить нижние кнопки в личке владельца: главную панель (main) или
     подменю раздела (api — «📡 Настройки API», prompts — «⚙️ PROMPTы»). Не
@@ -391,14 +432,19 @@ async def send_owner_keys(bot, chat_id: int, user_id: int | None = None,
     uid = chat_id if user_id is None else user_id
     if not _is_owner_private(chat_id, uid):
         return
-    keyboard = owner_keyboard(menu, uid)
-    if menu in ("prompts", "mod", "quiz"):
+    keyboard = owner_keyboard(menu, uid, context)
+    if menu in ("prompts", "mod", "quiz", "rag", "rag_settings"):
         if menu == "prompts":
             from .panel_prompts import prompts_panel_text
             text = prompts_panel_text(uid, getattr(bot, "username", None))
         elif menu == "quiz":
             from .panel_quiz import _build_panel as _build_quiz_panel
             text = _build_quiz_panel(None)[0]
+        elif menu in ("rag", "rag_settings"):
+            import types
+            from .panel_rag import rag_panel_text, rag_settings_text
+            ctx = context if context is not None else types.SimpleNamespace(user_data={})
+            text = rag_panel_text(ctx) if menu == "rag" else rag_settings_text(ctx)
         else:
             from .panel_mod import _build_mod_panel_text_and_keyboard
             text = _build_mod_panel_text_and_keyboard(uid)[0]
@@ -566,7 +612,11 @@ async def _run(code: str, context, chat_id: int, user_id: int) -> None:
         from .panel_users import send_users_panel
         await send_users_panel(bot, chat_id, user_id)
     elif code == "rag":
+        # У владельца панель — сама с нижними кнопками подменю (send_rag_panel
+        # зовёт send_owner_keys(menu="rag")). Открывается всегда с разделов.
         from .panel_rag import send_rag_panel
+        context.user_data["kb_screen"] = ""
+        context.user_data["kb_page"] = 0
         await send_rag_panel(bot, chat_id, context)
     elif code == "quiz":
         # У владельца панель викторины — сама с нижними кнопками подменю
@@ -606,6 +656,56 @@ async def _run(code: str, context, chat_id: int, user_id: int) -> None:
         sent = await bot.send_message(chat_id=chat_id, parse_mode=ParseMode.HTML,
                                       text=QUIZ_CONFIRM_TEXT[kind],
                                       reply_markup=confirm_markup(kind))
+        if sent:
+            await register_and_clean_bot_message(bot, chat_id, sent.message_id)
+    elif code in ("r_pending", "r_ground", "r_sub", "r_ship", "r_guide", "r_air", "r_other"):
+        # Список статей раздела — отдельным сообщением, как из-под панели.
+        from .panel_rag import send_kb_section
+        if not await send_kb_section(bot, chat_id, context, code[2:]):
+            await _notice(bot, chat_id, "Этот раздел уже пуст.")
+            await send_owner_keys(bot, chat_id, user_id, menu="rag", context=context)
+    elif code in ("r_settings", "r_back"):
+        context.user_data["kb_screen"] = "settings" if code == "r_settings" else ""
+        context.user_data["kb_page"] = 0
+        await send_owner_keys(bot, chat_id, user_id,
+                              menu="rag_settings" if code == "r_settings" else "rag",
+                              context=context)
+    elif code == "r_kb":
+        from .panel_rag import flip_kb_enabled
+        await _notice(bot, chat_id, flip_kb_enabled(user_id))
+        await send_owner_keys(bot, chat_id, user_id, menu="rag_settings", context=context)
+    elif code in ("r_thr_dec", "r_thr_inc", "r_topk_dec", "r_topk_inc",
+                  "r_margin_dec", "r_margin_inc"):
+        from .panel_rag import kb_step_text, step_kb
+        name = code[2:].rsplit("_", 1)[0]
+        if step_kb(name, 1 if code.endswith("inc") else -1) is None:
+            await _notice(bot, chat_id, "Это крайнее значение.")
+            return
+        await _notice(bot, chat_id, kb_step_text(name))
+        await send_owner_keys(bot, chat_id, user_id, menu="rag_settings", context=context)
+    elif code in ("r_thr_info", "r_topk_info", "r_margin_info"):
+        from .panel_rag import kb_step_info
+        await _notice(bot, chat_id, kb_step_info(code[2:-5]), _INFO_TTL_SEC)
+    elif code == "r_test":
+        from .panel_rag import KB_TEST_ON_TEXT, toggle_kb_test
+        said = await toggle_kb_test(bot, chat_id, context)
+        await _notice(bot, chat_id, said, _INFO_TTL_SEC if said == KB_TEST_ON_TEXT else _NOTICE_TTL_SEC)
+        # Метка кнопки меняется: в настройках — там, где нажали; иначе — в подменю базы.
+        menu = "rag_settings" if context.user_data.get("kb_screen") == "settings" else "rag"
+        await send_owner_keys(bot, chat_id, user_id, menu=menu, context=context)
+    elif code == "r_add":
+        from .panel_rag import start_kb_add
+        await _notice(bot, chat_id, start_kb_add(context), _INFO_TTL_SEC)
+    elif code in ("r_rebuild", "r_clearlog"):
+        # Сначала вопрос отдельным сообщением; «❗️ Да» — та же ветка, что под
+        # панелью (kb_rebuild_yes / kb_clearlog_yes), «Отмена» — kb_panel.
+        from .panel_rag import KB_CONFIRM_TEXT, _kb_rebuild_running, kb_confirm_markup
+        kind = code[2:]
+        if kind == "rebuild" and _kb_rebuild_running(context):
+            await _notice(bot, chat_id, "⏳ Пересборка уже идёт — дождитесь итога.")
+            return
+        sent = await bot.send_message(chat_id=chat_id, parse_mode=ParseMode.HTML,
+                                      text=KB_CONFIRM_TEXT[kind], reply_markup=kb_confirm_markup(kind))
         if sent:
             await register_and_clean_bot_message(bot, chat_id, sent.message_id)
     elif code == "logs":
@@ -677,8 +777,9 @@ async def handle_owner_key(update, context, text: str) -> bool:
     await delete_user_message_safe(update.message)
     for key in ("balance_edit", "quiz_edit", "kb_add_mode", "kb_replace_target"):
         context.user_data.pop(key, None)
-    from .panel_rag import _end_kb_test
-    await _end_kb_test(context.bot, chat.id, context)
+    if code not in _KEEP_KB_TEST:
+        from .panel_rag import _end_kb_test
+        await _end_kb_test(context.bot, chat.id, context)
     logger.info("⌨️ Нижняя кнопка: %s | владелец %s", text.strip(), user.id)
     try:
         await _run(code, context, chat.id, user.id)

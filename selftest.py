@@ -10116,10 +10116,17 @@ def check_owner_keys():
         hist.delete_setting(OLD_KEY)
 
         # ═══ 3. Каждая кнопка — в свой раздел ═══
+        # Приложение бота — ради базы знаний: карта статей и защёлка пересборки
+        # живут в bot_data, фоновая пересборка уходит в create_task (здесь её
+        # не запускаем — задача только записывается).
+        APP = types.SimpleNamespace(bot_data={}, tasks=[])
+        APP.create_task = lambda coro: (APP.tasks.append(coro), coro.close())
+
         def press(user_id, text, chat_type="private", user_data=None):
             bot = Bot()
             upd, gone = make(user_id, text, chat_type)
-            ctx = types.SimpleNamespace(bot=bot, user_data=user_data if user_data is not None else {})
+            ctx = types.SimpleNamespace(bot=bot, user_data=user_data if user_data is not None else {},
+                                        application=APP)
             opened.clear()
             asked.clear()
 
@@ -11324,6 +11331,255 @@ def check_owner_keys():
                 hist.delete_setting(qd.ENABLED_KEY)
             else:
                 hist.set_setting(qd.ENABLED_KEY, q_saved_auto)
+
+        # ═══ 13. Подменю «📚 База знаний» и «⚙️ Настройки поиска» (19.10.2026) ═══
+        # Как у викторины: панель с нижними кнопками — одно сообщение; разделы
+        # внизу — ровно те, что под панелью, с живыми счётчиками; список статей
+        # и карточка — сообщениями с кнопками под ними («⬅️ К разделам» под
+        # списком осталась); настройки — второе подменю; нажатия внутри базы
+        # не обрывают проверку поиска; очистка журнала и пересборка сначала
+        # спрашивают. Статьи — во временной папке, настройки возвращаются.
+        import tempfile as _rtmp
+        import shutil as _rsh
+        import services.knowledge_store as _rks
+        from services.settings_spec import SPEC as _RSPEC
+        r_dir = _rtmp.mkdtemp(prefix="c4max-selftest-ragkeys-")
+        r_saved_folders = dict(_rks._FOLDERS)
+        R_KEYS_DB = ("rag_min_similarity", "rag_top_k", "rag_peak_margin", "rag_enabled")
+        r_saved = {k: hist.get_setting(k, "") for k in R_KEYS_DB}
+        try:
+            for _sub in ("pending", "approved"):
+                _rks._FOLDERS[_sub] = os.path.join(r_dir, _sub)
+                os.makedirs(_rks._FOLDERS[_sub], exist_ok=True)
+
+            def article(folder, name, descriptor):
+                with open(os.path.join(_rks._FOLDERS[folder], f"{name}.md"), "w",
+                          encoding="utf-8") as fh:
+                    fh.write(f"# {name}\n\n{descriptor}\n\n## Описание\nТекст.\n")
+            article("approved", "Т-80", "Т-80 — основной танк в War Thunder Mobile")
+            article("approved", "Пума", "Пума — БМП в War Thunder Mobile")
+            article("approved", "Наутилус", "Наутилус — подводная лодка в War Thunder Mobile")
+            article("approved", "Ямато", "Ямато — линкор в War Thunder Mobile")
+            article("approved", "Бронепробитие", "Как считается бронепробитие")
+            article("approved", "МиГ-21", "МиГ-21 — истребитель в War Thunder Mobile")
+            article("pending", "Леопард", "Леопард — танк в War Thunder Mobile")
+            for k, v in zip(R_KEYS_DB, ("0.58", "3", "0.14", "1")):
+                hist.set_setting(k, v)
+            panel_rag.send_rag_panel = saved_targets["rag"]
+            rud = {}                                  # одна память владельца на весь раздел
+
+            WANT_R = [["🕐 Ждут одобрения (1)", "🚜 Наземная (2)"],
+                      ["⚓ Подлодки (1)", "🛥️ Корабли (1)"],
+                      ["📘 Механики (1)", "✈️ Авиация (1)"],
+                      ["➕ Добавить RAG", "🔄 Пересобрать RAG"], ["⚙️ Настройки поиска"],
+                      ["🧹 Очистить журнал RAG", "⬅️ Назад"]]
+            WANT_RS = [["📖 База знаний: 🟢ВКЛ"], ["➖ порог RAG", "🎯 58%", "➕ порог RAG"],
+                       ["➖ статей", "📦 3 статьи", "➕ статей"], ["➖ запас", "📈 14%", "➕ запас"],
+                       ["🔍 Проверить поиск"], ["⬅️ К базе знаний"]]
+            rctx = types.SimpleNamespace(user_data={}, application=APP)
+            expect(f"подменю «База знаний»: надписи или ряды не те: "
+                   f"{rows_of(pk.owner_keyboard('rag', OWNER, rctx))}",
+                   rows_of(pk.owner_keyboard("rag", OWNER, rctx)) == WANT_R)
+            expect(f"подменю «Настройки поиска»: надписи или ряды не те: "
+                   f"{rows_of(pk.owner_keyboard('rag_settings', OWNER, rctx))}",
+                   rows_of(pk.owner_keyboard("rag_settings", OWNER, rctx)) == WANT_RS)
+            # Разделы внизу — ровно те, что под полной панелью (её меряет preflight).
+            below = {d for d in datas_of(panel_rag._build_kb_main(rctx, _rks.list_articles())[1])
+                     if d.startswith("kb_open:") and d != "kb_open:settings"}
+            bottom = {"kb_open:" + (pk._code_of(label) or "r_?")[2:]
+                      for row in WANT_R[:3] for label in row}
+            expect(f"разделы внизу и под панелью разные: {sorted(below ^ bottom)}", below == bottom)
+            for label in sum(WANT_R, []) + sum(WANT_RS, []):
+                expect(f"нижняя «{label}» не узнаётся — нажатие ушло бы модели",
+                       pk._code_of(label) is not None)
+            for text_, code in (("🚜 Наземная (99)", "r_ground"), ("🛥 Корабли (3)", "r_ship"),
+                                ("📖 База знаний: 🔴ВЫКЛ", "r_kb"), ("🎯 40%", "r_thr_info"),
+                                ("📦 1 статья", "r_topk_info"), ("📦 7 статей", "r_topk_info"),
+                                ("⏹️ Завершить проверку", "r_test"), ("➖ порог", "p_mm_dec"),
+                                ("🧹 Очистить журнал", "m_clearlog"), ("📚 База знаний", "rag")):
+                expect(f"«{text_}» узнаётся как «{pk._code_of(text_)}», а не «{code}»",
+                       pk._code_of(text_) == code)
+            seen = {}
+            rclash = [label for label, code in pk._ALL_KEYS if seen.setdefault(label, code) != code]
+            expect(f"одна надпись у двух разных нижних кнопок: {rclash}", not rclash)
+
+            # Вход: одно сообщение с текстом панели и подменю; прежнее и открытый раздел убраны.
+            hist.set_setting(SLOT, "557")
+            bot = Bot(start_id=2200)
+            asyncio.run(reg(bot, OWNER, 4949))
+            bot.events.clear()
+            rctx.bot = bot
+            asyncio.run(panel_rag.send_rag_panel(bot, OWNER, rctx))
+            sent = [e for e in bot.events if e[0] == "send"]
+            expect(f"«📚 База знаний» владельца — не одно сообщение с текстом панели и подменю "
+                   f"внизу: {[(e[2][:30], type(e[3]).__name__) for e in sent]}",
+                   len(sent) == 1 and isinstance(sent[0][3], ReplyKeyboardMarkup)
+                   and "База знаний (RAG)" in sent[0][2] and rows_of(sent[0][3]) == WANT_R)
+            expect("«📚 База знаний» не убрала прежнее сообщение с нижними кнопками и открытый раздел",
+                   ("delete", OWNER, 557) in bot.events and ("delete", OWNER, 4949) in bot.events)
+            bot = Bot()
+            mctx = types.SimpleNamespace(user_data={}, application=APP, bot=bot)
+            asyncio.run(panel_rag.send_rag_panel(bot, MOD, mctx))
+            expect("не владельцу панель базы знаний ушла в нижние кнопки",
+                   not keyboards(bot) and any(e[0] == "send" for e in bot.events))
+            bot, gone, _ = press(OWNER, "📚 База знаний", user_data=rud)
+            rows, text, _ = last_keys(bot)
+            expect(f"нижняя «📚 База знаний» не прислала подменю с разделами: {rows}",
+                   rows == WANT_R and "База знаний (RAG)" in text and not asked and bool(gone))
+
+            # Раздел — список отдельным сообщением, «⬅️ К разделам» под ним осталась.
+            for label in ("🚜 Наземная (2)", "🚜 Наземная (99)"):
+                bot, gone, _ = press(OWNER, label, user_data=rud)
+                lists = [e for e in bot.events if e[0] == "send" and hasattr(e[3], "inline_keyboard")]
+                expect(f"нижняя «{label}» не прислала список статей с их кнопками и «⬅️ К разделам»",
+                       len(lists) == 1 and "НАЗЕМНАЯ" in lists[0][2] and not keyboards(bot)
+                       and any(d.startswith("kb_view:") for d in datas_of(lists[0][3]))
+                       and "kb_open:main" in datas_of(lists[0][3]) and not asked)
+            bot, gone, _ = press(OWNER, "📄 Без типа (3)", user_data=rud)
+            expect("пустой раздел не сказал «уже пуст» или не вернул подменю базы",
+                   notices(bot) == ["Этот раздел уже пуст."] and last_keys(bot)[0] == WANT_R)
+            # «⬅️ К разделам» под списком у владельца — панель с подменю заново.
+            edited = []
+
+            async def _redit(*a, **kw):
+                edited.append(True)
+
+            async def _rans(*a, **kw):
+                return None
+            rq = types.SimpleNamespace(answer=_rans, edit_message_text=_redit,
+                                       edit_message_reply_markup=_redit)
+            bot = Bot()
+            rctx2 = types.SimpleNamespace(bot=bot, user_data=rud, application=APP)
+            rud["kb_screen"] = "ground"
+            asyncio.run(panel_rag._handle_kb_callback(rq, rctx2, "kb_open:main", OWNER, OWNER))
+            expect("«⬅️ К разделам» у владельца не прислала подменю базы, а перерисовала список",
+                   not edited and last_keys(bot)[0] == WANT_R and rud.get("kb_screen") == "")
+
+            # Настройки — второе подменю; тумблер и регуляторы — те же настройки.
+            bot, gone, _ = press(OWNER, "⚙️ Настройки поиска", user_data=rud)
+            rows, text, _ = last_keys(bot)
+            expect(f"«⚙️ Настройки поиска» не прислали своё подменю с текстом настроек: {rows}",
+                   rows == WANT_RS and "НАСТРОЙКИ ПОИСКА" in text and rud.get("kb_screen") == "settings")
+            bot, gone, _ = press(OWNER, "📖 База знаний: 🟢ВКЛ", user_data=rud)
+            expect(f"«📖 База знаний» не выключила базу или надпись не следует: {last_keys(bot)[0]}",
+                   hist.get_setting("rag_enabled", "") == "0" and bool(notices(bot))
+                   and "📖 База знаний: 🔴ВЫКЛ" in sum(last_keys(bot)[0] or [], []))
+            press(OWNER, "📖 База знаний: 🟢ВКЛ", user_data=rud)    # прежняя надпись
+            expect("«📖 База знаний» с прежней надписью не включила обратно",
+                   hist.get_setting("rag_enabled", "") == "1")
+            for plus, minus, key, after, label_after in (
+                    ("➕ порог RAG", "➖ порог RAG", "rag_min_similarity", "0.6", "🎯 60%"),
+                    ("➕ статей", "➖ статей", "rag_top_k", "4", "📦 4 статьи"),
+                    ("➕ запас", "➖ запас", "rag_peak_margin", "0.15", "📈 15%")):
+                bot, gone, _ = press(OWNER, plus, user_data=rud)
+                rows, _, _ = last_keys(bot)
+                expect(f"нижний «{plus}» не прибавил шаг или надпись не следует: "
+                       f"{hist.get_setting(key, '')} {rows}",
+                       abs(float(hist.get_setting(key, "0")) - float(after)) < 1e-9
+                       and bool(rows) and label_after in sum(rows, []) and not asked)
+                press(OWNER, minus, user_data=rud)
+            expect("нижние «➖» не вернули настройки поиска",
+                   [hist.get_setting(k, "") for k in R_KEYS_DB[:3]] == ["0.58", "3", "0.14"])
+            hist.set_setting("rag_top_k", "10")
+            bot, gone, _ = press(OWNER, "➕ статей", user_data=rud)
+            expect("«➕ статей» на пределе: не сказано «крайнее значение» или прислано подменю",
+                   hist.get_setting("rag_top_k", "") == "10" and not keyboards(bot)
+                   and notices(bot) == ["Это крайнее значение."])
+            hist.set_setting("rag_top_k", "3")
+            bot, gone, _ = press(OWNER, "🎯 41%", user_data=rud)
+            said = notices(bot)
+            expect(f"средняя «🎯» не пояснила словами сайта, что это за число: {said}",
+                   len(said) == 1 and _RSPEC["rag_min_similarity"]["hint"] in said[0]
+                   and not keyboards(bot) and not asked)
+
+            # Проверка поиска: нажатия внутри базы её не обрывают, выход в главную — обрывает.
+            bot, gone, _ = press(OWNER, "🔍 Проверить поиск", user_data=rud)
+            expect(f"«🔍 Проверить поиск» не включила проверку или надпись не сменилась: "
+                   f"{last_keys(bot)[0]}", rud.get("kb_test_mode") is True
+                   and "⏹️ Завершить проверку" in sum(last_keys(bot)[0] or [], []))
+            for label in ("➕ порог RAG", "➖ порог RAG", "📖 База знаний: 🟢ВКЛ",
+                          "📖 База знаний: 🔴ВЫКЛ", "🚜 Наземная (2)", "⬅️ К базе знаний",
+                          "📚 База знаний", "⚙️ Настройки поиска"):
+                if pk._code_of(label) is None:
+                    continue                      # не узнаётся — это уже красное выше
+                press(OWNER, label, user_data=rud)
+                expect(f"нижняя «{label}» оборвала проверку поиска — а это шаг внутри базы",
+                       rud.get("kb_test_mode") is True)
+            bot, gone, _ = press(OWNER, "⬅️ К базе знаний", user_data=rud)
+            expect(f"пока идёт проверка, в подменю базы нет «⏹️ Завершить проверку»: "
+                   f"{last_keys(bot)[0]}", "⏹️ Завершить проверку" in sum(last_keys(bot)[0] or [], []))
+            press(OWNER, "⬅️ Назад", user_data=rud)
+            expect("выход в главную не оборвал проверку поиска", not rud.get("kb_test_mode"))
+            press(OWNER, "🔍 Проверить поиск", user_data=rud)
+            press(OWNER, "⏹️ Завершить проверку", user_data=rud)
+            expect("«⏹️ Завершить проверку» не завершила проверку", not rud.get("kb_test_mode"))
+
+            # «➕ Добавить RAG» — ждёт файл, тем же шагом.
+            bot, gone, _ = press(OWNER, "➕ Добавить RAG", user_data=rud)
+            expect("«➕ Добавить RAG» не включила приём файла или не сказала, что прислать",
+                   rud.get("kb_add_mode") is True and notices(bot) == [panel_rag.KB_ADD_TEXT])
+            press(OWNER, "📚 База знаний", user_data=rud)
+            expect("другая нижняя кнопка не отменила приём файла", not rud.get("kb_add_mode"))
+
+            # Очистка журнала и пересборка: сначала вопрос; «Да» — та же ветка, что под панелью.
+            from database.history import add_kb_action, get_recent_kb_actions
+            add_kb_action("одобрена", "Т-80", OWNER)
+            APP.tasks.clear()
+            APP.bot_data["kb_rebuild_running"] = False
+            for label, kind, check in (
+                    ("🧹 Очистить журнал RAG", "clearlog", lambda: not get_recent_kb_actions(5)),
+                    ("🔄 Пересобрать RAG", "rebuild",
+                     lambda: len(APP.tasks) == 1 and APP.bot_data.get("kb_rebuild_running"))):
+                bot, gone, _ = press(OWNER, label, user_data=rud)
+                ask = [e for e in bot.events if e[0] == "send" and hasattr(e[3], "inline_keyboard")]
+                expect(f"нижняя «{label}» не спросила «Да / Отмена» или сделала сразу: "
+                       f"{[datas_of(e[3]) for e in ask]}",
+                       len(ask) == 1 and datas_of(ask[0][3]) == [f"kb_{kind}_yes", "kb_panel"]
+                       and ask[0][2] == panel_rag.KB_CONFIRM_TEXT[kind] and not check() and not asked)
+                expect(f"«Да» у вопроса «{label}» может нажать не только владелец",
+                       _perm(f"kb_{kind}_yes") == "owner" and _perm("kb_panel") == "owner")
+                ask_id = ask[0][4] if ask else 0
+                qbot = Bot(start_id=2300)
+                qctx = types.SimpleNamespace(bot=qbot, user_data=rud, application=APP)
+                qq = types.SimpleNamespace(answer=_rans, edit_message_text=_redit,
+                                           edit_message_reply_markup=_redit)
+                asyncio.run(panel_rag._handle_kb_callback(qq, qctx, f"kb_{kind}_yes", OWNER, OWNER))
+                expect(f"«Да» у вопроса «{label}» не сделало дело, не прислало подменю базы "
+                       f"заново или не убрало вопрос",
+                       check() and len(keyboards(qbot)) == 1
+                       and ("delete", OWNER, ask_id) in qbot.events)
+            bot, gone, _ = press(OWNER, "🔄 Пересобрать RAG", user_data=rud)
+            expect("во время пересборки нижняя «🔄 Пересобрать RAG» снова спросила, а не "
+                   "сказала, что пересборка идёт",
+                   notices(bot) == ["⏳ Пересборка уже идёт — дождитесь итога."]
+                   and len(APP.tasks) == 1)
+            APP.bot_data["kb_rebuild_running"] = False
+            # Под панелью пересборка тоже сначала спрашивает (решение Максима).
+            edited.clear()
+            asyncio.run(panel_rag._handle_kb_callback(rq, rctx2, "kb_rebuild", MOD, MOD))
+            expect("«🔄 Пересобрать RAG» под панелью запустила пересборку без вопроса",
+                   edited == [True] and len(APP.tasks) == 1)
+
+            # Кнопки под панелью — теми же шагами; чужой такой же текст — модели.
+            rag_src = inspect.getsource(panel_rag._handle_kb_callback)
+            expect("кнопки базы знаний под панелью работают не общими шагами с нижним подменю",
+                   all(f"{name}(" in rag_src for name in
+                       ("flip_kb_enabled", "step_kb", "toggle_kb_test", "start_kb_add",
+                        "kb_confirm_markup")))
+            for title, uid in (("постороннего", PLAIN), ("модератора", MOD)):
+                bot, gone, _ = press(uid, "🚜 Наземная (2)")
+                expect(f"«🚜 Наземная (2)» от {title} перехвачена — а это обычный вопрос модели",
+                       asked == ["🚜 Наземная (2)"])
+        finally:
+            _rks._FOLDERS.update(r_saved_folders)
+            _rsh.rmtree(r_dir, ignore_errors=True)
+            APP.bot_data["kb_rebuild_running"] = False
+            panel_rag.send_rag_panel = recorder("rag")
+            for k, v in r_saved.items():
+                if v == "":
+                    hist.delete_setting(k)
+                else:
+                    hist.set_setting(k, v)
     finally:
         for k, v in saved_mod.items():
             if v == "":
@@ -11360,6 +11616,9 @@ def check_owner_keys():
                       f"и вопрос перед очисткой журнала; "
                       f"подменю «Викторина» — одно сообщение с панелью, кнопка только при "
                       f"работе и с живым числом, те же шаги и вопрос перед стиранием; "
+                      f"подменю «База знаний» — разделы как под панелью, список статей "
+                      f"сообщением, второе подменю настроек, проверка поиска не "
+                      f"обрывается внутри базы, вопрос перед очисткой журнала и пересборкой; "
                       f"«🎛 Админ-панель» — это и статистика: цифры в сообщении с версией, "
                       f"кнопки статистики внизу; "
                       f"подменю «PROMPTы» — так же, с объявлением группам у «Сам в разговор», "

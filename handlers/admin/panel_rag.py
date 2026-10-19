@@ -172,6 +172,20 @@ def _build_rag_panel(context, admin_id: int):
     return _build_kb_main(context, articles)
 
 
+def _kb_counts(articles):
+    """
+    (ждут одобрения, одобренные, {тип: сколько}) — ОДИН счёт на текст панели,
+    кнопки под ней и нижнее подменю владельца (19.10.2026): посчитанные
+    дважды, числа разошлись бы.
+    """
+    pending_count = sum(1 for a in articles if a["folder"] == "pending")
+    approved = [a for a in articles if a["folder"] == "approved"]
+    counts = {}
+    for art in approved:
+        counts[art.get("kind")] = counts.get(art.get("kind"), 0) + 1
+    return pending_count, approved, counts
+
+
 def _build_kb_main(context, articles):
     """
     Экран разделов: статусы, журнал последних действий и кнопки разделов со
@@ -183,12 +197,7 @@ def _build_kb_main(context, articles):
     from config import RAG_ENABLED
     from services.knowledge_store import ARTICLE_KINDS
 
-    pending_count = sum(1 for a in articles if a["folder"] == "pending")
-    approved = [a for a in articles if a["folder"] == "approved"]
-
-    counts = {}
-    for art in approved:
-        counts[art.get("kind")] = counts.get(art.get("kind"), 0) + 1
+    pending_count, approved, counts = _kb_counts(articles)
 
     def kind_btn(kind: str):
         """Кнопка раздела — или None, если статей этого типа нет."""
@@ -407,8 +416,241 @@ def _build_kb_settings(context):
     return text, InlineKeyboardMarkup(rows)
 
 
+# ─────────────────────────────────────────────
+#  Нижнее подменю владельца (19.10.2026, решение Максима, как «🎮 Викторина»)
+#
+#  У владельца в личке панель базы знаний — сообщение с нижними кнопками
+#  (panel_keys.send_owner_keys(menu="rag")): разделы со счётчиками и действия.
+#  «⚙️ Настройки поиска» — второе подменю (menu="rag_settings"): тумблер, три
+#  регулятора, проверка поиска и «⬅️ К базе знаний». Список статей раздела и
+#  карточка статьи — по-прежнему сообщениями с кнопками под ними. Каждая
+#  нижняя кнопка — тот же шаг, что кнопка под панелью (функции ниже).
+#  ⚠️ Надписи «🧹 Очистить журнал» и «➖/➕ порог» уже заняты в DDoS-Guard и
+#  PROMPTах — нажатие приходит ТЕКСТОМ, и две одинаковые надписи не
+#  различить; поэтому здесь «🧹 Очистить журнал RAG» и «➖/➕ порог RAG».
+# ─────────────────────────────────────────────
+
+# Короткие имена разделов внизу (кнопки узкие, две в ряд); иконки — из
+# ARTICLE_KINDS. Раскладка — та же, что под панелью (_build_kb_main).
+_KB_SHORT = {"ground": "Наземная", "sub": "Подлодки", "ship": "Корабли",
+             "guide": "Механики", "air": "Авиация", "other": "Без типа"}
+_KB_GRID = (("pending", "ground"), ("sub", "ship"), ("guide", "air"))
+
+
+def rag_keys_below(viewer_id: int) -> bool:
+    """Кнопки панели — в нижнем подменю? Панель только владельца, у него — всегда."""
+    from services.roles import is_owner
+    return is_owner(viewer_id)
+
+
+def _kb_section_label(key: str, n: int) -> str:
+    """Надпись нижней кнопки раздела: «🚜 Наземная (64)», «🕐 Ждут одобрения (2)»."""
+    if key == _KB_PENDING:
+        return f"🕐 Ждут одобрения ({n})"
+    from services.knowledge_store import ARTICLE_KINDS
+    return f"{ARTICLE_KINDS[key]['icon']} {_KB_SHORT[key]} ({n})"
+
+
+def rag_keys_rows(context=None) -> tuple:
+    """
+    Ряды нижнего подменю «📚 База знаний»: (надпись, код). Разделы — та же
+    сетка, что под панелью: пустая ячейка выпадает, ряд остаётся; «Без типа» —
+    отдельным рядом, только когда такие статьи есть. Пока идёт проверка
+    поиска, ниже действий — «⏹️ Завершить проверку» (как ряд под панелью).
+    """
+    from services.knowledge_store import list_articles
+    pending_count, _, counts = _kb_counts(list_articles())
+    have = dict(counts, **{_KB_PENDING: pending_count})
+    rows = []
+    for pair in _KB_GRID:
+        row = tuple((_kb_section_label(k, have[k]), f"r_{k}") for k in pair if have.get(k))
+        if row:
+            rows.append(row)
+    if counts.get("other"):
+        rows.append(((_kb_section_label("other", counts["other"]), "r_other"),))
+    rows.append((("➕ Добавить RAG", "r_add"), ("🔄 Пересобрать RAG", "r_rebuild")))
+    rows.append((("⚙️ Настройки поиска", "r_settings"),))
+    if context is not None and context.user_data.get("kb_test_mode"):
+        rows.append((("⏹️ Завершить проверку", "r_test"),))
+    rows.append((("🧹 Очистить журнал RAG", "r_clearlog"), ("⬅️ Назад", "back")))
+    return tuple(rows)
+
+
+def _kb_articles_word(n: int) -> str:
+    """«1 статья», «3 статьи», «5 статей»."""
+    if n % 10 == 1 and n % 100 != 11:
+        return f"{n} статья"
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return f"{n} статьи"
+    return f"{n} статей"
+
+
+def kb_step_text(code: str) -> str:
+    """Надпись средней кнопки регулятора: «🎯 58%», «📦 3 статьи», «📈 14%»."""
+    from services.rag import _live_top_k, _live_min_similarity, _live_peak_margin
+    if code == "thr":
+        return f"🎯 {int(round(_live_min_similarity() * 100))}%"
+    if code == "topk":
+        return f"📦 {_kb_articles_word(_live_top_k())}"
+    return f"📈 {int(round(_live_peak_margin() * 100))}%"
+
+
+def rag_settings_rows(context=None) -> tuple:
+    """Ряды подменю «⚙️ Настройки поиска» — те же настройки, что на экране под панелью."""
+    kb_on = get_setting("rag_enabled", "1") == "1"
+    test_on = context is not None and bool(context.user_data.get("kb_test_mode"))
+    return (
+        ((f"📖 База знаний: {_onoff(kb_on)}", "r_kb"),),
+        (("➖ порог RAG", "r_thr_dec"), (kb_step_text("thr"), "r_thr_info"), ("➕ порог RAG", "r_thr_inc")),
+        (("➖ статей", "r_topk_dec"), (kb_step_text("topk"), "r_topk_info"), ("➕ статей", "r_topk_inc")),
+        (("➖ запас", "r_margin_dec"), (kb_step_text("margin"), "r_margin_info"), ("➕ запас", "r_margin_inc")),
+        (("⏹️ Завершить проверку" if test_on else "🔍 Проверить поиск", "r_test"),),
+        (("⬅️ К базе знаний", "r_back"),),
+    )
+
+
+def rag_panel_text(context) -> str:
+    """Текст сообщения с подменю «📚 База знаний» — тот же, что у панели разделов."""
+    from services.knowledge_store import list_articles
+    return _build_kb_main(context, list_articles())[0]
+
+
+def rag_settings_text(context) -> str:
+    """Текст сообщения с подменю «⚙️ Настройки поиска» — тот же, что у экрана настроек."""
+    return _build_kb_settings(context)[0]
+
+
+# ── Общие шаги: кнопки под панелью и нижнего подменю (19.10.2026) ────────
+# Один шаг на оба места; каждый возвращает текст ответа.
+
+def flip_kb_enabled(user_id: int) -> str:
+    """
+    ОБЩИЙ тумблер базы знаний (2026-07-27): выключен — статьи не
+    подмешиваются НИКОМУ и НИГДЕ (личка, группы, «Сам в разговор»).
+    Проверяется в services/rag.py::retrieve_relevant_context — в одной
+    точке на всех путях сразу. На проверку поиска не влияет.
+    """
+    new_val = "0" if get_setting("rag_enabled", "1") == "1" else "1"
+    set_setting("rag_enabled", new_val)
+    state = "включена" if new_val == "1" else "выключена"
+    logger.info("📚 /rag: база знаний %s для ВСЕХ (переключил админ %s)", state, user_id)
+    return f"📖 База знаний {state} для всех"
+
+
+def step_kb(code: str, delta: int):
+    """
+    Шаг регулятора поиска (code: thr / topk / margin). Шаги, пределы и
+    начальные значения — в services/settings_spec.py, одной таблицей на весь
+    проект. None — упёрлись в предел, значение не изменилось.
+    """
+    from services.settings_spec import adjust
+    key = _KB_ADJUST_KEYS[f"kb_{code}"]
+    before = get_setting(key, "")
+    new_val = adjust(key, delta)
+    logger.info("📚 /rag: %s = %s", key, new_val)
+    return None if get_setting(key, "") == before else new_val
+
+
+def kb_step_info(code: str) -> str:
+    """Что за число на средней кнопке — теми же словами, что на сайте."""
+    from services.settings_spec import SPEC
+    key = _KB_ADJUST_KEYS[f"kb_{code}"]
+    return f"{kb_step_text(code)} — {SPEC[key]['title']}: {SPEC[key]['hint']}."
+
+
+KB_TEST_ON_TEXT = ("🔍 Пришли вопрос сообщением — покажу, какие разделы базы найдутся.\n\n"
+                   "Можно несколько подряд; для выхода снова нажми «Завершить проверку».")
+KB_TEST_OFF_TEXT = "✅ Проверка завершена — тестовые сообщения убраны."
+
+
+async def toggle_kb_test(bot, chat_id: int, context) -> str:
+    """
+    «🔍 Проверить поиск» ↔ «⏹️ Завершить проверку». Включена — следующие
+    текстовые сообщения этого админа в личке уходят в диагностику поиска
+    (handlers/messages.py), а не в ИИ; выключение убирает накопленное.
+    """
+    if context.user_data.get("kb_test_mode"):
+        await _end_kb_test(bot, chat_id, context)
+        return KB_TEST_OFF_TEXT
+    context.user_data["kb_test_mode"] = True
+    context.user_data["kb_test_msgs"] = []
+    context.user_data.pop("kb_replace_target", None)
+    return KB_TEST_ON_TEXT
+
+
+KB_ADD_TEXT = ("➕ Пришли файл .md или .txt со статьёй — я добавлю её в базу знаний "
+               "и сразу посчитаю вектора. Можно прислать несколько файлов подряд.")
+
+
+def start_kb_add(context) -> str:
+    """«➕ Добавить RAG»: следующий документ .md/.txt станет статьёй (handle_kb_document)."""
+    context.user_data["kb_add_mode"] = True
+    context.user_data.pop("kb_replace_target", None)
+    return KB_ADD_TEXT
+
+
+# Вопрос перед стиранием журнала и пересборкой — для нижней кнопки (там он
+# отдельным сообщением; под панелью «Да / Отмена» встают вместо её кнопок).
+# Пересборка спрашивает с 19.10.2026 (решение Максима) — и снизу, и под панелью.
+KB_CONFIRM_TEXT = {
+    "clearlog": "🧹 <b>Очистить журнал базы знаний?</b>\n<i>Сотрутся «Последние "
+                "действия» — сами статьи не тронутся.</i>",
+    "rebuild": "🔄 <b>Пересобрать базу знаний?</b>\n<i>Все статьи заново посчитаются "
+               "через Google — это может занять несколько минут; бот всё это время "
+               "отвечает как обычно.</i>",
+}
+
+
+def kb_confirm_markup(kind: str) -> InlineKeyboardMarkup:
+    """«❗️ Да / Отмена». «Отмена» — назад к панели (у владельца — заново, вопрос убирает уборка)."""
+    if kind == "rebuild":
+        yes = InlineKeyboardButton("❗️ Да, пересобрать", callback_data="kb_rebuild_yes")
+    else:
+        yes = InlineKeyboardButton("❗️ Да, очистить журнал", callback_data="kb_clearlog_yes")
+    return InlineKeyboardMarkup([[yes, InlineKeyboardButton("Отмена", callback_data="kb_panel")]])
+
+
+async def send_kb_section(bot, chat_id: int, context, key: str) -> bool:
+    """
+    Список статей раздела отдельным сообщением (нижняя кнопка раздела). False —
+    раздел успел опустеть, сообщения нет.
+    """
+    context.user_data["kb_screen"] = key
+    context.user_data["kb_page"] = 0
+    text, markup = _build_rag_panel(context, chat_id)
+    if context.user_data.get("kb_screen") != key:
+        return False
+    sent = await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML,
+                                  reply_markup=markup)
+    if sent:
+        await register_and_clean_bot_message(bot, chat_id, sent.message_id)
+    return True
+
+
 async def send_rag_panel(bot, chat_id: int, context):
-    """Отправляет панель базы знаний: статус RAG, журнал и список статей-кнопок."""
+    """
+    Отправляет панель базы знаний: статус RAG, журнал и список статей-кнопок.
+
+    ⚠️ У ВЛАДЕЛЬЦА В ЛИЧКЕ ПАНЕЛЬ — ЭТО СООБЩЕНИЕ НИЖНЕГО ПОДМЕНЮ (19.10.2026,
+    решение Максима): открыт экран настроек — подменю «⚙️ Настройки поиска»;
+    иначе подменю «📚 База знаний», а если был открыт раздел (вернулись из
+    карточки статьи) — следом его список, тот же, с которого ушли.
+    """
+    if rag_keys_below(chat_id):
+        from .panel_keys import send_owner_keys
+        screen = str(context.user_data.get("kb_screen") or "")
+        if screen == _KB_SETTINGS:
+            await send_owner_keys(bot, chat_id, chat_id, menu="rag_settings", context=context)
+            return
+        await send_owner_keys(bot, chat_id, chat_id, menu="rag", context=context)
+        if screen:
+            text, markup = _build_rag_panel(context, chat_id)
+            if context.user_data.get("kb_screen") == screen:
+                sent = await bot.send_message(chat_id=chat_id, text=text,
+                                              parse_mode=ParseMode.HTML, reply_markup=markup)
+                if sent:
+                    await register_and_clean_bot_message(bot, chat_id, sent.message_id)
+        return
     # Панель живёт только в личке админа, поэтому chat_id == id владельца
     text, markup = _build_rag_panel(context, chat_id)
     sent_msg = await bot.send_message(
@@ -484,6 +726,22 @@ async def _kb_popup(query, context, chat_id: int, text: str):
             logger.warning("⚠️ Не удалось показать уведомление панели RAG: %s", e)
 
 
+async def _kb_refresh(query, context, chat_id: int, user_id: int) -> None:
+    """
+    Показать панель после шага. Под сообщением — перерисовать его на месте;
+    у владельца (нижнее подменю, 19.10.2026) — прислать панель заново: такое
+    нажатие бывает лишь со старого сообщения, кнопок под новыми у него нет.
+    """
+    if rag_keys_below(user_id):
+        await send_rag_panel(context.bot, chat_id, context)
+        return
+    text, markup = _build_rag_panel(context, user_id)
+    try:
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+    except Exception as e:
+        logger.debug("📚 Не удалось обновить панель RAG: %s", e)
+
+
 async def _handle_kb_callback(query, context, data: str, chat_id: int, user_id: int):
     """Обрабатывает все callback-кнопки панели базы знаний (префикс kb_)."""
     from services.knowledge_store import read_article, read_title, approve_article, delete_article
@@ -543,6 +801,11 @@ async def _handle_kb_callback(query, context, data: str, chat_id: int, user_id: 
         # вторая страница танков в разделе из трёх подлодок была бы пустой.
         context.user_data["kb_page"] = 0
         await query.answer()
+        if rag_keys_below(user_id) and token in (_KB_MAIN, _KB_SETTINGS):
+            # У владельца разделы и настройки — нижним подменю (19.10.2026):
+            # «⬅️ К разделам» под списком присылает панель заново, список уберёт уборка.
+            await send_rag_panel(context.bot, chat_id, context)
+            return
         text, markup = _build_rag_panel(context, user_id)
         try:
             await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
@@ -573,30 +836,12 @@ async def _handle_kb_callback(query, context, data: str, chat_id: int, user_id: 
         return
 
     if action == "kb_test":
-        if context.user_data.get("kb_test_mode"):
-            # Повторное нажатие — завершаем проверку: гасим режим и убираем
-            # из чата все накопленные вопросы/ответы теста.
-            await _end_kb_test(context.bot, chat_id, context)
-            await query.answer("✅ Проверка завершена — тестовые сообщения убраны.")
-        else:
-            # Следующие текстовые сообщения этого админа в личке уходят в
-            # диагностику поиска (handlers/messages.py), а не в ИИ.
-            context.user_data["kb_test_mode"] = True
-            context.user_data["kb_test_msgs"] = []
-            context.user_data.pop("kb_replace_target", None)
-            # ВАЖНО: лимит всплывающего окна Telegram — 200 символов, текст
-            # длиннее молча не показывается (ошибка Message_too_long)
-            await query.answer(
-                "🔍 Пришли вопрос сообщением — покажу, какие разделы базы найдутся.\n\n"
-                "Можно несколько подряд; для выхода снова нажми «Завершить проверку».",
-                show_alert=True
-            )
+        said = await toggle_kb_test(context.bot, chat_id, context)
+        # ВАЖНО: лимит всплывающего окна Telegram — 200 символов, текст
+        # длиннее молча не показывается (ошибка Message_too_long)
+        await query.answer(said, show_alert=(said == KB_TEST_ON_TEXT))
         # Перерисовываем панель — кнопка теста меняет метку (Проверить ↔ Завершить)
-        text, markup = _build_rag_panel(context, user_id)
-        try:
-            await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
-        except Exception as e:
-            logger.debug("📚 Не удалось обновить панель RAG: %s", e)
+        await _kb_refresh(query, context, chat_id, user_id)
         return
 
     if action in ("kb_thr_dec", "kb_thr_inc", "kb_topk_dec", "kb_topk_inc",
@@ -607,17 +852,10 @@ async def _handle_kb_callback(query, context, data: str, chat_id: int, user_id: 
         # после появления сайта у тех же настроек стало два хозяина, и две
         # копии пределов разъехались бы. Почему шаг именно такой — там же,
         # рядом со значением.
-        from services.settings_spec import adjust
-        key = next(v for k, v in _KB_ADJUST_KEYS.items() if action.startswith(k))
-        new_val = adjust(key, 1 if action.endswith("inc") else -1)
-        logger.info("📚 /rag: %s = %s", key, new_val)
+        step_kb(action[3:].rsplit("_", 1)[0], 1 if action.endswith("inc") else -1)
         await query.answer()
         # Перерисовываем панель с новыми значениями на кнопках
-        text, markup = _build_rag_panel(context, user_id)
-        try:
-            await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
-        except Exception as e:
-            logger.debug("📚 Не удалось обновить панель RAG: %s", e)
+        await _kb_refresh(query, context, chat_id, user_id)
         return
 
     if action == "kb_myrag":
@@ -626,32 +864,30 @@ async def _handle_kb_callback(query, context, data: str, chat_id: int, user_id: 
         # Проверяется в services/rag.py::retrieve_relevant_context — в одной
         # точке на всех путях сразу.
         # На кнопку «🔍 Проверить поиск» не влияет — диагностика работает всегда.
-        cur_on = get_setting("rag_enabled", "1") == "1"
-        new_val = "0" if cur_on else "1"
-        set_setting("rag_enabled", new_val)
-        state = "включена" if new_val == "1" else "выключена"
-        logger.info("📚 /rag: база знаний %s для ВСЕХ (переключил админ %s)", state, user_id)
-        await query.answer(f"📖 База знаний {state} для всех", show_alert=False)
-        text, markup = _build_rag_panel(context, user_id)
-        try:
-            await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
-        except Exception as e:
-            logger.debug("📚 Не удалось обновить панель RAG: %s", e)
+        await query.answer(flip_kb_enabled(user_id), show_alert=False)
+        await _kb_refresh(query, context, chat_id, user_id)
         return
 
     if action == "kb_add":
         # Следующий документ .md/.txt от этого админа станет новой статьёй
         # базы знаний (handle_kb_document). Режим живёт до другого действия.
-        context.user_data["kb_add_mode"] = True
-        context.user_data.pop("kb_replace_target", None)
-        await query.answer(
-            "➕ Пришли файл .md или .txt со статьёй — я добавлю её в базу знаний "
-            "и сразу посчитаю вектора. Можно прислать несколько файлов подряд.",
-            show_alert=True
-        )
+        await query.answer(start_kb_add(context), show_alert=True)
         return
 
     if action == "kb_rebuild":
+        # Сначала вопрос (19.10.2026, решение Максима) — прямо в панели, как у
+        # очистки журнала; «❗️ Да» — ветка kb_rebuild_yes ниже.
+        if _kb_rebuild_running(context):
+            await _kb_popup(query, context, chat_id, "⏳ Пересборка уже идёт — дождитесь итога.")
+            return
+        await query.answer()
+        try:
+            await query.edit_message_reply_markup(kb_confirm_markup("rebuild"))
+        except Exception as e:
+            logger.warning("⚠️ Не удалось показать вопрос перед пересборкой: %s", e)
+        return
+
+    if action == "kb_rebuild_yes":
         if _kb_rebuild_running(context):
             await _kb_popup(query, context, chat_id, "⏳ Пересборка уже идёт — дождитесь итога.")
             return
@@ -697,16 +933,17 @@ async def _handle_kb_callback(query, context, data: str, chat_id: int, user_id: 
         await _kb_popup(query, context, chat_id,
                         "⏳ Пересборка запущена в фоне — итог придёт отдельным сообщением. "
                         "Бот продолжает работать как обычно.")
+        if rag_keys_below(user_id):
+            # Вопрос был отдельным сообщением с нижней кнопки — панель заново,
+            # вопрос уберёт уборка панелей.
+            await send_rag_panel(context.bot, chat_id, context)
         return
 
     if action == "kb_clearlog":
         # Подтверждение прямо в панели: подменяем клавиатуру на «да/отмена»
         await query.answer()
         try:
-            await query.edit_message_reply_markup(InlineKeyboardMarkup([[
-                InlineKeyboardButton("❗️ Да, очистить журнал", callback_data="kb_clearlog_yes"),
-                InlineKeyboardButton("Отмена", callback_data="kb_panel"),
-            ]]))
+            await query.edit_message_reply_markup(kb_confirm_markup("clearlog"))
         except Exception as e:
             logger.warning("⚠️ Не удалось показать подтверждение очистки журнала: %s", e)
         return
