@@ -9970,6 +9970,15 @@ def check_owner_keys():
             self.events.append(("send", chat_id, text, reply_markup, self.next_id, kw))
             return types.SimpleNamespace(message_id=self.next_id)
 
+        async def send_document(self, chat_id=None, document=None, filename=None, caption=None,
+                                reply_markup=None, **kw):
+            # Карточка статьи базы знаний (раздел 13) — отдельным видом события:
+            # в «нижние кнопки» и «короткие ответы» она не считается.
+            self.next_id += 1
+            self.events.append(("doc", chat_id, caption, reply_markup, self.next_id,
+                                dict(kw, filename=filename)))
+            return types.SimpleNamespace(message_id=self.next_id)
+
         async def delete_message(self, chat_id=None, message_id=None, **kw):
             if self.delete_fail:
                 raise RuntimeError("Message can't be deleted for everyone")
@@ -11560,6 +11569,173 @@ def check_owner_keys():
             expect("«🔄 Пересобрать RAG» под панелью запустила пересборку без вопроса",
                    edited == [True] and len(APP.tasks) == 1)
 
+            # Очередь «🕐 Ждут одобрения» — сама нижняя панель (19.10.2026, решение
+            # Максима): по новости в ряд; карточка — файлом, список остаётся;
+            # одобрение и удаление присылают список уже без новости; опустевшая
+            # очередь — подменю базы; дубли с номером; листание; устаревшая
+            # кнопка — «список устарел». Одобрение переносит файл — поэтому и
+            # папки одобрения временные, а векторизация (Google) подменена.
+            saved_sync = panel_rag._kb_sync_in_executor
+            saved_kdirs = (_rks.KNOWLEDGE_PENDING_DIR, _rks.KNOWLEDGE_APPROVED_DIR)
+
+            async def _nosync():
+                return None
+
+            def pend(fname, title):
+                with open(os.path.join(_rks._FOLDERS["pending"], fname), "w",
+                          encoding="utf-8") as fh:
+                    fh.write(f"# {title}\n\nНовость с сайта.\n")
+
+            def cards(bot):
+                return [e for e in bot.events if e[0] == "doc"]
+
+            def kb_cb(data):
+                cbot = Bot(start_id=2600)
+                cctx = types.SimpleNamespace(bot=cbot, user_data=rud, application=APP)
+                asyncio.run(panel_rag._handle_kb_callback(rq, cctx, data, OWNER, OWNER))
+                return cbot
+
+            NEWS = ["📄 Леопард", "📄 Обновление", "📄 Обновление (2)"]
+            try:
+                panel_rag._kb_sync_in_executor = _nosync
+                _rks.KNOWLEDGE_PENDING_DIR = _rks._FOLDERS["pending"]
+                _rks.KNOWLEDGE_APPROVED_DIR = _rks._FOLDERS["approved"]
+                # Два одинаковых названия: пометка в скобках на кнопке срезается.
+                pend("2026-10-01-upd.md", "[Обновление] Обновление")
+                pend("2026-10-02-upd.md", "Обновление")
+                rud.pop("kb_test_mode", None)
+
+                for label in ("🕐 Ждут одобрения (3)", "🕐 Ждут одобрения (1)"):
+                    bot, gone, _ = press(OWNER, label, user_data=rud)
+                    rows, text, _ = last_keys(bot)
+                    lists = [e for e in bot.events if e[0] == "send" and hasattr(e[3], "inline_keyboard")]
+                    expect(f"«{label}» не поставила внизу список новостей с заголовком: {rows} {text[:40]!r}",
+                           rows == [[n] for n in NEWS] + [["⬅️ К разделам"]]
+                           and "ЖДУТ ОДОБРЕНИЯ — 3" in text and not lists
+                           and rud.get("kb_screen") == "pending" and not asked and bool(gone))
+                # Порядок и состав — те же, что у списка под панелью (файлы, не надписи).
+                arts = _rks.list_articles()
+                under = [arts[int(d.split(":")[1])]["fname"]
+                         for d in datas_of(panel_rag._build_kb_list(rctx, arts, "pending")[1])
+                         if d.startswith("kb_view:")]
+                expect(f"новости внизу и под панелью — не те же или не в том порядке: "
+                       f"{list((rud.get('kb_pending_keys') or {}).values())} / {under}",
+                       list((rud.get("kb_pending_keys") or {}).values()) == under)
+                for label in NEWS + ["⬅️", "➡️", "⬅️ К разделам"]:
+                    expect(f"«{label}» из нижнего списка не узнаётся — нажатие ушло бы модели",
+                           pk._code_of(label) is not None or label in (rud.get("kb_pending_keys") or {}))
+
+                # «⬅️ К списку» на карточке — снова нижний список (та же ветка
+                # kb_panel; карточку она уберёт, поэтому — до открытия карточки ниже).
+                rows = last_keys(kb_cb("kb_panel"))[0]
+                expect(f"«⬅️ К списку» на карточке новости не вернула нижний список: {rows}",
+                       rows == [[n] for n in NEWS] + [["⬅️ К разделам"]])
+
+                # Нажал новость — карточка файлом, список внизу тот же.
+                slot_before = hist.get_setting(SLOT, "")
+                bot, gone, _ = press(OWNER, "📄 Обновление (2)", user_data=rud)
+                card = cards(bot)
+                expect(f"новость из нижнего списка не прислала карточку с «✅ Одобрить в базу»: "
+                       f"{[(e[2], e[5].get('filename')) for e in card]}",
+                       len(card) == 1 and card[0][5].get("filename") == "2026-10-01-upd.md"
+                       and "Ждёт одобрения" in card[0][2]
+                       and any(d.startswith("kb_approve:") for d in datas_of(card[0][3]))
+                       and not asked and bool(gone))
+                expect("карточка новости сменила нижний список — а он обязан остаться",
+                       not keyboards(bot) and hist.get_setting(SLOT, "") == slot_before
+                       and bool(rud.get("kb_pending_keys")))
+                card_id = card[0][4] if card else 0
+                tok = next((d.split(":")[1] for d in datas_of(card[0][3]) if d.startswith("kb_approve:")),
+                           "?") if card else "?"
+
+                # Одобрил — список без новости, карточка убрана, файл в базе.
+                cbot = kb_cb(f"kb_approve:{tok}")
+                rows, text, _ = last_keys(cbot)
+                expect(f"после одобрения нижний список не без новости или число старое: {rows} {text[:40]!r}",
+                       rows == [["📄 Леопард"], ["📄 Обновление"], ["⬅️ К разделам"]]
+                       and "ЖДУТ ОДОБРЕНИЯ — 2" in text
+                       and os.path.exists(os.path.join(_rks._FOLDERS["approved"], "2026-10-01-upd.md")))
+                expect("после одобрения карточка новости осталась в чате",
+                       ("delete", OWNER, card_id) in cbot.events)
+
+                # Новость одобрили мимо этого списка (с сайта) — кнопка устарела.
+                if os.path.exists(os.path.join(_rks._FOLDERS["pending"], "2026-10-02-upd.md")):
+                    os.replace(os.path.join(_rks._FOLDERS["pending"], "2026-10-02-upd.md"),
+                               os.path.join(_rks._FOLDERS["approved"], "2026-10-02-upd.md"))
+                bot, gone, _ = press(OWNER, "📄 Обновление", user_data=rud)
+                expect(f"устаревшая новость не сказала «список устарел» или не прислала свежий: "
+                       f"{notices(bot)} {last_keys(bot)[0]}",
+                       notices(bot) == ["Список устарел — открываю заново."] and not cards(bot)
+                       and last_keys(bot)[0] == [["📄 Леопард"], ["⬅️ К разделам"]] and not asked)
+
+                # Бот перезапустился — памяти надписей нет, новость всё равно узнаётся.
+                rud.pop("kb_pending_keys", None)
+                bot, gone, _ = press(OWNER, "📄 Леопард", user_data=rud)
+                card = cards(bot)
+                expect("после перезапуска новость из нижнего списка ушла модели, а не в карточку",
+                       len(card) == 1 and card[0][5].get("filename") == "Леопард.md" and not asked)
+                tok = next((d.split(":")[1] for d in datas_of(card[0][3]) if d.startswith("kb_delete:")),
+                           "?") if card else "?"
+
+                # Удалил последнюю — подменю базы со свежими числами, без «Ждут одобрения».
+                cbot = kb_cb(f"kb_delete_yes:{tok}")
+                rows, text, _ = last_keys(cbot)
+                expect(f"опустевшая очередь не вернула подменю базы знаний: {rows}",
+                       rows == rows_of(pk.owner_keyboard("rag", OWNER, rctx)) and "База знаний (RAG)" in text
+                       and not any(lab.startswith("🕐") for lab in sum(rows or [], []))
+                       and rud.get("kb_screen") == "")
+                bot, gone, _ = press(OWNER, "🕐 Ждут одобрения (1)", user_data=rud)
+                expect("пустая очередь не сказала «уже пуст» или не вернула подменю базы",
+                       notices(bot) == ["Этот раздел уже пуст."]
+                       and not any(lab.startswith("🕐") for lab in sum(last_keys(bot)[0] or [], [])))
+
+                # Больше 15 — листание; стрелка только туда, где ещё есть новости.
+                for i in range(1, 18):
+                    pend(f"n{i:02d}.md", f"Новость {i:02d}")
+                bot, gone, _ = press(OWNER, "🕐 Ждут одобрения (17)", user_data=rud)
+                rows, text, _ = last_keys(bot)
+                expect(f"длинная очередь — не 15 новостей и «➡️» на первой странице: {rows}",
+                       rows == [[f"📄 Новость {i:02d}"] for i in range(17, 2, -1)]
+                       + [["➡️"], ["⬅️ К разделам"]] and "страница 1 из 2" in text)
+                rud["kb_test_mode"], rud["kb_test_msgs"] = True, []
+                bot, gone, _ = press(OWNER, "➡️", user_data=rud)
+                rows, text, _ = last_keys(bot)
+                expect(f"«➡️» не перелистнула очередь на вторую страницу: {rows}",
+                       rows == [["📄 Новость 02"], ["📄 Новость 01"], ["⬅️"],
+                                ["⏹️ Завершить проверку"], ["⬅️ К разделам"]]
+                       and "страница 2 из 2" in text and not asked)
+                expect("листание очереди оборвало проверку поиска", rud.get("kb_test_mode") is True)
+                bot, gone, _ = press(OWNER, "⬅️", user_data=rud)
+                expect(f"«⬅️» не вернула первую страницу очереди: {last_keys(bot)[0]}",
+                       (last_keys(bot)[0] or [[]])[0] == ["📄 Новость 17"])
+                press(OWNER, "📄 Новость 17", user_data=rud)
+                expect("карточка новости не оборвала проверку поиска (под списком kb_view обрывает)",
+                       not rud.get("kb_test_mode"))
+                rud.pop("kb_test_mode", None)          # дальше вопросы обязаны дойти до модели
+
+                # «⬅️ К разделам» — подменю базы, надписи новостей больше не кнопки.
+                bot, gone, _ = press(OWNER, "⬅️ К разделам", user_data=rud)
+                expect(f"«⬅️ К разделам» не вернула подменю базы знаний: {last_keys(bot)[0]}",
+                       last_keys(bot)[0] == rows_of(pk.owner_keyboard("rag", OWNER, rctx))
+                       and rud.get("kb_screen") == "")
+                expect("после «⬅️ К разделам» надписи новостей всё ещё считаются кнопками",
+                       "kb_pending_keys" not in rud)
+
+                # Чужой — тот же текст модели; владелец с выдуманной «📄 …» — тоже модели.
+                for title, uid, said in (("постороннего", PLAIN, "📄 Новость 05"),
+                                         ("модератора", MOD, "📄 Новость 05"),
+                                         ("владельца", OWNER, "📄 Новость, которой нет")):
+                    bot, gone, _ = press(uid, said, user_data={} if uid != OWNER else rud)
+                    expect(f"«{said}» от {title} перехвачена — а это обычный вопрос модели",
+                           asked == [said] and not cards(bot))
+            finally:
+                panel_rag._kb_sync_in_executor = saved_sync
+                _rks.KNOWLEDGE_PENDING_DIR, _rks.KNOWLEDGE_APPROVED_DIR = saved_kdirs
+                for _sub in ("pending", "approved"):
+                    for _f in os.listdir(_rks._FOLDERS[_sub]):
+                        if _f.startswith(("n", "2026-10-")):
+                            os.remove(os.path.join(_rks._FOLDERS[_sub], _f))
+
             # Кнопки под панелью — теми же шагами; чужой такой же текст — модели.
             rag_src = inspect.getsource(panel_rag._handle_kb_callback)
             expect("кнопки базы знаний под панелью работают не общими шагами с нижним подменю",
@@ -11619,6 +11795,9 @@ def check_owner_keys():
                       f"подменю «База знаний» — разделы как под панелью, список статей "
                       f"сообщением, второе подменю настроек, проверка поиска не "
                       f"обрывается внутри базы, вопрос перед очисткой журнала и пересборкой; "
+                      f"очередь «Ждут одобрения» — сама нижняя панель: карточка файлом, "
+                      f"список без одобренной, пустая — подменю базы, дубли с номером, "
+                      f"листание, устаревшая кнопка; "
                       f"«🎛 Админ-панель» — это и статистика: цифры в сообщении с версией, "
                       f"кнопки статистики внизу; "
                       f"подменю «PROMPTы» — так же, с объявлением группам у «Сам в разговор», "

@@ -42,7 +42,9 @@
 #   • Подменю «📡 Настройки API» (18.10.2026, пилот) — API_ROWS, «⚙️ PROMPTы»
 #     (18.10.2026) — PROMPTS_ROWS, «🎛 Админ-панель» (18.10.2026) —
 #     SERVICE_ROWS, «🛠 DDoS-Guard» (19.10.2026) — MOD_ROWS и «🎮 Викторина»
-#     (19.10.2026) — ряды из panel_quiz.quiz_keys_rows: та же панель, другие
+#     (19.10.2026) — ряды из panel_quiz.quiz_keys_rows, «📚 База знаний»
+#     (19.10.2026) — ряды из panel_rag, в том числе очередь «Ждут одобрения»
+#     списком новостей (меню rag_pending): та же панель, другие
 #     кнопки; сообщение с ним — тот же один в чате. Подробности — у самих
 #     раскладок.
 #
@@ -222,13 +224,22 @@ RAG_KEYS = (("➕ Добавить RAG", "r_add"), ("🔄 Пересобрать
             ("➖ статей", "r_topk_dec"), ("➕ статей", "r_topk_inc"),
             ("➖ запас", "r_margin_dec"), ("➕ запас", "r_margin_inc"),
             ("🔍 Проверить поиск", "r_test"), ("⏹️ Завершить проверку", "r_test"),
-            ("⬅️ К базе знаний", "r_back"))
+            ("⬅️ К базе знаний", "r_back"),
+            # Нижний список «🕐 Ждут одобрения» (panel_rag.rag_pending_rows): листание
+            # и возврат. Сами новости («📄 <название>», код r_art) постоянной
+            # надписи не имеют — их узнаёт panel_rag.pending_label_file.
+            ("⬅️", "r_pend_prev"), ("➡️", "r_pend_next"), ("⬅️ К разделам", "r_back"))
 # Нажатия ВНУТРИ базы знаний не обрывают проверку поиска: «спросил → подкрутил
 # порог → спросил снова» — основной способ настроить поиск (как под панелью).
+# Карточка новости (r_art) — обрывает, как кнопка статьи под списком (kb_view).
 _KEEP_KB_TEST = {"rag", "r_settings", "r_back", "r_kb", "r_test",
                  "r_thr_dec", "r_thr_inc", "r_thr_info", "r_topk_dec", "r_topk_inc",
                  "r_topk_info", "r_margin_dec", "r_margin_inc", "r_margin_info",
-                 "r_pending", "r_ground", "r_sub", "r_ship", "r_guide", "r_air", "r_other"}
+                 "r_pending", "r_ground", "r_sub", "r_ship", "r_guide", "r_air", "r_other",
+                 "r_pend_prev", "r_pend_next"}
+# Коды, при которых нижний список новостей остаётся на экране — память его
+# надписей (user_data["kb_pending_keys"]) не стирается.
+_KEEP_PENDING_KEYS = {"r_art", "r_pend_prev", "r_pend_next"}
 
 # Подменю: раскладка и текст сообщения, с которым оно стоит. None — текст
 # собирается в момент отправки: у prompts и mod — сама панель раздела, у
@@ -361,6 +372,11 @@ def owner_keyboard(menu: str = "main", user_id: int | None = None,
     elif menu == "rag_settings":
         from .panel_rag import rag_settings_rows
         layout = rag_settings_rows(context)
+    elif menu == "rag_pending":
+        import types
+        from .panel_rag import rag_pending_rows
+        layout = rag_pending_rows(context if context is not None
+                                  else types.SimpleNamespace(user_data={}))
     elif menu in _MENUS:
         layout = _MENUS[menu][0]
     else:
@@ -432,19 +448,31 @@ async def send_owner_keys(bot, chat_id: int, user_id: int | None = None,
     uid = chat_id if user_id is None else user_id
     if not _is_owner_private(chat_id, uid):
         return
+    if menu == "rag_pending":
+        # Очередь пуста (разобрали последнюю) — вместо пустого списка подменю
+        # базы знаний со свежими числами, без строки «Ждут одобрения».
+        from .panel_rag import kb_pending_count
+        if not kb_pending_count():
+            menu = "rag"
+            if context is not None:
+                context.user_data["kb_screen"] = ""
+    if menu != "rag_pending" and context is not None:
+        # Список новостей ушёл с экрана — его надписи больше не кнопки.
+        context.user_data.pop("kb_pending_keys", None)
     keyboard = owner_keyboard(menu, uid, context)
-    if menu in ("prompts", "mod", "quiz", "rag", "rag_settings"):
+    if menu in ("prompts", "mod", "quiz", "rag", "rag_settings", "rag_pending"):
         if menu == "prompts":
             from .panel_prompts import prompts_panel_text
             text = prompts_panel_text(uid, getattr(bot, "username", None))
         elif menu == "quiz":
             from .panel_quiz import _build_panel as _build_quiz_panel
             text = _build_quiz_panel(None)[0]
-        elif menu in ("rag", "rag_settings"):
+        elif menu in ("rag", "rag_settings", "rag_pending"):
             import types
-            from .panel_rag import rag_panel_text, rag_settings_text
+            from .panel_rag import rag_panel_text, rag_pending_text, rag_settings_text
             ctx = context if context is not None else types.SimpleNamespace(user_data={})
-            text = rag_panel_text(ctx) if menu == "rag" else rag_settings_text(ctx)
+            text = {"rag": rag_panel_text, "rag_settings": rag_settings_text,
+                    "rag_pending": rag_pending_text}[menu](ctx)
         else:
             from .panel_mod import _build_mod_panel_text_and_keyboard
             text = _build_mod_panel_text_and_keyboard(uid)[0]
@@ -475,11 +503,12 @@ async def _notice(bot, chat_id: int, text: str, ttl: int = _NOTICE_TTL_SEC) -> N
         schedule_delete(bot, chat_id, msg.message_id, ttl)
 
 
-async def _run(code: str, context, chat_id: int, user_id: int) -> None:
+async def _run(code: str, context, chat_id: int, user_id: int, text: str = "") -> None:
     """
     Открыть раздел по коду кнопки. Функции — те же, что у кнопок /adm
     (router.py); берутся в момент нажатия: модули панелей тянут этот файл
-    обратно через оглавление пакета.
+    обратно через оглавление пакета. text — сама надпись: по ней r_art
+    находит новость.
     """
     bot = context.bot
     if code == "adm":
@@ -658,12 +687,33 @@ async def _run(code: str, context, chat_id: int, user_id: int) -> None:
                                       reply_markup=confirm_markup(kind))
         if sent:
             await register_and_clean_bot_message(bot, chat_id, sent.message_id)
-    elif code in ("r_pending", "r_ground", "r_sub", "r_ship", "r_guide", "r_air", "r_other"):
+    elif code in ("r_ground", "r_sub", "r_ship", "r_guide", "r_air", "r_other"):
         # Список статей раздела — отдельным сообщением, как из-под панели.
         from .panel_rag import send_kb_section
         if not await send_kb_section(bot, chat_id, context, code[2:]):
             await _notice(bot, chat_id, "Этот раздел уже пуст.")
             await send_owner_keys(bot, chat_id, user_id, menu="rag", context=context)
+    elif code in ("r_pending", "r_pend_prev", "r_pend_next"):
+        # Очередь «Ждут одобрения» — сама нижняя панель (19.10.2026, решение
+        # Максима): заголовок с числом и по новости в ряд. Пуста — подменю базы
+        # знаний (это решает send_owner_keys). Номер страницы подрезает
+        # panel_rag.rag_pending_rows.
+        was_open = context.user_data.get("kb_screen") == "pending"
+        context.user_data["kb_screen"] = "pending"
+        try:
+            page = int(context.user_data.get("kb_page", 0)) if was_open else 0
+        except (TypeError, ValueError):
+            page = 0
+        context.user_data["kb_page"] = {"r_pend_prev": page - 1, "r_pend_next": page + 1}.get(code, 0)
+        await send_owner_keys(bot, chat_id, user_id, menu="rag_pending", context=context)
+        if context.user_data.get("kb_screen") != "pending":
+            await _notice(bot, chat_id, "Этот раздел уже пуст.")
+    elif code == "r_art":
+        # Новость из нижнего списка → её карточка; список остаётся внизу.
+        from .panel_rag import send_pending_card
+        if not await send_pending_card(bot, chat_id, context, text):
+            await _notice(bot, chat_id, "Список устарел — открываю заново.")
+            await send_owner_keys(bot, chat_id, user_id, menu="rag_pending", context=context)
     elif code in ("r_settings", "r_back"):
         context.user_data["kb_screen"] = "settings" if code == "r_settings" else ""
         context.user_data["kb_page"] = 0
@@ -690,8 +740,10 @@ async def _run(code: str, context, chat_id: int, user_id: int) -> None:
         from .panel_rag import KB_TEST_ON_TEXT, toggle_kb_test
         said = await toggle_kb_test(bot, chat_id, context)
         await _notice(bot, chat_id, said, _INFO_TTL_SEC if said == KB_TEST_ON_TEXT else _NOTICE_TTL_SEC)
-        # Метка кнопки меняется: в настройках — там, где нажали; иначе — в подменю базы.
-        menu = "rag_settings" if context.user_data.get("kb_screen") == "settings" else "rag"
+        # Метка кнопки меняется — подменю то, где нажали: настройки, очередь
+        # новостей (там «⏹️ Завершить проверку» тоже есть) или подменю базы.
+        menu = {"settings": "rag_settings", "pending": "rag_pending"}.get(
+            context.user_data.get("kb_screen"), "rag")
         await send_owner_keys(bot, chat_id, user_id, menu=menu, context=context)
     elif code == "r_add":
         from .panel_rag import start_kb_add
@@ -769,20 +821,30 @@ async def handle_owner_key(update, context, text: str) -> bool:
     счёта викторины) и режимы панели базы знаний.
     """
     code = _code_of(text)
-    if not code:
+    is_news = (text or "").strip().startswith("📄 ")
+    if not code and not is_news:
         return False
     chat, user = update.effective_chat, update.effective_user
-    if chat is None or user is None or not _is_owner_private(chat.id, user.id):
+    owner_here = chat is not None and user is not None and _is_owner_private(chat.id, user.id)
+    if owner_here and is_news:
+        # Новость из нижнего списка «Ждут одобрения» — раньше образцов:
+        # «📄 Без типа (3)» могла бы оказаться и названием новости.
+        from .panel_rag import pending_label_file
+        if pending_label_file(context, text):
+            code = "r_art"
+    if not code or not owner_here:
         return False
     await delete_user_message_safe(update.message)
     for key in ("balance_edit", "quiz_edit", "kb_add_mode", "kb_replace_target"):
         context.user_data.pop(key, None)
+    if code not in _KEEP_PENDING_KEYS:
+        context.user_data.pop("kb_pending_keys", None)
     if code not in _KEEP_KB_TEST:
         from .panel_rag import _end_kb_test
         await _end_kb_test(context.bot, chat.id, context)
     logger.info("⌨️ Нижняя кнопка: %s | владелец %s", text.strip(), user.id)
     try:
-        await _run(code, context, chat.id, user.id)
+        await _run(code, context, chat.id, user.id, text.strip())
     except Exception as e:
         logger.warning("⚠️ Нижняя кнопка «%s» не сработала: %s", text.strip(), e)
     return True

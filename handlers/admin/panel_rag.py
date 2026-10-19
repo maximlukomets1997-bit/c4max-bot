@@ -49,6 +49,8 @@ _KB_ADJUST_KEYS = {
 #  Какой экран открыт, помнит user_data["kb_screen"]: "" — разделы,
 #  "settings" — настройки, иначе ключ раздела ("pending" или тип из
 #  ARTICLE_KINDS). У каждого владельца своя память, как и у номера страницы.
+#  ⚠️ У владельца в личке экраны — нижние подменю (19.10.2026), а очередь
+#  «Ждут одобрения» — сама нижняя панель списком новостей (rag_pending_rows).
 #
 #  Раскладка повторяет справочник техники /ttx (handlers/tech.py): те же два
 #  столбца, тот же вид заголовка и листания, та же обрезка названий
@@ -152,11 +154,7 @@ def _build_rag_panel(context, admin_id: int):
     from services.knowledge_store import list_articles
 
     articles = list_articles()
-    # Карта токенов — по ВСЕМУ списку статей, а не по видимому экрану:
-    # кнопка из старого сообщения обязана вести к своей статье, а не к соседке.
-    context.application.bot_data["kb_file_map"] = {
-        str(i): (art["folder"], art["fname"]) for i, art in enumerate(articles)
-    }
+    _kb_store_tokens(context, articles)
 
     screen = str(context.user_data.get("kb_screen") or "")
     if screen == _KB_SETTINGS:
@@ -170,6 +168,19 @@ def _build_rag_panel(context, admin_id: int):
         # разделам, а не показываем экран, на котором нечего нажать.
         context.user_data["kb_screen"] = ""
     return _build_kb_main(context, articles)
+
+
+def _kb_store_tokens(context, articles) -> dict:
+    """
+    Карта токенов кнопок → (папка, файл). Одна на панель, нижний список
+    «Ждут одобрения» и карточку статьи.
+
+    ⚠️ Карта строится по ВСЕМУ списку статей, а не по видимому экрану: кнопка
+    из старого сообщения обязана вести к своей статье, а не к соседке.
+    """
+    file_map = {str(i): (art["folder"], art["fname"]) for i, art in enumerate(articles)}
+    context.application.bot_data["kb_file_map"] = file_map
+    return file_map
 
 
 def _kb_counts(articles):
@@ -520,6 +531,161 @@ def rag_settings_text(context) -> str:
     return _build_kb_settings(context)[0]
 
 
+# ── Нижний список «🕐 Ждут одобрения» (19.10.2026, решение Максима) ──────
+#  У владельца очередь новостей — САМА нижняя панель: по новости в ряд,
+#  «📄 <название>»; нажатие присылает карточку (send_kb_card), «✅ Одобрить»
+#  на ней возвращает список уже без новости. Остальные разделы — по-прежнему
+#  списком под сообщением (send_kb_section).
+#  Нажатие приходит ТЕКСТОМ, а у названий нет постоянного образца, поэтому
+#  показанные надписи запоминаются: user_data["kb_pending_keys"] —
+#  {надпись: файл}. После перезапуска бота памяти нет, и надпись сверяется с
+#  очередью как она есть (pending_label_file).
+#  ⚠️ Надпись начинается с «📄 », как «📄 Без типа (N)» и «📄 Полные PROMPTы»:
+#  новость узнаётся раньше них, но только по точному совпадению с очередью.
+
+_KB_PENDING_PAGE = 15  # новостей на одной странице нижнего списка
+_KB_PENDING_CUT = 60   # длина названия на кнопке (телефон сам дорежет «…»)
+_KB_PENDING_MARK = "📄 "
+
+
+def _kb_pending_labels(articles=None) -> list:
+    """
+    [(надпись, файл)] очереди — в том же порядке, что список под панелью.
+    Одинаковые надписи различаются номером: «📄 Обновление (2)» — иначе
+    вторую новость было бы не нажать.
+    """
+    from services.knowledge_store import list_articles
+    from services.tech_card import short_title
+    if articles is None:
+        articles = list_articles()
+    out, used = [], set()
+    for art in articles:
+        if art["folder"] != _KB_PENDING:
+            continue
+        # Пробелы схлопываем: надпись обязана вернуться от Telegram буква в букву.
+        # Без названия — имя файла: пустая «📄» не узналась бы.
+        name = " ".join(short_title(art["title"] or "", _KB_PENDING_CUT).split()) or art["fname"]
+        base = _KB_PENDING_MARK + name
+        label, n = base, 1
+        while label in used:
+            n += 1
+            label = f"{base} ({n})"
+        used.add(label)
+        out.append((label, art["fname"]))
+    return out
+
+
+def _kb_pending_page(context, total: int) -> tuple:
+    """(страница, всего страниц); номер подрезается — новости могли разобрать."""
+    pages = max(1, (total + _KB_PENDING_PAGE - 1) // _KB_PENDING_PAGE)
+    try:
+        page = int(context.user_data.get("kb_page", 0))
+    except (TypeError, ValueError):
+        page = 0
+    page = max(0, min(pages - 1, page))
+    context.user_data["kb_page"] = page
+    return page, pages
+
+
+def rag_pending_rows(context) -> tuple:
+    """
+    Ряды нижнего списка: новости текущей страницы, «⬅️ / ➡️», если страниц
+    больше одной (только в ту сторону, где ещё есть новости), «⏹️ Завершить
+    проверку», пока идёт проверка поиска, и «⬅️ К разделам». Запоминает
+    показанные надписи (kb_pending_keys).
+    """
+    labels = _kb_pending_labels()
+    context.user_data["kb_pending_keys"] = dict(labels)
+    page, pages = _kb_pending_page(context, len(labels))
+    first = page * _KB_PENDING_PAGE
+    rows = [((label, "r_art"),) for label, _ in labels[first:first + _KB_PENDING_PAGE]]
+    nav = ((("⬅️", "r_pend_prev"),) if page > 0 else ()) + \
+          ((("➡️", "r_pend_next"),) if page < pages - 1 else ())
+    if nav:
+        rows.append(nav)
+    if context.user_data.get("kb_test_mode"):
+        rows.append((("⏹️ Завершить проверку", "r_test"),))
+    rows.append((("⬅️ К разделам", "r_back"),))
+    return tuple(rows)
+
+
+def kb_pending_count() -> int:
+    """Сколько новостей ждут одобрения сейчас."""
+    from services.knowledge_store import list_articles
+    return _kb_counts(list_articles())[0]
+
+
+def rag_pending_text(context) -> str:
+    """Заголовок над нижним списком: «🕐 ЖДУТ ОДОБРЕНИЯ — N» и подсказка."""
+    n = len(context.user_data.get("kb_pending_keys") or {}) or kb_pending_count()
+    page, pages = _kb_pending_page(context, n)
+    return (f"🕐 <b>ЖДУТ ОДОБРЕНИЯ — {n}</b>"
+            + (f" · страница {page + 1} из {pages}" if pages > 1 else "")
+            + "\n───────────────────────────\n"
+            "<i>Нажми внизу на новость — пришлю её карточку с кнопкой «✅ Одобрить в базу».</i>")
+
+
+def pending_label_file(context, label: str):
+    """
+    Файл новости по надписи нижней кнопки — или None, если это не она.
+    Сначала — показанные надписи (номер дубля «(2)» мог уже съехать), потом —
+    очередь как она есть (память пропала с перезапуском бота). Файла в
+    очереди может уже не быть — это заметит send_kb_card.
+    """
+    label = (label or "").strip()
+    if not label.startswith(_KB_PENDING_MARK):
+        return None
+    shown = context.user_data.get("kb_pending_keys") or {}
+    if label in shown:
+        return shown[label]
+    return dict(_kb_pending_labels()).get(label)
+
+
+async def send_kb_card(bot, chat_id: int, context, folder: str, fname: str) -> bool:
+    """
+    Карточка статьи: сам файл (его удобно открыть, поправить у себя и
+    прислать обратно через «📝 Заменить») и кнопки под ним. Одна на кнопку
+    под списком (kb_view) и на новость из нижнего списка. False — файла уже нет.
+    """
+    from services.knowledge_store import list_articles, read_article, read_title
+    try:
+        path, content = read_article(folder, fname)
+    except FileNotFoundError:
+        return False
+    file_map = context.application.bot_data.get("kb_file_map") or {}
+    token = next((t for t, v in file_map.items() if v == (folder, fname)), None)
+    if token is None:
+        file_map = _kb_store_tokens(context, list_articles())
+        token = next((t for t, v in file_map.items() if v == (folder, fname)), None)
+        if token is None:
+            return False
+    status = "🕐 Ждёт одобрения" if folder == _KB_PENDING else "✅ В базе знаний"
+    caption = f"{status}\n<b>{html.escape(read_title(path))}</b>\n<code>{html.escape(fname)}</code>"
+    sent_msg = await bot.send_document(
+        chat_id=chat_id,
+        document=content.encode("utf-8"),
+        filename=fname,
+        caption=caption[:1024],
+        parse_mode=ParseMode.HTML,
+        reply_markup=_kb_card_keyboard(token, folder),
+    )
+    if sent_msg:
+        await register_and_clean_bot_message(bot, chat_id, sent_msg.message_id)
+    return True
+
+
+async def send_pending_card(bot, chat_id: int, context, label: str) -> bool:
+    """
+    Нажата новость в нижнем списке → её карточка; нижний список остаётся.
+    False — новости в очереди уже нет (одобрили с сайта, удалили): тогда
+    вызывающий говорит «список устарел» и присылает свежий.
+    """
+    context.user_data["kb_screen"] = _KB_PENDING
+    fname = pending_label_file(context, label)
+    # Ушла из очереди — файла в pending нет, и send_kb_card вернёт False.
+    return fname is not None and await send_kb_card(bot, chat_id, context, _KB_PENDING, fname)
+
+
 # ── Общие шаги: кнопки под панелью и нижнего подменю (19.10.2026) ────────
 # Один шаг на оба места; каждый возвращает текст ответа.
 
@@ -635,12 +801,17 @@ async def send_rag_panel(bot, chat_id: int, context):
     решение Максима): открыт экран настроек — подменю «⚙️ Настройки поиска»;
     иначе подменю «📚 База знаний», а если был открыт раздел (вернулись из
     карточки статьи) — следом его список, тот же, с которого ушли.
+    Очередь «Ждут одобрения» — сама нижний список (menu="rag_pending"); опустела —
+    send_owner_keys сам ставит подменю базы знаний.
     """
     if rag_keys_below(chat_id):
         from .panel_keys import send_owner_keys
         screen = str(context.user_data.get("kb_screen") or "")
         if screen == _KB_SETTINGS:
             await send_owner_keys(bot, chat_id, chat_id, menu="rag_settings", context=context)
+            return
+        if screen == _KB_PENDING:
+            await send_owner_keys(bot, chat_id, chat_id, menu="rag_pending", context=context)
             return
         await send_owner_keys(bot, chat_id, chat_id, menu="rag", context=context)
         if screen:
@@ -801,8 +972,8 @@ async def _handle_kb_callback(query, context, data: str, chat_id: int, user_id: 
         # вторая страница танков в разделе из трёх подлодок была бы пустой.
         context.user_data["kb_page"] = 0
         await query.answer()
-        if rag_keys_below(user_id) and token in (_KB_MAIN, _KB_SETTINGS):
-            # У владельца разделы и настройки — нижним подменю (19.10.2026):
+        if rag_keys_below(user_id) and token in (_KB_MAIN, _KB_SETTINGS, _KB_PENDING):
+            # У владельца разделы, настройки и очередь — нижним подменю (19.10.2026):
             # «⬅️ К разделам» под списком присылает панель заново, список уберёт уборка.
             await send_rag_panel(context.bot, chat_id, context)
             return
@@ -965,27 +1136,15 @@ async def _handle_kb_callback(query, context, data: str, chat_id: int, user_id: 
     folder, fname = resolved
 
     if action == "kb_view":
+        # Статью отправляем ФАЙЛОМ — сборка карточки общая с нижним списком очереди.
         try:
-            path, content = read_article(folder, fname)
+            read_article(folder, fname)
         except FileNotFoundError:
             await query.answer("Файл уже удалён.", show_alert=True)
             await send_rag_panel(context.bot, chat_id, context)
             return
         await query.answer()
-        status = "🕐 Ждёт одобрения" if folder == "pending" else "✅ В базе знаний"
-        caption = f"{status}\n<b>{read_title(path)}</b>\n<code>{fname}</code>"
-        # Статью отправляем ФАЙЛОМ: её удобно открыть, отредактировать у себя
-        # и прислать обратно через кнопку «Заменить».
-        sent_msg = await context.bot.send_document(
-            chat_id=chat_id,
-            document=content.encode("utf-8"),
-            filename=fname,
-            caption=caption[:1024],
-            parse_mode=ParseMode.HTML,
-            reply_markup=_kb_card_keyboard(token, folder),
-        )
-        if sent_msg:
-            await register_and_clean_bot_message(context.bot, chat_id, sent_msg.message_id)
+        await send_kb_card(context.bot, chat_id, context, folder, fname)
         return
 
     if action == "kb_approve":
