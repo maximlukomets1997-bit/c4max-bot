@@ -127,13 +127,166 @@ def _card_keyboard(q: dict, ids: list, mode: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+def _panel_state() -> dict:
+    """
+    Живые числа панели — ОДНИ на текст, кнопки под панелью и нижнее подменю
+    владельца (quiz_keys_rows, 19.10.2026): посчитанные дважды, они разошлись
+    бы, и кнопка обещала бы работу, которой на экране нет.
+    """
+    from services import quiz_bank, quiz_daily
+    seed = quiz_bank.seed_stats()
+    return {
+        "counts": get_quiz_bank_counts(),
+        "kb": quiz_bank.stats(),
+        "players": len(get_all_quiz_stats()),
+        "seed": seed,
+        "diff": quiz_bank.seed_diff() if seed["questions"] else None,
+        "auto_on": quiz_daily.is_enabled(),
+    }
+
+
+def quiz_keys_below(viewer_id: int) -> bool:
+    """
+    Кнопки панели стоят в нижнем подменю (19.10.2026, решение Максима, как у
+    «🛠 DDoS-Guard»)? Тогда под панелью их нет. Панель викторины — только
+    владельца, а нижние кнопки у владельца есть всегда.
+    """
+    from services.roles import is_owner
+    return is_owner(viewer_id)
+
+
+def quiz_keys_rows() -> tuple:
+    """
+    Ряды нижнего подменю «🎮 Викторина»: (надпись, код) — panel_keys их
+    показывает и по коду узнаёт нажатие. Кнопка есть, только когда у неё есть
+    работа, — те же условия, что у кнопок под панелью (_build_panel). Подписи
+    короче, чем под панелью: нижние кнопки узкие (утверждено Максимом).
+    """
+    from services import quiz_daily
+    st = _panel_state()
+    counts, kb, diff, players = st["counts"], st["kb"], st["diff"], st["players"]
+    rows = [
+        ((f"🕛 Вопрос дня {quiz_daily.hours_label()}: {_onoff(st['auto_on'])}", "q_auto"),),
+        ((f"📝 Черновики ({counts['drafts']})", "q_drafts"),
+         (f"✅ В игре ({counts['approved']})", "q_live")),
+    ]
+    if kb["articles_left"]:
+        rows.append(((f"📋 Статьи без вопросов ({kb['articles_left']})", "q_noq"),))
+    file_row = []
+    if diff and diff["changed"]:
+        file_row.append((f"♻️ Обновить из файла ({diff['changed']})", "q_reseed"))
+    if diff and diff["file_ok"] and diff["missing"]:
+        file_row.append((f"📥 Новые вопросы ({diff['missing']})", "q_seed"))
+    if file_row:
+        rows.append(tuple(file_row))
+    wipe_row = []
+    if counts["drafts"]:
+        wipe_row.append(("🗑 Очистить черновики", "q_wipe"))
+    if counts["approved"] or counts["drafts"]:
+        wipe_row.append(("🗑 Стереть ВСЕ вопросы", "q_nuke"))
+    if wipe_row:
+        rows.append(tuple(wipe_row))
+    if players:
+        rows.append(((f"🧹 Обнулить статистику ({players})", "q_zero"),))
+    rows.append((("⬅️ Назад", "back"),))
+    return tuple(rows)
+
+
+# ── Общие шаги кнопок: под панелью и нижнего подменю (19.10.2026) ────────
+# Один шаг на оба места: второго набора правил «что делает кнопка» быть не
+# должно. Каждый возвращает текст ответа, отправку решает вызывающий.
+
+def flip_quiz_auto(user_id: int) -> str:
+    """Тумблер «🕛 Вопрос дня». По умолчанию ВЫКЛ: механизм сам пишет в группы."""
+    from services import quiz_daily
+    new_val = not quiz_daily.is_enabled()
+    quiz_daily.set_enabled(new_val)
+    state = "включён" if new_val else "выключен"
+    logger.info("🔧 Владелец %s: вопрос дня %s", user_id, state)
+    _audit(user_id, "quiz_auto", 0, f"вопрос дня {state}")
+    return (f"🕛 Вопрос дня {state}."
+            + (f" Следующий уйдёт {quiz_daily.next_run_label()} по Киеву." if new_val else ""))
+
+
+def seed_into_drafts(user_id: int) -> tuple[str, bool]:
+    """
+    «📥 Новые вопросы в черновики»: (ответ, обновить ли панель). Файла нет —
+    панель та же, обновлять нечего.
+    """
+    from services import quiz_bank
+    seed = quiz_bank.seed_stats()
+    if not seed["questions"]:
+        return "⚠️ Файла с вопросами нет — он приезжает вместе с обновлением кода.", False
+    # ⚠️ В ЧЕРНОВИКИ, А НЕ СРАЗУ В ИГРУ (28.08.2026, решение Максима).
+    # До этого грузили сразу в игру — тогда заезжала пачка из 219 вопросов,
+    # выверенных вручную, и одобрять их по одному было работой ради работы.
+    # Теперь набор пополняется по 2–3 вопроса на новую статью, и Максим
+    # хочет смотреть их перед тем, как они попадут людям.
+    result = quiz_bank.load_seed(approved=False)
+    _audit(user_id, "quiz_seed", 0,
+           f"добавлено в черновики {result['added']}, дублей {result['skipped']}")
+    logger.info("🎮 Админ %s загрузил эталонные вопросы В ЧЕРНОВИКИ: добавлено %d, дублей %d, негодных %d",
+                user_id, result["added"], result["skipped"], result["bad"])
+    text = f"📥 Загружено вопросов: {result['added']} — в ЧЕРНОВИКИ, на одобрение."
+    if result["added"]:
+        text += "\nОткрой «📝 Черновики» и одобри те, что годятся."
+    if result["skipped"]:
+        text += f"\nУже были в банке: {result['skipped']}."
+    if result["bad"]:
+        text += f"\n⚠️ Не прошли проверку: {result['bad']}."
+    return text, True
+
+
+def reseed_from_file(user_id: int) -> str:
+    """
+    «♻️ Обновить из файла» — догнать банк до эталонного файла (2026-09-01,
+    решение Максима). Кнопка загрузки этого не умеет и уметь не должна: она
+    добавляет новое, а эта чинит уже залитое — правку разбора, вариантов или
+    верного ответа, которую сверка по имени вопроса пропускает молча.
+    """
+    from services import quiz_bank
+    result = quiz_bank.seed_apply()
+    if not result["changed"]:
+        return "✅ Файл и банк и так сошлись — обновлять нечего."
+    _audit(user_id, "quiz_reseed", 0, f"догнано до файла: {result['updated']}")
+    logger.info("🎮 Админ %s догнал банк до эталонного файла: поправлено %d из %d",
+                user_id, result["updated"], result["changed"])
+    return (f"♻️ Обновлено вопросов: {result['updated']}.\n"
+            f"Поправлены варианты, верный ответ и разбор — "
+            f"статус «в игре / черновик» не менялся.")
+
+
+# Вопрос перед стиранием — для нижней кнопки (19.10.2026): там он приходит
+# отдельным сообщением, а под панелью кнопки «Да / Отмена» встают вместо её
+# кнопок, и вопросом служит сам текст панели. Кнопки — одни (confirm_markup).
+QUIZ_CONFIRM_TEXT = {
+    "wipe": "🗑 <b>Очистить черновики?</b>\n<i>Удалятся все вопросы, которые ещё "
+            "не в игре.</i>",
+    "nuke": "🗑 <b>Стереть ВСЕ вопросы?</b>\n<i>И черновики, и те, что уже в игре. "
+            "Вернуть нельзя.</i>",
+    "zero": "🧹 <b>Обнулить статистику викторины всем игрокам?</b>\n<i>Все начнут "
+            "путь заново — с Рядового. Вернуть нельзя.</i>",
+}
+
+
+def confirm_markup(kind: str) -> InlineKeyboardMarkup:
+    """
+    «❗️ Да / Отмена» перед стиранием. «Отмена» — назад к панели: у владельца
+    она приходит заново, а вопрос убирает уборка панелей.
+    """
+    if kind == "nuke":
+        yes = InlineKeyboardButton("❗️ Да, стереть ВСЁ", callback_data="quiz:nuke_yes")
+    elif kind == "zero":
+        yes = InlineKeyboardButton("❗️ Да, обнулить всем", callback_data="quiz:zero_yes")
+    else:
+        yes = InlineKeyboardButton("❗️ Да, очистить черновики", callback_data="quiz:wipe_yes")
+    return InlineKeyboardMarkup([[yes, InlineKeyboardButton("Отмена", callback_data="quiz:panel")]])
+
+
 def _build_panel(context):
     """Текст и кнопки главного экрана панели викторины."""
-    from services import quiz_bank
-
-    counts = get_quiz_bank_counts()
-    kb = quiz_bank.stats()
-    players = len(get_all_quiz_stats())
+    st = _panel_state()
+    counts, kb, players = st["counts"], st["kb"], st["players"]
 
     if kb["articles_left"]:
         status = (f"📥 Статей без вопросов: <code>{kb['articles_left']}</code> — "
@@ -146,8 +299,7 @@ def _build_panel(context):
     # который в банке уже есть, ЦЕЛИКОМ — значит правка разбора, вариантов или
     # верного ответа в файле обычной отправкой кода не доезжает никуда, и
     # расхождение файла с игрой ничем не видно. Теперь видно здесь.
-    seed = quiz_bank.seed_stats()
-    diff = quiz_bank.seed_diff() if seed["questions"] else None
+    diff = st["diff"]
     seed_line = ""
     if diff and diff["file_ok"]:
         marks = []
@@ -161,7 +313,7 @@ def _build_panel(context):
     # 🕛 Вопрос дня (2026-08-20): состояние тумблера и когда уйдёт следующий.
     # Цифры живые, считаются при каждом открытии панели.
     from services import quiz_daily
-    auto_on = quiz_daily.is_enabled()
+    auto_on = st["auto_on"]
     # Метка состояния — ТОЛЬКО через общий _onoff: он единственный источник
     # надписей «🟢ВКЛ» / «🔴ВЫКЛ» на все тумблеры бота. Собранная руками
     # (как было у этой кнопки с 2026-08-20 до вечера того же дня) разъезжается
@@ -242,7 +394,19 @@ def _build_panel(context):
 
 
 async def send_quiz_panel(bot, chat_id: int, context):
-    """Показывает панель викторины (команда /quizadm и кнопка «🎮 Настройки Викторины» в /adm)."""
+    """
+    Показывает панель викторины (команда /quizadm, кнопка «🎮 Настройки
+    Викторины» в /adm, нижняя «🎮 Викторина»).
+
+    ⚠️ У ВЛАДЕЛЬЦА В ЛИЧКЕ ПАНЕЛЬ — ЭТО СООБЩЕНИЕ НИЖНЕГО ПОДМЕНЮ (19.10.2026,
+    решение Максима, как у «🛠 DDoS-Guard»): к тексту панели прикреплены
+    нижние кнопки (panel_keys.send_owner_keys(menu="quiz")), под ним кнопок
+    нет, прежнее такое сообщение удаляется, в гигиену панелей оно НЕ попадает.
+    """
+    if quiz_keys_below(chat_id):
+        from .panel_keys import send_owner_keys
+        await send_owner_keys(bot, chat_id, chat_id, menu="quiz")
+        return
     text, markup = _build_panel(context)
     await _send_panel_message(bot, chat_id, text, markup)
 
@@ -355,17 +519,7 @@ async def _handle_quiz_callback(query, context, data: str, chat_id: int, user_id
     # 🕛 Тумблер вопроса дня (2026-08-20, просьба Максима). По умолчанию ВЫКЛ:
     # механизм сам пишет в группы, включаться молча он не должен.
     if action == "auto":
-        from services import quiz_daily
-        new_val = not quiz_daily.is_enabled()
-        quiz_daily.set_enabled(new_val)
-        state = "включён" if new_val else "выключен"
-        logger.info("🔧 Владелец %s: вопрос дня %s", user_id, state)
-        _audit(user_id, "quiz_auto", 0, f"вопрос дня {state}")
-        await query.answer(
-            f"🕛 Вопрос дня {state}."
-            + (f" Следующий уйдёт {quiz_daily.next_run_label()} по Киеву." if new_val else ""),
-            show_alert=True,
-        )
+        await query.answer(flip_quiz_auto(user_id), show_alert=True)
         await send_quiz_panel(context.bot, chat_id, context)
         return
 
@@ -420,52 +574,14 @@ async def _handle_quiz_callback(query, context, data: str, chat_id: int, user_id
         return
 
     if action == "seed":
-        from services import quiz_bank
-        seed = quiz_bank.seed_stats()
-        if not seed["questions"]:
-            await _popup(query, context, chat_id,
-                         "⚠️ Файла с вопросами нет — он приезжает вместе с обновлением кода.")
-            return
-        # ⚠️ В ЧЕРНОВИКИ, А НЕ СРАЗУ В ИГРУ (28.08.2026, решение Максима).
-        # До этого грузили сразу в игру — тогда заезжала пачка из 219 вопросов,
-        # выверенных вручную, и одобрять их по одному было работой ради работы.
-        # Теперь набор пополняется по 2–3 вопроса на новую статью, и Максим
-        # хочет смотреть их перед тем, как они попадут людям.
-        result = quiz_bank.load_seed(approved=False)
-        _audit(user_id, "quiz_seed", 0,
-               f"добавлено в черновики {result['added']}, дублей {result['skipped']}")
-        logger.info("🎮 Админ %s загрузил эталонные вопросы В ЧЕРНОВИКИ: добавлено %d, дублей %d, негодных %d",
-                    user_id, result["added"], result["skipped"], result["bad"])
-        text = f"📥 Загружено вопросов: {result['added']} — в ЧЕРНОВИКИ, на одобрение."
-        if result["added"]:
-            text += "\nОткрой «📝 Черновики» и одобри те, что годятся."
-        if result["skipped"]:
-            text += f"\nУже были в банке: {result['skipped']}."
-        if result["bad"]:
-            text += f"\n⚠️ Не прошли проверку: {result['bad']}."
+        text, refresh = seed_into_drafts(user_id)
         await _popup(query, context, chat_id, text)
-        await send_quiz_panel(context.bot, chat_id, context)
+        if refresh:
+            await send_quiz_panel(context.bot, chat_id, context)
         return
 
     if action == "reseed":
-        # ♻️ Догнать банк до эталонного файла (2026-09-01, решение Максима).
-        # Кнопка загрузки этого не умеет и уметь не должна: она добавляет
-        # новое, а эта чинит уже залитое — правку разбора, вариантов или
-        # верного ответа, которую сверка по имени вопроса пропускает молча.
-        from services import quiz_bank
-        result = quiz_bank.seed_apply()
-        if not result["changed"]:
-            await _popup(query, context, chat_id,
-                         "✅ Файл и банк и так сошлись — обновлять нечего.")
-            await send_quiz_panel(context.bot, chat_id, context)
-            return
-        _audit(user_id, "quiz_reseed", 0, f"догнано до файла: {result['updated']}")
-        logger.info("🎮 Админ %s догнал банк до эталонного файла: поправлено %d из %d",
-                    user_id, result["updated"], result["changed"])
-        await _popup(query, context, chat_id,
-                     f"♻️ Обновлено вопросов: {result['updated']}.\n"
-                     f"Поправлены варианты, верный ответ и разбор — "
-                     f"статус «в игре / черновик» не менялся.")
+        await _popup(query, context, chat_id, reseed_from_file(user_id))
         await send_quiz_panel(context.bot, chat_id, context)
         return
 
@@ -474,10 +590,7 @@ async def _handle_quiz_callback(query, context, data: str, chat_id: int, user_id
         # тут сносятся и вопросы, которые уже играют.
         await query.answer()
         try:
-            await query.edit_message_reply_markup(InlineKeyboardMarkup([[
-                InlineKeyboardButton("❗️ Да, стереть ВСЁ", callback_data="quiz:nuke_yes"),
-                InlineKeyboardButton("Отмена", callback_data="quiz:panel"),
-            ]]))
+            await query.edit_message_reply_markup(confirm_markup("nuke"))
         except Exception as e:
             logger.warning("⚠️ Не удалось показать подтверждение полной очистки: %s", e)
         return
@@ -494,10 +607,7 @@ async def _handle_quiz_callback(query, context, data: str, chat_id: int, user_id
         # Подтверждение обязательно: заслуги людей восстановить нечем.
         await query.answer()
         try:
-            await query.edit_message_reply_markup(InlineKeyboardMarkup([[
-                InlineKeyboardButton("❗️ Да, обнулить всем", callback_data="quiz:zero_yes"),
-                InlineKeyboardButton("Отмена", callback_data="quiz:panel"),
-            ]]))
+            await query.edit_message_reply_markup(confirm_markup("zero"))
         except Exception as e:
             logger.warning("⚠️ Не удалось показать подтверждение обнуления статистики: %s", e)
         return
@@ -516,10 +626,7 @@ async def _handle_quiz_callback(query, context, data: str, chat_id: int, user_id
         # Подтверждение прямо в панели — как у очистки журнала в /rag.
         await query.answer()
         try:
-            await query.edit_message_reply_markup(InlineKeyboardMarkup([[
-                InlineKeyboardButton("❗️ Да, очистить черновики", callback_data="quiz:wipe_yes"),
-                InlineKeyboardButton("Отмена", callback_data="quiz:panel"),
-            ]]))
+            await query.edit_message_reply_markup(confirm_markup("wipe"))
         except Exception as e:
             logger.warning("⚠️ Не удалось показать подтверждение очистки черновиков: %s", e)
         return

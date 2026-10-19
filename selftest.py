@@ -11088,6 +11088,228 @@ def check_owner_keys():
             bot, gone, _ = press(uid, "🛡 DDoS-Guard: 🟢ВКЛ")
             expect(f"«🛡 DDoS-Guard» от {title} перехвачена — а это обычный вопрос модели",
                    asked == ["🛡 DDoS-Guard: 🟢ВКЛ"] and hist.get_setting("antispam_enabled", "") == "1")
+
+        # ═══ 12. Подменю «🎮 Викторина» (19.10.2026) ═══
+        # Как у DDoS-Guard: панель с нижними кнопками — одно сообщение, под ним
+        # кнопок нет; кнопка есть, только когда у неё есть работа (те же
+        # условия, что под панелью); число в подписи следует за базой, кнопка с
+        # прежним числом работает; каждая — тот же шаг, что под панелью;
+        # стирание и обнуление сначала спрашивают. Банк и счета игроков —
+        # настоящие, на время проверки, потом возвращаются как были.
+        from services import quiz_bank as qb, quiz_daily as qd
+        with hist._lock:
+            qconn = hist._get_connection()
+            q_saved = {t: (qconn.execute(f"SELECT * FROM {t}").fetchall(),
+                           [d[1] for d in qconn.execute(f"PRAGMA table_info({t})")])
+                       for t in ("quiz_bank", "quiz_stats")}
+        q_saved_auto = hist.get_setting(qd.ENABLED_KEY, "")
+        q_saved_stats = qb.stats
+        HOURS = qd.hours_label()
+        try:
+            hist.delete_all_quiz_questions()
+            hist.reset_all_quiz_stats()
+            hist.set_setting(qd.ENABLED_KEY, "0")
+            panel_quiz.send_quiz_panel = saved_targets["quiz"]
+            n_file = qb.seed_diff()["missing"]
+
+            def quiz_rows():
+                return rows_of(pk.owner_keyboard("quiz", OWNER))
+
+            # Кнопки под панелью (полная панель — её меряет preflight) и внизу
+            # обещают одну и ту же работу.
+            WORK = {"q_noq": "quiz:noq", "q_reseed": "quiz:reseed", "q_seed": "quiz:seed",
+                    "q_wipe": "quiz:wipe", "q_nuke": "quiz:nuke", "q_zero": "quiz:zero"}
+
+            def same_work(title):
+                below = set(datas_of(panel_quiz._build_panel(None)[1]))
+                bottom = {pk._code_of(label) for label in sum(quiz_rows(), [])}
+                differ = [code for code, data in WORK.items()
+                          if (code in bottom) != (data in below)]
+                expect(f"{title}: внизу и под панелью разная работа: {differ}", not differ)
+
+            WANT_Q0 = [[f"🕛 Вопрос дня {HOURS}: 🔴ВЫКЛ"], ["📝 Черновики (0)", "✅ В игре (0)"],
+                       [f"📥 Новые вопросы ({n_file})"], ["⬅️ Назад"]]
+            qkb = pk.owner_keyboard("quiz", OWNER)
+            expect(f"подменю «Викторина» на пустом банке: надписи или ряды не те: {rows_of(qkb)}",
+                   n_file > 0 and rows_of(qkb) == WANT_Q0)
+            expect("подменю «Викторина» не компактное или сворачивается само",
+                   qkb.resize_keyboard is True and qkb.is_persistent is True)
+            same_work("пустой банк")
+
+            # Вход: панель с текстом раздела и нижними кнопками — одно сообщение.
+            hist.set_setting(SLOT, "556")
+            bot = Bot(start_id=2000)
+            asyncio.run(reg(bot, OWNER, 4848))       # открытый раздел — через гигиену
+            bot.events.clear()
+            asyncio.run(panel_quiz.send_quiz_panel(bot, OWNER, None))
+            sent = [e for e in bot.events if e[0] == "send"]
+            expect(f"«🎮 Викторина» владельца — не одно сообщение с текстом панели и подменю "
+                   f"внизу: {[(e[2][:30], type(e[3]).__name__) for e in sent]}",
+                   len(sent) == 1 and isinstance(sent[0][3], ReplyKeyboardMarkup)
+                   and "ВИКТОРИНА" in sent[0][2] and rows_of(sent[0][3]) == WANT_Q0)
+            expect("«🎮 Викторина» не убрала прежнее сообщение с нижними кнопками и открытый раздел",
+                   ("delete", OWNER, 556) in bot.events and ("delete", OWNER, 4848) in bot.events)
+            full_quiz = datas_of(panel_quiz._build_panel(None)[1])
+            expect("полный вариант панели викторины (его меряет preflight) потерял кнопки",
+                   {"quiz:auto", "quiz:list:draft", "quiz:list:live", "quiz:seed",
+                    "adm_back"} <= set(full_quiz))
+            bot = Bot()
+            asyncio.run(panel_quiz.send_quiz_panel(bot, MOD, None))
+            expect("не владельцу панель викторины ушла в нижние кнопки",
+                   not keyboards(bot) and any(e[0] == "send" for e in bot.events))
+
+            # «📥 Новые вопросы» — та же загрузка в черновики, панель заново.
+            bot, gone, _ = press(OWNER, f"📥 Новые вопросы ({n_file})")
+            rows, text, _ = last_keys(bot)
+            last = hist.get_recent_staff_actions(1)
+            expect(f"нижняя «📥 Новые вопросы» не загрузила вопросы в черновики или ушла модели: "
+                   f"{hist.get_quiz_bank_counts()}",
+                   hist.get_quiz_bank_counts()["drafts"] == n_file and not asked and bool(gone))
+            expect(f"после «📥 Новые вопросы» нет ответа или панель не пришла с новыми числами: "
+                   f"{rows}", bool(notices(bot)) and bool(rows)
+                   and f"📝 Черновики ({n_file})" in sum(rows, [])
+                   and not any(label.startswith("📥") for label in sum(rows, [])))
+            expect("«📥 Новые вопросы» не записана в журнал персонала кодом «quiz_seed»",
+                   bool(last) and last[0].get("action") == "quiz_seed")
+            if hist.get_quiz_bank_counts()["drafts"] != n_file:
+                # Кнопка не сработала — это уже красное выше; дальше нужны черновики.
+                hist.delete_all_quiz_questions()
+                qb.load_seed(approved=False)
+
+            # Все кнопки сразу: два в игре, один удалён (снова «новый»), один
+            # разошёлся с файлом, есть игрок и статьи без вопросов.
+            drafts = hist.list_quiz_questions(approved=False, limit=10)
+            for q in drafts[:2]:
+                hist.set_quiz_question_approved(q["id"], True)
+            hist.delete_quiz_question(drafts[2]["id"])
+            q_changed = drafts[3]
+            hist.update_quiz_question_body(q_changed["id"], q_changed["options"],
+                                           q_changed["correct_idx"], "разбор не как в файле")
+            hist.add_quiz_attempt(777060050, "Игрок", True)
+            qb.stats = lambda: {"articles_total": 9, "articles_left": 3}
+            n_drafts = n_file - 3
+            WANT_Q1 = [[f"🕛 Вопрос дня {HOURS}: 🔴ВЫКЛ"],
+                       [f"📝 Черновики ({n_drafts})", "✅ В игре (2)"],
+                       ["📋 Статьи без вопросов (3)"],
+                       ["♻️ Обновить из файла (1)", "📥 Новые вопросы (1)"],
+                       ["🗑 Очистить черновики", "🗑 Стереть ВСЕ вопросы"],
+                       ["🧹 Обнулить статистику (1)"], ["⬅️ Назад"]]
+            expect(f"подменю «Викторина» со всей работой: надписи или ряды не те: {quiz_rows()}",
+                   quiz_rows() == WANT_Q1)
+            same_work("вся работа")
+            for label in sum(WANT_Q1, []):
+                expect(f"нижняя «{label}» не узнаётся — нажатие ушло бы модели",
+                       pk._code_of(label) is not None)
+            for text_, code in (("📝 Черновики (999)", "q_drafts"), ("✅ В игре (0)", "q_live"),
+                                ("📥 Новые вопросы (77)", "q_seed"),
+                                ("🧹 Обнулить статистику (5)", "q_zero"),
+                                (f"🕛 Вопрос дня {HOURS}: 🟢ВКЛ", "q_auto"),
+                                ("🎮 Викторина", "quiz")):
+                expect(f"«{text_}» с прежним числом узнаётся как «{pk._code_of(text_)}», "
+                       f"а не «{code}»", pk._code_of(text_) == code)
+            seen = {}
+            qclash = [label for label, code in pk._ALL_KEYS + tuple(
+                (label, pk._code_of(label)) for label in sum(WANT_Q1, []))
+                if seen.setdefault(label, code) != code]
+            expect(f"одна надпись у двух разных нижних кнопок: {qclash}", not qclash)
+
+            # «🕛 Вопрос дня» — тот же тумблер, надпись следует, прежняя работает.
+            bot, gone, _ = press(OWNER, f"🕛 Вопрос дня {HOURS}: 🔴ВЫКЛ")
+            rows, _, _ = last_keys(bot)
+            last = hist.get_recent_staff_actions(1)
+            expect(f"нижний «🕛 Вопрос дня» не включил вопрос дня или панель не следует: {rows}",
+                   qd.is_enabled() and bool(rows) and f"🕛 Вопрос дня {HOURS}: 🟢ВКЛ"
+                   in sum(rows, []) and bool(notices(bot)) and not asked)
+            expect("«🕛 Вопрос дня» не записан в журнал персонала кодом «quiz_auto»",
+                   bool(last) and last[0].get("action") == "quiz_auto")
+            press(OWNER, f"🕛 Вопрос дня {HOURS}: 🔴ВЫКЛ")   # прежняя надпись на экране
+            expect("«🕛 Вопрос дня» с прежней надписью не выключил обратно", not qd.is_enabled())
+
+            # Карточки и список статей — отдельным сообщением, как из-под панели.
+            for label, want in ((f"📝 Черновики ({n_drafts})", "quiz:ok:"),
+                                ("✅ В игре (2)", "quiz:back:")):
+                bot, gone, _ = press(OWNER, label)
+                cards = [e for e in bot.events if e[0] == "send" and hasattr(e[3], "inline_keyboard")]
+                expect(f"нижняя «{label}» не прислала карточку вопроса с её кнопками",
+                       bool(cards) and "ВОПРОС #" in cards[-1][2] and not asked
+                       and any(d.startswith(want) for d in datas_of(cards[-1][3]))
+                       and "quiz:panel" in datas_of(cards[-1][3]))
+            bot, gone, _ = press(OWNER, "📋 Статьи без вопросов (3)")
+            noq = [e for e in bot.events if e[0] == "send" and hasattr(e[3], "inline_keyboard")]
+            expect("нижняя «📋 Статьи без вопросов» не прислала свой экран",
+                   bool(noq) and "СТАТЬИ БЕЗ ВОПРОСОВ" in noq[-1][2] and not asked)
+
+            # «♻️ Обновить из файла» — тот же шаг, панель без неё.
+            bot, gone, _ = press(OWNER, "♻️ Обновить из файла (1)")
+            rows, _, _ = last_keys(bot)
+            expect(f"нижняя «♻️ Обновить из файла» не догнала банк до файла или панель с ней: {rows}",
+                   qb.seed_diff()["changed"] == 0 and bool(rows)
+                   and not any(label.startswith("♻️") for label in sum(rows, [])) and not asked)
+
+            # Стирание и обнуление: сначала вопрос; «Да» — та же ветка, что под
+            # панелью; после неё панель заново, а вопрос убран.
+            answers = []
+
+            async def _qanswer(text=None, **kw):
+                answers.append(text)
+
+            for label, kind, check in (
+                    ("🧹 Обнулить статистику (1)", "zero", lambda: not hist.get_all_quiz_stats()),
+                    ("🗑 Очистить черновики", "wipe",
+                     lambda: hist.get_quiz_bank_counts()["drafts"] == 0),
+                    ("🗑 Стереть ВСЕ вопросы", "nuke",
+                     lambda: hist.get_quiz_bank_counts()["approved"] == 0)):
+                before = (hist.get_quiz_bank_counts(), len(hist.get_all_quiz_stats()))
+                bot, gone, _ = press(OWNER, label)
+                ask = [e for e in bot.events if e[0] == "send" and hasattr(e[3], "inline_keyboard")]
+                expect(f"нижняя «{label}» не спросила «Да / Отмена» или стёрла сразу: "
+                       f"{[datas_of(e[3]) for e in ask]}",
+                       len(ask) == 1 and datas_of(ask[0][3]) == [f"quiz:{kind}_yes", "quiz:panel"]
+                       and ask[0][2] == panel_quiz.QUIZ_CONFIRM_TEXT[kind] and not asked
+                       and (hist.get_quiz_bank_counts(), len(hist.get_all_quiz_stats())) == before)
+                expect(f"«Да» у вопроса «{label}» может нажать не только владелец",
+                       _perm(f"quiz:{kind}_yes") == "owner" and _perm("quiz:panel") == "owner")
+                ask_id = ask[0][4] if ask else 0
+                qbot = Bot(start_id=2100)
+                qctx = types.SimpleNamespace(bot=qbot, user_data={})
+                qquery = types.SimpleNamespace(answer=_qanswer)
+                asyncio.run(panel_quiz._handle_quiz_callback(qquery, qctx, f"quiz:{kind}_yes",
+                                                             OWNER, OWNER))
+                expect(f"«Да» у вопроса «{label}» не сделало дело, не прислало панель с нижними "
+                       f"кнопками заново или не убрало вопрос",
+                       check() and len(keyboards(qbot)) == 1 and "ВИКТОРИНА" in keyboards(qbot)[0][2]
+                       and ("delete", OWNER, ask_id) in qbot.events)
+            # Банк и счета пусты, статьи без вопросов остались — только их и загрузка.
+            expect(f"после всех стираний подменю «Викторина» не вернулось к пустому банку: "
+                   f"{quiz_rows()}",
+                   quiz_rows() == [WANT_Q0[0], WANT_Q0[1], ["📋 Статьи без вопросов (3)"],
+                                   [f"📥 Новые вопросы ({n_file})"], ["⬅️ Назад"]])
+
+            # Кнопки под панелью — тем же шагом; чужой такой же текст — модели.
+            quiz_src = inspect.getsource(panel_quiz._handle_quiz_callback)
+            expect("кнопки викторины под панелью работают не общими шагами с нижним подменю",
+                   all(f"{name}(" in quiz_src for name in
+                       ("flip_quiz_auto", "seed_into_drafts", "reseed_from_file", "confirm_markup")))
+            for title, uid in (("постороннего", PLAIN), ("модератора", MOD)):
+                bot, gone, _ = press(uid, "📝 Черновики (5)")
+                expect(f"«📝 Черновики (5)» от {title} перехвачена — а это обычный вопрос модели",
+                       asked == ["📝 Черновики (5)"])
+        finally:
+            qb.stats = q_saved_stats
+            panel_quiz.send_quiz_panel = recorder("quiz")
+            with hist._lock:
+                qconn = hist._get_connection()
+                for table, (rows_, cols) in q_saved.items():
+                    qconn.execute(f"DELETE FROM {table}")
+                    if rows_:
+                        qconn.executemany(
+                            f"INSERT INTO {table} ({', '.join(cols)}) "
+                            f"VALUES ({', '.join('?' * len(cols))})", [tuple(r) for r in rows_])
+                qconn.commit()
+            if q_saved_auto == "":
+                hist.delete_setting(qd.ENABLED_KEY)
+            else:
+                hist.set_setting(qd.ENABLED_KEY, q_saved_auto)
     finally:
         for k, v in saved_mod.items():
             if v == "":
@@ -11122,6 +11344,8 @@ def check_owner_keys():
                       f"те же переключатели и надписи, что под панелью, а под панелью их нет; "
                       f"подменю «DDoS-Guard» — одно сообщение с панелью, те же шаги, улики "
                       f"и вопрос перед очисткой журнала; "
+                      f"подменю «Викторина» — одно сообщение с панелью, кнопка только при "
+                      f"работе и с живым числом, те же шаги и вопрос перед стиранием; "
                       f"«🎛 Админ-панель» — это и статистика: цифры в сообщении с версией, "
                       f"кнопки статистики внизу; "
                       f"подменю «PROMPTы» — так же, с объявлением группам у «Сам в разговор», "

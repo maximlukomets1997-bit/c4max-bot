@@ -40,9 +40,11 @@
 #     по нему удаляется предыдущее. ⚠️ Telegram не даёт ботам удалять сообщения
 #     старше двух суток — тогда старое остаётся, и в чате их два.
 #   • Подменю «📡 Настройки API» (18.10.2026, пилот) — API_ROWS, «⚙️ PROMPTы»
-#     (18.10.2026) — PROMPTS_ROWS и «🎛 Админ-панель» (18.10.2026) —
-#     SERVICE_ROWS: та же панель, другие кнопки; сообщение с ним — тот же один
-#     в чате. Подробности — у самих раскладок.
+#     (18.10.2026) — PROMPTS_ROWS, «🎛 Админ-панель» (18.10.2026) —
+#     SERVICE_ROWS, «🛠 DDoS-Guard» (19.10.2026) — MOD_ROWS и «🎮 Викторина»
+#     (19.10.2026) — ряды из panel_quiz.quiz_keys_rows: та же панель, другие
+#     кнопки; сообщение с ним — тот же один в чате. Подробности — у самих
+#     раскладок.
 #
 #  ⚠️ «🌐 Сайт» — НЕ кнопка-мини-приложение (проба 17.10.2026): открытый с
 #  нижней кнопки сайт не получает от Telegram, кто его открыл, и пишет «Вход
@@ -198,13 +200,23 @@ MOD_ROWS = (
 MOD_EVIDENCE_KEY = ("📜 Улики", "m_evidence")
 MOD_KEYS = tuple(key for row in MOD_ROWS for key in row) + (MOD_EVIDENCE_KEY,)
 
+# Подменю «🎮 Викторина» (2026-10-19, решение Максима) — так же, как у
+# «🛠 DDoS-Guard»: сообщение с подменю — сама панель викторины, под ней кнопок
+# нет. Ряды собирает panel_quiz.quiz_keys_rows В МОМЕНТ ОТПРАВКИ: кнопка есть,
+# только когда у неё есть работа, и почти у всех в подписи число. Шаги — те же,
+# что у кнопок под панелью (panel_quiz.flip_quiz_auto, seed_into_drafts,
+# reseed_from_file); стирание и обнуление сначала спрашивают
+# (panel_quiz.confirm_markup — те же «Да / Отмена», что под панелью).
+# Здесь — надписи без чисел; с числом узнаются по образцу (_STATEFUL).
+QUIZ_KEYS = (("🗑 Очистить черновики", "q_wipe"), ("🗑 Стереть ВСЕ вопросы", "q_nuke"))
+
 # Подменю: раскладка и текст сообщения, с которым оно стоит. None — текст
 # собирается в момент отправки: у prompts и mod — сама панель раздела, у
 # service — сообщение с версией и цифрами.
 _MENUS = {"api": (API_ROWS, API_CARRIER_TEXT), "prompts": (PROMPTS_ROWS, None),
           "service": (SERVICE_ROWS, None), "mod": (MOD_ROWS, None)}
 
-_ALL_KEYS = KEYS + API_KEYS + PROMPTS_KEYS + SERVICE_KEYS + MOD_KEYS
+_ALL_KEYS = KEYS + API_KEYS + PROMPTS_KEYS + SERVICE_KEYS + MOD_KEYS + QUIZ_KEYS
 # «💬 Статистика» ушла из панели 18.10.2026; если её кнопка осталась на
 # экране от прежней панели, нажатие — то же, что «🎛 Админ-панель», а не
 # вопрос модели.
@@ -234,6 +246,15 @@ _STATEFUL = {
     "m_window_info": r"⏱ \d+ сек",
     "m_mute_info": r"🔇 \d+ сек",
     "m_time_info": r"⏳ \d+ мин",
+    # Викторина: число в подписи меняется после каждого действия, а кнопка с
+    # прежним числом на экране обязана сработать.
+    "q_auto": "🕛 Вопрос дня .+: .+",
+    "q_drafts": r"📝 Черновики \(\d+\)",
+    "q_live": r"✅ В игре \(\d+\)",
+    "q_noq": r"📋 Статьи без вопросов \(\d+\)",
+    "q_reseed": r"♻️ Обновить из файла \(\d+\)",
+    "q_seed": r"📥 Новые вопросы \(\d+\)",
+    "q_zero": r"🧹 Обнулить статистику \(\d+\)",
 }
 _STATEFUL_RX = {code: re.compile(pattern) for code, pattern in _STATEFUL.items()}
 
@@ -249,6 +270,9 @@ def _shown(label: str, code: str, user_id: int | None = None) -> str:
     (panel_main.api_toggle_text, panel_prompts.prompts_toggle_text): разойтись
     им нельзя. user_id нужен личному тумблеру «⚙️ PROMPT».
     """
+    if code.startswith("q_"):
+        # Надпись викторины уже живая: её собрал panel_quiz.quiz_keys_rows.
+        return label
     if code.startswith("p_") and code in _STATEFUL:
         from .panel_prompts import prompts_toggle_text
         return prompts_toggle_text(code[2:].removesuffix("_info"), user_id)
@@ -293,6 +317,9 @@ def owner_keyboard(menu: str = "main", user_id: int | None = None) -> ReplyKeybo
         last = ((MOD_EVIDENCE_KEY, ("⬅️ Назад", "back")) if _evidence_buttons()
                 else (("⬅️ Назад", "back"),))
         layout = MOD_ROWS + (last,)
+    elif menu == "quiz":
+        from .panel_quiz import quiz_keys_rows
+        layout = quiz_keys_rows()
     elif menu in _MENUS:
         layout = _MENUS[menu][0]
     else:
@@ -356,8 +383,8 @@ async def send_owner_keys(bot, chat_id: int, user_id: int | None = None,
     владелец или не личка — ничего не делает. Тихая: панель — удобство, из-за
     неё не должны падать ни /start, ни запуск бота.
 
-    prompts — это САМА ПАНЕЛЬ ПРОМПТОВ с нижними кнопками (18.10.2026), mod —
-    так же сама панель «🛠 DDoS-Guard» (19.10.2026): она заменяет открытый
+    prompts — это САМА ПАНЕЛЬ ПРОМПТОВ с нижними кнопками (18.10.2026), mod и
+    quiz — так же сами панели «🛠 DDoS-Guard» и «🎮 Викторина» (19.10.2026): она заменяет открытый
     раздел так же, как заменяла его прежде через гигиену панелей, — только
     сама в гигиену не попадает (см. шапку файла).
     """
@@ -365,10 +392,13 @@ async def send_owner_keys(bot, chat_id: int, user_id: int | None = None,
     if not _is_owner_private(chat_id, uid):
         return
     keyboard = owner_keyboard(menu, uid)
-    if menu in ("prompts", "mod"):
+    if menu in ("prompts", "mod", "quiz"):
         if menu == "prompts":
             from .panel_prompts import prompts_panel_text
             text = prompts_panel_text(uid, getattr(bot, "username", None))
+        elif menu == "quiz":
+            from .panel_quiz import _build_panel as _build_quiz_panel
+            text = _build_quiz_panel(None)[0]
         else:
             from .panel_mod import _build_mod_panel_text_and_keyboard
             text = _build_mod_panel_text_and_keyboard(uid)[0]
@@ -539,8 +569,45 @@ async def _run(code: str, context, chat_id: int, user_id: int) -> None:
         from .panel_rag import send_rag_panel
         await send_rag_panel(bot, chat_id, context)
     elif code == "quiz":
+        # У владельца панель викторины — сама с нижними кнопками подменю
+        # (send_quiz_panel зовёт send_owner_keys(menu="quiz")).
         from .panel_quiz import send_quiz_panel
         await send_quiz_panel(bot, chat_id, context)
+    elif code == "q_auto":
+        from .panel_quiz import flip_quiz_auto
+        await _notice(bot, chat_id, flip_quiz_auto(user_id))
+        await send_owner_keys(bot, chat_id, user_id, menu="quiz")
+    elif code in ("q_drafts", "q_live"):
+        # Карточка вопроса — отдельным сообщением с листанием под ним, как
+        # из-под панели; «⬅️ К викторине» под ней присылает панель заново.
+        from .panel_quiz import _show_card
+        await _show_card(bot, chat_id, context, "draft" if code == "q_drafts" else "live", None)
+    elif code == "q_noq":
+        from .common import _send_panel_message
+        from .panel_quiz import _build_noq_screen
+        text, markup = _build_noq_screen()
+        await _send_panel_message(bot, chat_id, text, markup)
+    elif code == "q_seed":
+        from .panel_quiz import seed_into_drafts
+        said, refresh = seed_into_drafts(user_id)
+        await _notice(bot, chat_id, said, _INFO_TTL_SEC)
+        if refresh:
+            await send_owner_keys(bot, chat_id, user_id, menu="quiz")
+    elif code == "q_reseed":
+        from .panel_quiz import reseed_from_file
+        await _notice(bot, chat_id, reseed_from_file(user_id), _INFO_TTL_SEC)
+        await send_owner_keys(bot, chat_id, user_id, menu="quiz")
+    elif code in ("q_wipe", "q_nuke", "q_zero"):
+        # Сначала вопрос отдельным сообщением: стирание не вернуть. «❗️ Да» —
+        # та же ветка, что под панелью (quiz:*_yes), после неё панель приходит
+        # заново, а вопрос убирает уборка панелей; «Отмена» — так же.
+        from .panel_quiz import QUIZ_CONFIRM_TEXT, confirm_markup
+        kind = code[2:]
+        sent = await bot.send_message(chat_id=chat_id, parse_mode=ParseMode.HTML,
+                                      text=QUIZ_CONFIRM_TEXT[kind],
+                                      reply_markup=confirm_markup(kind))
+        if sent:
+            await register_and_clean_bot_message(bot, chat_id, sent.message_id)
     elif code == "logs":
         from .common import send_logs_menu
         await send_logs_menu(bot, chat_id)
