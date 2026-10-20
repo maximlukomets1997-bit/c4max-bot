@@ -4580,9 +4580,10 @@ def check_journal_clears():
     ⚠️ РАДИ ЧЕГО. Обе очистки необратимы, и обе тихие: сработавшая без
     подтверждения выглядит как «страница перезагрузилась».
 
-    ⚠️ И ещё одно, менее очевидное. Очистка журнала МОДЕРАЦИИ обязана
-    оставить надзорную запись «кто стёр улики» — тем же кодом `modlog_clear`,
-    что у кнопки бота. А очистка журнала ПЕРСОНАЛА обязана НЕ писать ничего:
+    ⚠️ Очистки журнала МОДЕРАЦИИ нет с 20.10.2026 (решение Максима): ни на
+    сайте, ни в боте — журнал и улики чистит только ночная уборка. Проверка
+    сторожит, что старая форма `modclear` ничего не стирает, а кнопки на
+    странице нет. Очистка журнала ПЕРСОНАЛА обязана НЕ писать ничего:
     запись легла бы в только что стёртый журнал и осталась бы там
     единственной строкой. Разойдись это с ботом — один и тот же поступок
     оставлял бы разные следы в зависимости от места нажатия.
@@ -4642,36 +4643,29 @@ def check_journal_clears():
         return asyncio.run(routes.journal(_Request("POST", form)))
 
     try:
-        # ── 1. Первое нажатие только спрашивает ──
+        # ── 1. Очистки журнала модерации нет (20.10.2026) ──
         wipe()
         mid = fill()
-        answer = post("modclear")
+        from web import pages as _jpages
+        page = _jpages.page_journal("x")
+        expect("на странице журналов снова «Очистить журнал модерации»",
+               "Очистить журнал модерации" not in page and '"modclear"' not in page)
+        for confirm in (False, True):
+            answer = post("modclear", confirm=confirm)
+            expect(f"старая форма очистки журнала модерации ({'с' if confirm else 'без'} "
+                   f"подтверждения) не сказала «не вышло»", "Не вышло" in answer.text)
+        expect("старая форма стёрла журнал модерации",
+               len(hist.get_recent_moderation_actions(10)) == 2)
+        expect("старая форма стёрла улики", len(hist.get_mute_evidence(mid)) == 1)
+        expect("в базе снова есть функция полной очистки журнала модерации",
+               not hasattr(hist, "clear_moderation_log"))
+
+        # ── 2. Очистка персонала: первое нажатие только спрашивает ──
+        answer = post("staffclear")
         expect("после первого нажатия не показан вопрос «Да, выполнить»",
                "Да, выполнить" in answer.text)
-        expect("журнал модерации стёрся с ПЕРВОГО нажатия, без подтверждения",
-               len(hist.get_recent_moderation_actions(10)) == 2)
-        expect("улики стёрлись с первого нажатия",
-               len(hist.get_mute_evidence(mid)) == 1)
-
-        answer = post("staffclear")
         expect("журнал персонала стёрся с ПЕРВОГО нажатия, без подтверждения",
                len(hist.get_recent_staff_actions(10)) == 1)
-
-        # ── 2. Очистка модерации: стирает и ОСТАВЛЯЕТ надзорный след ──
-        before = len(hist.get_recent_staff_actions(50))
-        post("modclear", confirm=True)
-        expect("журнал модерации не стёрся после подтверждения",
-               not hist.get_recent_moderation_actions(10))
-        expect("улики пережили очистку журнала", not hist.get_mute_evidence(mid))
-        staff = hist.get_recent_staff_actions(50)
-        expect(f"очистка журнала модерации не оставила следа в журнале персонала "
-               f"(было {before}, стало {len(staff)})", len(staff) == before + 1)
-        expect(f"след очистки записан кодом «{staff[0]['action'] if staff else '—'}», "
-               f"а кнопка бота пишет «modlog_clear» — журнал назовёт одно "
-               f"действие двумя именами",
-               bool(staff) and staff[0]["action"] == "modlog_clear")
-        expect("в следе очистки не сказано, сколько записей стёрли",
-               bool(staff) and any(ch.isdigit() for ch in (staff[0].get("details") or "")))
 
         # ── 3. Очистка персонала: стирает и НЕ пишет о себе ──
         post("staffclear", confirm=True)
@@ -4682,8 +4676,8 @@ def check_journal_clears():
         auth.csrf_ok, auth.current_user = saved_ok, saved_user
         wipe()
 
-    return problems, (f"{done} проверок: первое нажатие спрашивает, очистка "
-                      f"модерации оставляет след, очистка персонала — нет")
+    return problems, (f"{done} проверок: очистки журнала модерации нет ни на странице, "
+                      f"ни в старой форме; очистка персонала спрашивает и не пишет о себе")
 
 
 def check_prompts_extras():
@@ -10949,20 +10943,30 @@ def check_owner_keys():
         # ═══ 11. Подменю «🛠 DDoS-Guard» (19.10.2026) ═══
         # Как у PROMPTы: панель с нижними кнопками — одно сообщение, под ним
         # кнопок нет; каждая нижняя — тот же шаг, что кнопка под панелью;
-        # «📜 Улики» — только когда они есть; очистка журнала спрашивает.
+        # «📜 Улики» — только когда они есть. 20.10.2026 (решение Максима):
+        # «👢 Кикать» — третьей в ряд к приветствию и капче, «🧹 Очистить
+        # журнал» убрана из кода совсем (журнал чистит ночная уборка).
+
+        def _mod_wipe():
+            """Пустой журнал модерации для проверки — своей очистки у бота нет."""
+            with hist._lock:
+                conn = hist._get_connection()
+                conn.execute("DELETE FROM mute_evidence")
+                conn.execute("DELETE FROM moderation_log")
+                conn.commit()
         for k, v in (("antispam_enabled", "1"), ("linkfilter_enabled", "1"),
                      ("antispam_msg_count", "4"), ("antispam_window_sec", "60"),
                      ("antispam_mute_sec", "300"), ("greet_enabled", "1"),
                      ("greet_captcha", "1"), ("greet_kick", "1"), ("greet_timeout_sec", "300")):
             hist.set_setting(k, v)
-        hist.clear_moderation_log()
+        _mod_wipe()
         WANT_MOD = [["🛡 DDoS-Guard: 🟢ВКЛ", "🔗 Фильтр ссылок: 🟢ВКЛ"],
                     ["➖ сообщ.", "📨 4 сообщ.", "➕ сообщ."],
                     ["➖ окно", "⏱ 60 сек", "➕ окно"],
                     ["➖ мут", "🔇 300 сек", "➕ мут"],
-                    ["👋 Приветствие: 🟢ВКЛ", "🤖 «Я не бот»: 🟢ВКЛ"],
+                    ["👋 Приветствие: 🟢ВКЛ", "🤖 «Я не бот»: 🟢ВКЛ", "👢 Кикать: 🟢ВКЛ"],
                     ["➖ срок", "⏳ 5 мин", "➕ срок"],
-                    ["👢 Кикать: 🟢ВКЛ", "🧹 Очистить журнал"], ["⬅️ Назад"]]
+                    ["⬅️ Назад"]]
         mkb = pk.owner_keyboard("mod", OWNER)
         expect(f"подменю «DDoS-Guard»: надписи или ряды не те: {rows_of(mkb)}",
                rows_of(mkb) == WANT_MOD)
@@ -10975,7 +10979,7 @@ def check_owner_keys():
         full_mod = panel_mod._build_mod_panel_text_and_keyboard(OWNER, full=True)[1]
         full_texts = [b.text for row in full_mod.inline_keyboard for b in row]
         for label in sum(WANT_MOD[:-1], []):
-            if label.startswith(("➖", "➕")) or label == "🧹 Очистить журнал":
+            if label.startswith(("➖", "➕")):
                 continue
             expect(f"«{label}» внизу есть, а под панелью — другая надпись", label in full_texts)
         for label in sum(WANT_MOD, []):
@@ -11008,8 +11012,10 @@ def check_owner_keys():
         expect(f"у владельца под панелью DDoS-Guard остались кнопки: {datas_of(mmarkup)}",
                datas_of(mmarkup) == [])
         expect("полный вариант панели DDoS-Guard (его меряет preflight) потерял кнопки",
-               {"mod:antispam:toggle", "mod:greet:kick", "mod:clearlog", "adm_back"}
+               {"mod:antispam:toggle", "mod:greet:kick", "mod:greet:toggle", "adm_back"}
                <= set(datas_of(full_mod)))
+        expect("под панелью DDoS-Guard снова «🧹 Очистить журнал»",
+               not any(d.startswith("mod:clearlog") for d in datas_of(full_mod)))
         bot = Bot()
         asyncio.run(saved_targets["mod"](bot, MOD, MOD))
         msent = [e for e in bot.events if e[0] == "send"]
@@ -11068,38 +11074,26 @@ def check_owner_keys():
                    len(said) == 1 and _MSPEC[key]["hint"] in said[0] and not keyboards(bot)
                    and hist.get_setting("antispam_msg_count", "") == "4" and not asked)
 
-        # Очистка журнала: сначала вопрос; «Да» — та же ветка, после неё панель заново.
+        # Очистки журнала нет (20.10.2026): старая кнопка с экрана говорит об
+        # этом и ставит подменю, журнал не трогает; «Отмена» старого вопроса —
+        # «устарела»; ни ветки, ни функции очистки в коде нет.
         hist.log_moderation_action("mute", -100777060, 777060050, "Флудер")
         bot, gone, _ = press(OWNER, "🧹 Очистить журнал")
-        ask = [e for e in bot.events if e[0] == "send" and hasattr(e[3], "inline_keyboard")]
-        expect(f"нижняя «🧹 Очистить журнал» не спросила «Да / Отмена»: "
-               f"{[datas_of(e[3]) for e in ask]}",
-               len(ask) == 1 and datas_of(ask[0][3]) == ["mod:clearlog_yes", "keys:cancel"]
-               and hist.get_recent_moderation_actions(5))
-        expect("«Да» и «Отмена» у вопроса об очистке журнала может нажать не только владелец",
-               _perm("mod:clearlog_yes") == "owner" and _perm("keys:cancel") == "owner")
-        cancelled.clear()
-        asyncio.run(pk.handle_keys_callback(query, "keys:cancel"))
-        expect("«Отмена» у вопроса об очистке журнала не убрала вопрос",
-               cancelled == ["answer", "delete"])
+        expect(f"старая «🧹 Очистить журнал» не сказала, что очистки нет, или ушла модели: "
+               f"{notices(bot)}", notices(bot) == [pk.MOD_CLEARLOG_GONE_TEXT] and not asked)
+        expect("старая «🧹 Очистить журнал» не поставила новое подменю DDoS-Guard или стёрла журнал",
+               len(keyboards(bot)) == 1 and bool(hist.get_recent_moderation_actions(5)))
         answers = []
 
         async def _qa(text=None, **kw):
             answers.append(text)
-
-        async def _qdel():
-            answers.append("delete")
-        mq = types.SimpleNamespace(answer=_qa, get_bot=lambda: qbot, from_user=types.SimpleNamespace(id=OWNER),
-                                   message=types.SimpleNamespace(chat=types.SimpleNamespace(id=OWNER),
-                                                                 delete=_qdel))
-        qbot = Bot(start_id=1900)
-        panel_mod.send_mod_panel = saved_targets["mod"]
-        asyncio.run(panel_mod._handle_clearlog_callback(mq, True, OWNER))
-        expect("«Да» у вопроса об очистке журнала не стёрло журнал, не убрало вопрос или не "
-               "прислало панель заново",
-               not hist.get_recent_moderation_actions(5) and "delete" in answers
-               and len(keyboards(qbot)) == 1 and "DDoS-Guard" in keyboards(qbot)[0][2])
-        panel_mod.send_mod_panel = recorder("mod")
+        asyncio.run(pk.handle_keys_callback(types.SimpleNamespace(answer=_qa), "keys:cancel"))
+        expect("«Отмена» старого вопроса об очистке журнала не сказала «устарела»",
+               answers == ["Кнопка устарела."])
+        expect("в коде снова есть очистка журнала модерации",
+               not hasattr(panel_mod, "_handle_clearlog_callback")
+               and not hasattr(hist, "clear_moderation_log"))
+        _mod_wipe()
 
         # «📜 Улики» — только при уликах; список и возврат к нему.
         expect("улик нет, а внизу «📜 Улики»",
@@ -11130,7 +11124,7 @@ def check_owner_keys():
         asyncio.run(panel_mod._handle_evidence_callback(None, eq, ["mod", "evidence", "back"]))
         expect("у модератора «⬅️ Назад к панели» с улики вернул не к панели",
                "DDoS-Guard" in edited[-1][0] and "adm_back" in datas_of(edited[-1][1]))
-        hist.clear_moderation_log()
+        _mod_wipe()
 
         # Кнопки под панелью — тем же шагом; чужой такой же текст — модели.
         mod_src = inspect.getsource(panel_mod._handle_antispam_callback)
@@ -11443,7 +11437,7 @@ def check_owner_keys():
                                 ("📖 База знаний: 🔴ВЫКЛ", "r_kb"), ("🎯 40%", "r_thr_info"),
                                 ("📦 1 статья", "r_topk_info"), ("📦 7 статей", "r_topk_info"),
                                 ("⏹️ Завершить проверку", "r_test"), ("➖ порог", "p_mm_dec"),
-                                ("🧹 Очистить журнал", "m_clearlog"), ("📚 База знаний", "rag")):
+                                ("🧹 Очистить журнал", "m_clearlog_gone"), ("📚 База знаний", "rag")):
                 expect(f"«{text_}» узнаётся как «{pk._code_of(text_)}», а не «{code}»",
                        pk._code_of(text_) == code)
             seen = {}

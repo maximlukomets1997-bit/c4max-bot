@@ -767,24 +767,6 @@ def toggle_personal_prompt(actor_id: int) -> bool:
     return off_now
 
 
-def clear_moderation_journal(actor_id: int) -> int:
-    """
-    Очистка журнала модерации — вместе с уликами (01.09.2026).
-
-    ⚠️ СЛЕД В ЖУРНАЛЕ ПЕРСОНАЛА ОБЯЗАТЕЛЕН И КОД У НЕГО ТОТ ЖЕ, что у кнопки
-    бота (`panel_mod::_handle_clearlog_callback` пишет `modlog_clear`). Это
-    надзорная запись: она отвечает на вопрос «кто стёр улики», и разойдись
-    коды — журнал начал бы называть одно и то же действие по-разному.
-    """
-    from database.history import clear_moderation_log
-
-    deleted = clear_moderation_log()
-    _staff_audit(actor_id, "modlog_clear", 0, f"журнал модерации: {deleted} записей")
-    logger.info("🌐 Сайт: очищен журнал модерации (%d записей, админ %s)",
-                deleted, actor_id)
-    return deleted
-
-
 def clear_staff_journal(actor_id: int) -> int:
     """
     Очистка журнала персонала (01.09.2026).
