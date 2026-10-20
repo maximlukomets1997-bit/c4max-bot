@@ -9965,15 +9965,15 @@ def check_owner_keys():
             problems.append(title)
 
     OWNER, MOD, PLAIN = 777060001, 777060002, 777060011
-    # Последняя — с 18.10.2026: «🧹 Очистить ПАМЯТЬ» (слиты «Очистить
-    # РАЗГОВОРЫ» и «Очистить мой диалог»). «🔄 ПЕРЕЗАПУСК» стоял рядом до
-    # 19.10.2026, теперь он в подменю «🎛 Админ-панель» (раздел 10).
+    # «🧹 Очистить ПАМЯТЬ» стояла последней с 18.10 по 20.10.2026 — теперь
+    # она в подменю «🎛 Админ-панель» (раздел 10), как и «🔄 ПЕРЕЗАПУСК»
+    # (с 19.10.2026).
     # Тумблера «⬇️ ОБНОВЛЕНИЕ» больше нет — самообновление включено всегда.
     # «💬 Статистика» ушла 18.10.2026: её цифры — в сообщении с версией, её
     # кнопки — в подменю «🎛 Админ-панель» (раздел 10).
     WANT = ["🎛 Админ-панель", "⚙️ PROMPTы", "📡 Настройки API",
             "🛠 DDoS-Guard", "👥 Пользователи", "📚 База знаний", "🎮 Викторина",
-            "📜 Логи бота", "🌐 Сайт", "🧹 Очистить ПАМЯТЬ"]
+            "📜 Логи бота", "🌐 Сайт"]
 
     class Bot:
         username = "c4max_test_bot"
@@ -10047,7 +10047,10 @@ def check_owner_keys():
     saved_pp = (pp.get_known_chats, pp.send_prompt_files)
     from handlers.admin import panel_digest as pd, panel_updates as pu
     from services import group_digest
-    saved_dig = hist.get_setting(group_digest.ENABLED_KEY, "")
+    # Прежняя запись тумблера дайджеста (убран 20.10.2026): бот её больше не
+    # читает, а проверка кладёт туда «0» — значение возвращается на место.
+    DIG_OLD_KEY = "group_digest_enabled"
+    saved_dig = {k: hist.get_setting(k, "") for k in (DIG_OLD_KEY, group_digest.WEEK_MARK_KEY)}
     saved_svc = (pd.send_digest_panel, pu.send_updates_panel, pm.send_db_backup, pm.get_bot_stats)
     MOD_KEYS_DB = ("antispam_enabled", "linkfilter_enabled", "antispam_msg_count",
                    "antispam_window_sec", "antispam_mute_sec", "greet_enabled", "greet_captcha",
@@ -10787,7 +10790,6 @@ def check_owner_keys():
         # ═══ 10. «🎛 Админ-панель» = статистика (18.10.2026, вариант Б) ═══
         # Цифры — в сообщении с версией; кнопки бывшей панели статистики —
         # внизу, подменю service; каждая делает то же, что под прежней панелью.
-        hist.set_setting(group_digest.ENABLED_KEY, "1")
         s = hist.get_bot_stats()
         text = pk.carrier_text()
         expect(f"в сообщении с версией нет трёх цифр статистики: {text!r}",
@@ -10811,8 +10813,11 @@ def check_owner_keys():
 
         # «🔄 ПЕРЕЗАПУСК» — с 19.10.2026 здесь, одним рядом с «⬅️ Назад»
         # (решение Максима); из главной он ушёл (список WANT в начале).
+        # С 20.10.2026 (решение Максима): тумблера «📰 Дайджест по понедельникам»
+        # нет нигде — дайджест приходит всегда; на его месте отдельным рядом —
+        # «🧹 Очистить ПАМЯТЬ», ушедшая из главной панели.
         WANT_SERVICE = [["⬇️ Обновления", "💾 Копия базы"], ["📊 Дайджест недели"],
-                        ["📰 Дайджест по понедельникам: 🟢ВКЛ"], ["🔄 ПЕРЕЗАПУСК", "⬅️ Назад"]]
+                        ["🧹 Очистить ПАМЯТЬ"], ["🔄 ПЕРЕЗАПУСК", "⬅️ Назад"]]
         skb = pk.owner_keyboard("service", OWNER)
         expect(f"подменю «🎛 Админ-панель»: надписи или ряды не те: {rows_of(skb)}",
                rows_of(skb) == WANT_SERVICE)
@@ -10823,13 +10828,17 @@ def check_owner_keys():
                  + pk.SERVICE_KEYS if seen.setdefault(label, code) != code]
         expect(f"одна надпись у двух разных нижних кнопок: {clash}", not clash)
         old_texts = [b.text for row in pm._stats_keyboard().inline_keyboard for b in row]
-        for label in sum(WANT_SERVICE[:3], []):
+        for label in sum(WANT_SERVICE[:2], []):
             expect(f"«{label}» внизу есть, а под прежней панелью статистики — другая надпись",
                    label in old_texts)
+        for label in sum(WANT_SERVICE, []):
             expect(f"нижняя «{label}» не узнаётся — нажатие ушло бы модели",
                    pk._code_of(label) is not None)
-        expect("«📰 Дайджест по понедельникам» с прежней надписью не узнаётся",
-               pk._code_of("📰 Дайджест по понедельникам: 🔴ВЫКЛ") == "s_digest_auto")
+        expect("«🧹 Очистить ПАМЯТЬ» в подменю — не та же кнопка, что стирает память",
+               pk._code_of("🧹 Очистить ПАМЯТЬ") == "wipe")
+        for old in ("📰 Дайджест по понедельникам: 🔴ВЫКЛ", "📰 Дайджест по понедельникам: 🟢ВКЛ"):
+            expect(f"старая кнопка «{old}» с экрана не узнаётся — ушла бы модели вопросом",
+                   pk._code_of(old) == "s_digest_auto")
 
         # Настоящая статистика у владельца в личке: сообщение с версией и
         # цифрами, внизу — подменю; прежнее сообщение и открытый раздел убраны,
@@ -10883,19 +10892,16 @@ def check_owner_keys():
             bot, gone, _ = press(OWNER, label)
             expect(f"нижняя «{label}» не сделала того же, что кнопка под панелью статистики",
                    calls == [name] and not asked and bool(gone))
-        bot, gone, _ = press(OWNER, "📰 Дайджест по понедельникам: 🟢ВКЛ")
+        # Дайджест по понедельникам — ВСЕГДА (20.10.2026, решение Максима):
+        # тумблера нет ни внизу, ни в /adm, ни на сайте, а старая запись «0» в
+        # базе отправку не гасит.
+        hist.set_setting(DIG_OLD_KEY, "0")
+        bot, gone, _ = press(OWNER, "📰 Дайджест по понедельникам: 🟢ВКЛ")   # старая кнопка
         rows, text, _ = last_keys(bot)
-        expect("нижний «📰 Дайджест по понедельникам» не выключил дайджест или ушёл модели",
-               hist.get_setting(group_digest.ENABLED_KEY, "") == "0" and not asked)
-        expect(f"после «📰 Дайджест» подменю не пришло заново с новой надписью: {rows}",
-               bool(rows) and "📰 Дайджест по понедельникам: 🔴ВЫКЛ" in sum(rows, [])
-               and text == pk.carrier_text() and bool(notices(bot)))
-        expect("нижний «📰 Дайджест» не записан в журнал персонала тем же кодом",
-               hist.get_recent_staff_actions(1)[0].get("action") == "digest")
-        press(OWNER, "📰 Дайджест по понедельникам: 🟢ВКЛ")   # прежняя надпись на экране
-        expect("нажатие «📰 Дайджест» с прежней надписью не вернуло его",
-               hist.get_setting(group_digest.ENABLED_KEY, "") == "1")
-        # Тумблер под прежней панелью — тот же шаг, и после него — статистика.
+        expect(f"старая кнопка «📰 Дайджест» не сказала «приходит всегда» или ушла модели: "
+               f"{notices(bot)}", notices(bot) == [pk.DIGEST_ALWAYS_TEXT] and not asked)
+        expect(f"после старой кнопки «📰 Дайджест» не пришло новое подменю: {rows}",
+               rows == WANT_SERVICE and text == pk.carrier_text())
         q_said = []
 
         async def _q_ans(text=None, **kw):
@@ -10904,11 +10910,24 @@ def check_owner_keys():
         asyncio.run(pd._handle_digest_callback(
             types.SimpleNamespace(answer=_q_ans), types.SimpleNamespace(bot=Bot()),
             "dig:toggle", OWNER, OWNER))
-        expect("тумблер дайджеста под панелью переключает не тем же шагом",
-               hist.get_setting(group_digest.ENABLED_KEY, "") == "0"
-               and q_said and q_said[0].startswith("📰 Дайджест по понедельникам выключен")
-               and opened == ["stats"])
-        hist.set_setting(group_digest.ENABLED_KEY, "1")
+        expect("старая кнопка тумблера под панелью не сказала «приходит всегда» или не "
+               "прислала статистику", q_said == [pk.DIGEST_ALWAYS_TEXT] and opened == ["stats"])
+        expect("тумблер дайджеста вернулся под панель статистики",
+               "dig:toggle" not in [b.callback_data for row in pm._stats_keyboard().inline_keyboard
+                                    for b in row])
+        from web import pages as _dig_pages, routes as _dig_routes
+        expect("на сайте снова переключатель дайджеста",
+               "digest_toggle" not in _dig_pages.page_system(None, "подпись")
+               and 'do == "digest_toggle"' not in inspect.getsource(_dig_routes))
+        from datetime import datetime as _dig_dt
+        saved_now = group_digest._kyiv_now
+        try:
+            group_digest._kyiv_now = lambda: _dig_dt(2026, 10, 19, 10, 30)   # понедельник, 10:30
+            hist.delete_setting(group_digest.WEEK_MARK_KEY)
+            expect("старая запись «выключено» погасила понедельничный дайджест",
+                   group_digest.due_now() is True)
+        finally:
+            group_digest._kyiv_now = saved_now
         expect("кнопка «💾 Копия базы» под панелью снимает копию не общим шагом",
                "send_db_backup(" in router_src[router_src.find('if data == "adm_backup"'):][:600])
         # Возврат с экранов обновлений и дайджеста — «⬅️ Назад» в статистику.
@@ -11782,10 +11801,11 @@ def check_owner_keys():
             else:
                 hist.set_setting(k, v)
         pd.send_digest_panel, pu.send_updates_panel, pm.send_db_backup, pm.get_bot_stats = saved_svc
-        if saved_dig == "":
-            hist.delete_setting(group_digest.ENABLED_KEY)
-        else:
-            hist.set_setting(group_digest.ENABLED_KEY, saved_dig)
+        for k, v in saved_dig.items():
+            if v == "":
+                hist.delete_setting(k)
+            else:
+                hist.set_setting(k, v)
         pp.get_known_chats, pp.send_prompt_files = saved_pp
         roles.ADMIN_IDS, cache, roles._loaded = saved_roles
         roles._cache.clear()

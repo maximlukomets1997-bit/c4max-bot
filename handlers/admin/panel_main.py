@@ -356,13 +356,11 @@ def _stats_keyboard():
     # владельческая (в _CALLBACK_RULES её нет), как и вся эта панель, поэтому
     # отбор по правам ей не нужен. Снимает копию send_db_backup ниже — она же
     # у нижней кнопки «💾 Копия базы» владельца.
-    # Надпись тумблера дайджеста — panel_digest.digest_toggle_text, одна с
-    # нижней кнопкой.
-    from .panel_digest import digest_toggle_text
+    # Тумблер понедельничного дайджеста стоял здесь до 20.10.2026 — убран
+    # отовсюду, дайджест приходит всегда (решение Максима). Не возвращать.
     keyboard = [
         [InlineKeyboardButton("⬇️ Обновления", callback_data="upd:list")],
         [InlineKeyboardButton("📊 Дайджест недели", callback_data="dig:show")],
-        [InlineKeyboardButton(digest_toggle_text(), callback_data="dig:toggle")],
         [InlineKeyboardButton("💾 Копия базы", callback_data="adm_backup")],
         _adm_back_row(),
     ]
