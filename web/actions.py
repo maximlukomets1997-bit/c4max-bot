@@ -725,18 +725,6 @@ async def digest_send(actor_id: int, chat_id: int, text: str, application) -> st
     return f"📤 Дайджест отправлен в «{_chat_title(chat_id)}»."
 
 
-def digest_toggle(actor_id: int) -> bool:
-    """Тумблер понедельничной отправки дайджеста владельцу."""
-    from services import group_digest
-    new_val = "0" if group_digest.is_enabled() else "1"
-    set_setting(group_digest.ENABLED_KEY, new_val)
-    _staff_audit(actor_id, "digest", 0,
-                 f"еженедельный дайджест {'включён' if new_val == '1' else 'выключен'}")
-    logger.info("🌐 Сайт: еженедельный дайджест %s (админ %s)",
-                "включён" if new_val == "1" else "выключен", actor_id)
-    return new_val == "1"
-
-
 def wipe_memory(actor_id: int) -> str:
     """
     «🧹 Очистить ПАМЯТЬ» (18.10.2026, решение Максима — как в боте): бот

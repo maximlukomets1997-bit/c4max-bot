@@ -319,9 +319,6 @@ async def system(request):
         elif do == "report":
             kind = str(form.get("kind", "day"))
             kwargs = {"report": kind, "report_text": actions.report_text(kind)}
-        elif do == "digest_toggle":
-            on = actions.digest_toggle(actor_id)
-            message = f'📊 Еженедельный дайджест {"включён" if on else "выключен"}.'
         elif do == "digest_show":
             chat_id = int(form.get("chat", ""))
             # Сбор дайджеста читает архив группы — уводим в рабочий поток.

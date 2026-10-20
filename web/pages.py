@@ -599,7 +599,7 @@ def page_system(application, csrf: str = "", confirm: str = "",
                 message: str = "", bad: bool = False, upd_page: int = 0) -> str:
     """Деньги, отчёты, логи, обновления, дайджест, копия базы, перезапуск."""
     from database.history import get_known_chats
-    from services import backup, group_digest, update_log
+    from services import backup, update_log
     from handlers.admin import common as adm_common
     from handlers.admin.panel_users import _chat_title
 
@@ -681,13 +681,10 @@ def page_system(application, csrf: str = "", confirm: str = "",
                      'git не отвечает или это не рабочая копия</div></div>')
 
     # ── дайджест ──
-    dig_on = group_digest.is_enabled()
-    dig_items = [("📊 Еженедельный дайджест", "приходит владельцу в личку по понедельникам",
-                  _sysform(csrf, {"do": "digest_toggle"},
-                           f'<button type="submit" class="switch '
-                           f'{"on" if dig_on else "off"}"><span class="knob"></span>'
-                           f'<span class="lbl">{"включён" if dig_on else "выключен"}'
-                           f'</span></button>', "ctl sw"))]
+    # Переключателя нет с 20.10.2026 (решение Максима): дайджест приходит
+    # всегда, тумблер убран отовсюду — в боте и здесь. Не возвращать.
+    dig_items = [("📊 Еженедельный дайджест",
+                  "приходит владельцу в личку каждый понедельник в 10:00 — всегда", "")]
     chats = get_known_chats() or []
     for chat in chats:
         cid = chat["chat_id"]

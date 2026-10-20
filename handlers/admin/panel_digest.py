@@ -13,7 +13,7 @@ import logging
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 
-from database.history import get_known_chats, set_setting
+from database.history import get_known_chats
 from utils import register_and_clean_bot_message
 
 from .common import _adm_back_row, _audit
@@ -36,27 +36,10 @@ def _back_rows():
     ]
 
 
-def digest_toggle_text() -> str:
-    """Надпись тумблера понедельничного дайджеста — одна под панелью и внизу."""
-    from services import group_digest
-    from .common import _onoff
-    return f"📰 Дайджест по понедельникам: {_onoff(group_digest.is_enabled())}"
-
-
-def flip_digest_auto(user_id: int) -> str:
-    """
-    Переключить понедельничный дайджест в личку. Общий шаг кнопки под
-    панелью (ветка dig:toggle ниже) и нижней кнопки владельца (18.10.2026,
-    panel_keys.py). Возвращает, что сказать.
-    """
-    from services import group_digest
-    new_val = "0" if group_digest.is_enabled() else "1"
-    set_setting(group_digest.ENABLED_KEY, new_val)
-    state = "включён" if new_val == "1" else "выключен"
-    logger.info("%s Понедельничный дайджест %s (админ %s)", _ICON, state, user_id)
-    _audit(user_id, "digest", 0, f"понедельничный дайджест {state}")
-    return (f"📰 Дайджест по понедельникам {state}."
-            + (" Придёт тебе в личку в 10:00." if new_val == "1" else ""))
+# ⚠️ ТУМБЛЕРА ПОНЕДЕЛЬНИЧНОГО ДАЙДЖЕСТА БОЛЬШЕ НЕТ (20.10.2026, решение
+# Максима): дайджест приходит владельцу каждый понедельник всегда
+# (services/group_digest.py). digest_toggle_text и flip_digest_auto удалены
+# вместе с кнопками — внизу, в /adm и на сайте. Не возвращать.
 
 
 def digest_keyboard(target_chat: int) -> InlineKeyboardMarkup:
@@ -129,7 +112,8 @@ async def _handle_digest_callback(query, context, data: str, chat_id: int, user_
     Ветки dig:<действие>. Все владельческие (`dig:` в _CALLBACK_RULES).
       dig:show           — экран дайджеста (выбор группы или сразу итоги)
       dig:chat:<id>      — итоги конкретной группы
-      dig:toggle         — тумблер понедельничной отправки в личку
+      dig:toggle         — тумблера нет с 20.10.2026: старая кнопка отвечает,
+                           что дайджест приходит всегда
       dig:send:<id>      — отправить показанный дайджест В ГРУППУ
     """
     from services import group_digest
@@ -138,10 +122,10 @@ async def _handle_digest_callback(query, context, data: str, chat_id: int, user_
     action = parts[1] if len(parts) > 1 else ""
 
     if action == "toggle":
-        # Шаг — общий с нижней кнопкой владельца (flip_digest_auto выше).
-        await query.answer(flip_digest_auto(user_id), show_alert=True)
-        # Перерисовываем ПАНЕЛЬ СТАТИСТИКИ — кнопка живёт там (у владельца —
-        # сообщение с версией и кнопки бывшей статистики внизу).
+        # Тумблера нет (20.10.2026): кнопка осталась на старом сообщении —
+        # говорим, что дайджест включён всегда, и присылаем статистику заново.
+        from .panel_keys import DIGEST_ALWAYS_TEXT
+        await query.answer(DIGEST_ALWAYS_TEXT, show_alert=True)
         from .panel_main import send_stats_panel
         await send_stats_panel(context.bot, chat_id, user_id)
         return
