@@ -206,11 +206,11 @@ def _build_mod_panel_text_and_keyboard(viewer_id: int = 0, full: bool = False):
     """
     Текст + клавиатура панели модерации. Читает живые настройки из settings.
 
-    viewer_id — кто смотрит: от него зависит кнопка «🧹 Очистить журнал»
-    (только владелец). Панель собирается в пяти местах — send_mod_panel
-    (команда /mod и кнопка из /adm) и четыре перерисовки; забыть передать viewer_id хотя
-    бы в одном означает, что кнопка пропадёт у владельца после первого же
-    нажатия ➖/➕.
+    viewer_id — кто смотрит: от него зависит, какие кнопки останутся
+    (тумблеры и регуляторы — только владельцу, см. фильтр в конце). Панель
+    собирается в нескольких местах — send_mod_panel (команда /mod и кнопка из
+    /adm) и перерисовки; забыть передать viewer_id хотя бы в одном означает,
+    что кнопки пропадут у владельца после первого же нажатия ➖/➕.
 
     ⚠️ У ВЛАДЕЛЬЦА ПЕРЕКЛЮЧАТЕЛЕЙ ПОД ПАНЕЛЬЮ НЕТ (2026-10-19, решение
     Максима): они в нижнем подменю «🛠 DDoS-Guard» (panel_keys.py), под
@@ -335,12 +335,8 @@ def _build_mod_panel_text_and_keyboard(viewer_id: int = 0, full: bool = False):
         [InlineKeyboardButton(mod_toggle_text("kick"), callback_data="mod:greet:kick")],
     ] + evidence_rows
 
-    # Очистка журнала — надзорный инструмент: модератор не должен иметь
-    # возможности стереть записи о собственных действиях. Уровень владельца
-    # задан в таблице прав (mod:clearlog), скрывать кнопку здесь не нужно —
-    # это сделает фильтр ниже.
-    keyboard.append([InlineKeyboardButton("🧹 Очистить журнал",
-                                          callback_data="mod:clearlog")])
+    # «🧹 Очистить журнал» стояла здесь до 20.10.2026 — убрана из кода совсем
+    # (решение Максима): журнал модерации чистит только ночная уборка.
 
     keyboard.append(_adm_back_row())
     # Модератору остаётся ВЕСЬ ТЕКСТ панели, кнопки улик и возврат: тумблеры
@@ -367,8 +363,9 @@ async def _handle_mod_callback(update, context, query, user_id, data):
     Гейт прав уже пройден выше по стеку (в handle_callback_query).
     Секции: antispam (настройки), greet (приветствие новичков),
     unmute (снять мут по кнопке из уведомления),
-    evidence (показ удалённых сообщений за мут / возврат к панели),
-    clearlog / clearlog_yes (очистка журнала модерации, только владелец).
+    evidence (показ удалённых сообщений за мут / возврат к панели).
+    Очистки журнала (clearlog / clearlog_yes) нет с 20.10.2026 — решение
+    Максима; нажатие старой кнопки просто гасит часики.
     """
     parts = data.split(":")
     section = parts[1] if len(parts) > 1 else ""
@@ -389,55 +386,7 @@ async def _handle_mod_callback(update, context, query, user_id, data):
         await _handle_evidence_callback(update, query, parts)
         return
 
-    if section in ("clearlog", "clearlog_yes"):
-        await _handle_clearlog_callback(query, section == "clearlog_yes", user_id)
-        return
-
     await query.answer()
-
-
-async def _handle_clearlog_callback(query, confirmed: bool, user_id: int):
-    """
-    Ветки mod:clearlog (спросить) и mod:clearlog_yes (стереть).
-
-    Журнал стирается ЦЕЛИКОМ и вместе с уликами — восстановить нечего,
-    поэтому сначала подменяем клавиатуру на «да / отмена», как это сделано
-    в панели базы знаний.
-    """
-    if not confirmed:
-        await query.answer()
-        try:
-            await query.edit_message_reply_markup(InlineKeyboardMarkup([[
-                InlineKeyboardButton("❗️ Да, очистить журнал", callback_data="mod:clearlog_yes"),
-                InlineKeyboardButton("Отмена", callback_data="mod:evidence:back"),
-            ]]))
-        except Exception as e:
-            logger.warning("⚠️ Не удалось показать подтверждение очистки журнала: %s", e)
-        return
-
-    from database.history import clear_moderation_log
-    deleted = clear_moderation_log()
-    logger.info("🛡 Владелец %s очистил журнал модерации (%d записей)", user_id, deleted)
-    _audit(user_id, "modlog_clear", 0, f"журнал модерации: {deleted} записей")
-    await query.answer(f"🧹 Журнал модерации очищен: {deleted} записей.", show_alert=True)
-
-    chat = getattr(query.message, "chat", None)
-    if chat is not None and chat.id == user_id and mod_toggles_below(user_id):
-        # Владелец спрашивал с нижней кнопки (19.10.2026): вопрос — отдельным
-        # сообщением, панель держит нижние кнопки. Вопрос убираем, панель
-        # присылаем заново — с обнулёнными цифрами журнала.
-        try:
-            await query.message.delete()
-        except Exception as e:
-            logger.debug("🛡 Не удалось убрать вопрос об очистке журнала: %s", e)
-        await send_mod_panel(query.get_bot(), user_id, user_id)
-        return
-
-    text, markup = _build_mod_panel_text_and_keyboard(user_id)
-    try:
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
-    except Exception as e:
-        logger.debug("🛡 Не удалось обновить панель модерации: %s", e)
 
 
 async def _handle_antispam_callback(update, query, parts):

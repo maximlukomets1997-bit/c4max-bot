@@ -109,7 +109,7 @@ from .quiz import (add_quiz_attempt, get_user_stats, set_quiz_stats, _row_to_que
 from .moderation import (log_moderation_action, save_mute_evidence,
                          get_moderation_counts, get_recent_moderation_actions,
                          get_moderation_entry, get_mute_evidence,
-                         delete_old_moderation_log, clear_moderation_log)
+                         delete_old_moderation_log)
 
 # ─── четыре простых журнала ─────────────────────────────────────────
 from .journals import (log_staff_action, get_recent_staff_actions,

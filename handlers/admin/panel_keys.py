@@ -193,17 +193,19 @@ DIGEST_ALWAYS_TEXT = "📰 Дайджест по понедельникам те
 # регуляторы — те же шаги, что под панелью (panel_mod.flip_mod_toggle /
 # step_mod), надписи — panel_mod.mod_toggle_text. Тумблеры по два в ряд, с
 # короткими надписями — так утвердил Максим по макету 19.10.
-# Последний ряд — MOD_LAST_ROW; «📜 Улики» встаёт рядом с «⬅️ Назад», только
-# когда у последних действий есть улики (owner_keyboard). «🧹 Очистить журнал»
-# сначала спрашивает — журнал стирается вместе с уликами.
+# Последний ряд — «⬅️ Назад»; «📜 Улики» встаёт рядом с ним, только когда у
+# последних действий есть улики (owner_keyboard).
+# 20.10.2026 (решение Максима): «👢 Кикать» — третьей в ряд к «👋 Приветствие»
+# и «🤖 «Я не бот»» (надписи полные, хотя Telegram может их подрезать);
+# «🧹 Очистить журнал» убрана из кода совсем — и внизу, и под панелью, и на
+# сайте. Журнал модерации чистит только ночная уборка (jobs/cleanup.py).
 MOD_ROWS = (
     (("🛡 DDoS-Guard", "m_guard"), ("🔗 Фильтр ссылок", "m_linkfilter")),
     (("➖ сообщ.", "m_count_dec"), ("📨 сообщ.", "m_count_info"), ("➕ сообщ.", "m_count_inc")),
     (("➖ окно", "m_window_dec"), ("⏱ окно", "m_window_info"), ("➕ окно", "m_window_inc")),
     (("➖ мут", "m_mute_dec"), ("🔇 мут", "m_mute_info"), ("➕ мут", "m_mute_inc")),
-    (("👋 Приветствие", "m_greet"), ("🤖 «Я не бот»", "m_captcha")),
+    (("👋 Приветствие", "m_greet"), ("🤖 «Я не бот»", "m_captcha"), ("👢 Кикать", "m_kick")),
     (("➖ срок", "m_time_dec"), ("⏳ срок", "m_time_info"), ("➕ срок", "m_time_inc")),
-    (("👢 Кикать", "m_kick"), ("🧹 Очистить журнал", "m_clearlog")),
 )
 MOD_EVIDENCE_KEY = ("📜 Улики", "m_evidence")
 MOD_KEYS = tuple(key for row in MOD_ROWS for key in row) + (MOD_EVIDENCE_KEY,)
@@ -257,7 +259,11 @@ _ALL_KEYS = KEYS + API_KEYS + PROMPTS_KEYS + SERVICE_KEYS + MOD_KEYS + QUIZ_KEYS
 # «💬 Статистика» ушла из панели 18.10.2026; если её кнопка осталась на
 # экране от прежней панели, нажатие — то же, что «🎛 Админ-панель», а не
 # вопрос модели.
-_LEGACY_LABELS = (("💬 Статистика", "adm"),)
+# «🧹 Очистить журнал» (DDoS-Guard) убрана 20.10.2026 — со старой панели на
+# экране её нажатие отвечает, что очистки больше нет, а не уходит модели.
+_LEGACY_LABELS = (("💬 Статистика", "adm"), ("🧹 Очистить журнал", "m_clearlog_gone"))
+MOD_CLEARLOG_GONE_TEXT = ("🧹 Очистки журнала модерации больше нет — старые записи "
+                          "и улики бот убирает сам, ночной уборкой.")
 _BY_LABEL = {label: code for label, code in _ALL_KEYS + _LEGACY_LABELS}
 # У этих кнопок в надписи состояние или число («…: 🟢ВКЛ», «…: 3 с»,
 # «💬 3 сообщ.») — надпись целиком собирает тот же шаг, что у кнопки под
@@ -621,21 +627,9 @@ async def _run(code: str, context, chat_id: int, user_id: int, text: str = "") -
     elif code in ("m_count_info", "m_window_info", "m_mute_info", "m_time_info"):
         from .panel_mod import mod_step_info
         await _notice(bot, chat_id, mod_step_info(code[2:-5]), _INFO_TTL_SEC)
-    elif code == "m_clearlog":
-        # Сначала вопрос: журнал стирается ЦЕЛИКОМ и вместе с уликами. «❗️ Да» —
-        # та же ветка mod:clearlog_yes, что под панелью (у владельца она потом
-        # убирает вопрос и присылает панель заново).
-        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-        sent = await bot.send_message(
-            chat_id=chat_id, parse_mode=ParseMode.HTML,
-            text="🧹 <b>Очистить журнал модерации?</b>\n<i>Сотрутся все записи и "
-                 "улики — вернуть их нельзя.</i>",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("❗️ Да, очистить журнал", callback_data="mod:clearlog_yes"),
-                InlineKeyboardButton("Отмена", callback_data="keys:cancel"),
-            ]]))
-        if sent:
-            await register_and_clean_bot_message(bot, chat_id, sent.message_id)
+    elif code == "m_clearlog_gone":
+        await _notice(bot, chat_id, MOD_CLEARLOG_GONE_TEXT)
+        await send_owner_keys(bot, chat_id, user_id, menu="mod")
     elif code == "m_evidence":
         from .panel_mod import evidence_list_view
         text, markup = evidence_list_view()
@@ -805,10 +799,11 @@ async def _run(code: str, context, chat_id: int, user_id: int, text: str = "") -
 async def handle_keys_callback(query, data: str) -> None:
     """
     Кнопки под сообщениями нижней панели (router.py, ветка «keys:»): «Отмена»
-    у вопроса о перезапуске (keys:restart_no) и у вопроса об очистке журнала
-    модерации (keys:cancel, 19.10.2026) — вопрос убирается.
+    у вопроса о перезапуске (keys:restart_no) — вопрос убирается. Вопроса об
+    очистке журнала модерации (keys:cancel) нет с 20.10.2026 — его «Отмена»
+    со старого сообщения отвечает «устарела».
     """
-    if data in ("keys:restart_no", "keys:cancel"):
+    if data == "keys:restart_no":
         await query.answer("Отменено.")
         try:
             await query.message.delete()

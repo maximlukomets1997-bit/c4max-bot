@@ -230,17 +230,15 @@ async def journal(request):
     actor_id = auth.current_user(request)
     do = str(form.get("do", ""))
 
-    # Обе очистки необратимы — сначала вопрос, как у «Стереть ВСЕ вопросы».
-    if do in ("modclear", "staffclear") and str(form.get("confirm", "")) != "1":
+    # Очистка необратима — сначала вопрос, как у «Стереть ВСЕ вопросы».
+    # Очистки журнала МОДЕРАЦИИ (modclear) нет с 20.10.2026 — решение Максима.
+    if do == "staffclear" and str(form.get("confirm", "")) != "1":
         return aioweb.Response(text=pages.page_journal(csrf, confirm=do),
                                content_type="text/html")
 
     message, bad = "", False
     try:
-        if do == "modclear":
-            n = actions.clear_moderation_journal(actor_id)
-            message = f"🧹 Журнал модерации очищен: {n} записей (вместе с уликами)."
-        elif do == "staffclear":
+        if do == "staffclear":
             n = actions.clear_staff_journal(actor_id)
             message = f"🧹 Журнал персонала очищен: {n} записей."
         else:

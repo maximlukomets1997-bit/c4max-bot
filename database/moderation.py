@@ -175,17 +175,6 @@ def delete_old_moderation_log(days: int = 7) -> int:
     return deleted
 
 
-def clear_moderation_log() -> int:
-    """
-    Полная очистка журнала модерации (кнопка «🧹 Очистить журнал» в /mod).
-    Улики стираются вместе с журналом: они привязаны к его записям, и без
-    журнала превратились бы в мусор, до которого уже ничем не добраться.
-    Возвращает число удалённых записей журнала.
-    """
-    with _lock:
-        conn = _get_connection()
-        conn.execute("DELETE FROM mute_evidence")
-        cur = conn.execute("DELETE FROM moderation_log")
-        deleted = cur.rowcount or 0
-        conn.commit()
-    return deleted
+# Полной очистки журнала модерации («🧹 Очистить журнал», clear_moderation_log)
+# нет с 20.10.2026 — решение Максима: журнал и улики чистит только ночная
+# уборка (delete_old_moderation_log выше).
