@@ -9638,6 +9638,24 @@ def check_direct_hands():
         expect("руки выключены, а текст прав на мут ушёл модели",
                not asked_with_rights(GROUP, PLAIN))
 
+        # Справка об авторе — и в группе, и в ЛИЧКЕ (20.10.2026, решение Максима).
+        # До этого в личке её не было: характер бота начинается с «помощник
+        # контент-мейкера @C4_Max_WTM», и модель принимала любого собеседника
+        # за владельца — 19.10 ответила участнику «Макс, привет!». Карточка
+        # участника подменена: проверка не должна заводить людей в базе.
+        saved_dossier = hist.get_dossier
+        try:
+            hist.get_dossier = lambda uid: (
+                {"username": "krupp_test", "first_name": "Круппов"} if uid == PLAIN
+                else saved_dossier(uid))
+            for chat_id, where in ((GROUP, "в группе"), (PLAIN, "в личке")):
+                sent_payloads.clear()
+                g.ask_gemini(chat_id, PLAIN, "кто я?")
+                expect(f"обращение {where}: справка об авторе (имя и ник) не ушла модели",
+                       any("Круппов (@krupp_test)" in p for p in sent_payloads))
+        finally:
+            hist.get_dossier = saved_dossier
+
         # Голосовое к слышащей модели — свой путь сборки запроса (_ask_native_media).
         hearing = next((m for m in c.AUDIO_FALLBACK_CHAIN if m in c.AVAILABLE_MODELS), None)
         if hearing is None:
@@ -9894,7 +9912,8 @@ def check_direct_hands():
             else:
                 hist.set_setting(key, value)
 
-    return problems, (f"{done} проверок: права уходят модели только в группе, при "
+    return problems, (f"{done} проверок: справка об авторе уходит модели и в группе, и в личке; "
+                      f"права уходят модели только в группе, при "
                       f"включённых руках и не против персонала; мут и удаление "
                       f"сообщения (и всей пачки); пометки нет в ответе, показе по ходу, "
                       f"архиве и памяти; ответ без Reply на стёртое; фото, голосовое и "
