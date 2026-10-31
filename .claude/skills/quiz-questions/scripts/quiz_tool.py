@@ -3,10 +3,15 @@
 quiz_tool.py — проверка и запись вопросов викторины (навык quiz-questions).
 
 Запуск из корня проекта:
+    python .claude/skills/quiz-questions/scripts/quiz_tool.py pull
     python .claude/skills/quiz-questions/scripts/quiz_tool.py size  <статья.md>
     python .claude/skills/quiz-questions/scripts/quiz_tool.py check <пачка.json> --article <статья.md> [...]
     python .claude/skills/quiz-questions/scripts/quiz_tool.py add   <пачка.json> --article <статья.md> [...]
 
+pull  — заменяет домашнюю knowledge/approved свежей копией с сервера. Дома
+        папка отстаёт всегда (в GitHub она не ездит, статьи появляются только
+        на сервере): 31.10.2026 дома не было 12 статей из 132 и у 49 текст
+        был старый. Нужен ssh-адрес c4max — в облачной сессии его нет.
 size  — сколько вопросов положено статье: 2 обычной, 3 большой.
 check — проверяет пачку и ничего не пишет.
 add   — раскладывает верные ответы по позициям, проверяет и дописывает
@@ -73,6 +78,78 @@ NUM_RX = re.compile(r"\d+(?:[  ]\d{3})*(?:[.,]\d+)?")
 
 def numbers(text: str) -> set:
     return {norm_num(m.group()) for m in NUM_RX.finditer(text or "")}
+
+
+SERVER = "c4max"
+SERVER_KB = "/home/c4bot/bot/knowledge"
+
+
+def cmd_pull(args) -> int:
+    """
+    Домашняя knowledge/approved ← копия с сервера: новые и изменённые статьи
+    записываются, статьи, которых на сервере нет, убираются. Трогает только
+    файлы .md этой папки.
+
+    ⚠️ Архив распаковывает Python, а не tar из Windows: тот читает русские
+    имена файлов не в той кодировке и пишет «╨в╤Г-4.md» вместо «Ту-4.md»
+    (поймано 31.10.2026).
+    """
+    import io
+    import shutil
+    import subprocess
+    import tarfile
+    import tempfile
+
+    try:
+        r = subprocess.run(["ssh", "-o", "ConnectTimeout=15", SERVER,
+                            f"cd {SERVER_KB} && tar czf - approved"],
+                           capture_output=True, timeout=180)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        print(f"❌ сервер не ответил ({e}) — папка не тронута")
+        return 1
+    if r.returncode != 0 or not r.stdout:
+        err = r.stderr.decode("utf-8", "replace").strip()[:300]
+        print(f"❌ ssh {SERVER} не отдал статьи (код {r.returncode}): {err} — папка не тронута")
+        return 1
+
+    tmp = tempfile.mkdtemp(prefix="kb_pull_")
+    try:
+        with tarfile.open(fileobj=io.BytesIO(r.stdout), mode="r:gz") as t:
+            t.extractall(tmp, filter="data")
+        src = os.path.join(tmp, "approved")
+        fresh = {f for f in os.listdir(src) if f.lower().endswith(".md")} if os.path.isdir(src) else set()
+        if not fresh:
+            print("❌ в архиве с сервера нет ни одной статьи — папка не тронута")
+            return 1
+        os.makedirs(APPROVED, exist_ok=True)
+        old = {f for f in os.listdir(APPROVED) if f.lower().endswith(".md")}
+        added, changed = [], []
+        for f in sorted(fresh):
+            with open(os.path.join(src, f), "rb") as fh:
+                data = fh.read()
+            dst = os.path.join(APPROVED, f)
+            if f in old:
+                with open(dst, "rb") as fh:
+                    if fh.read() == data:
+                        continue
+                changed.append(f)
+            else:
+                added.append(f)
+            with open(dst, "wb") as fh:
+                fh.write(data)
+        removed = sorted(old - fresh)
+        for f in removed:
+            os.remove(os.path.join(APPROVED, f))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    print(f"Статей на сервере: {len(fresh)}. Дома: новых {len(added)}, обновлено "
+          f"{len(changed)}, убрано {len(removed)}, без изменений "
+          f"{len(fresh) - len(added) - len(changed)}.")
+    for title, items in (("новые", added), ("убраны", removed)):
+        if items:
+            print(f"  {title}: {', '.join(items)}")
+    return 0
 
 
 def cmd_size(args) -> int:
@@ -244,6 +321,7 @@ def cmd_add(args) -> int:
 def main() -> int:
     p = argparse.ArgumentParser(description="Вопросы викторины: проверка и запись")
     sub = p.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("pull", help="свежие статьи с сервера в knowledge/approved")
     s = sub.add_parser("size", help="квота вопросов по размеру статьи")
     s.add_argument("article")
     for name in ("check", "add"):
@@ -252,7 +330,8 @@ def main() -> int:
         c.add_argument("--article", action="append", default=[],
                        help="файл статьи для сверки чисел (можно несколько)")
     args = p.parse_args()
-    return {"size": cmd_size, "check": cmd_check, "add": cmd_add}[args.cmd](args)
+    return {"pull": cmd_pull, "size": cmd_size, "check": cmd_check,
+            "add": cmd_add}[args.cmd](args)
 
 
 if __name__ == "__main__":

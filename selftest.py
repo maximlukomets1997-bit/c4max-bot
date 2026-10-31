@@ -7551,6 +7551,14 @@ def check_quiz_queue():
         expect("экран показал статью, по которой вопрос уже есть (хоть и черновиком)",
                "Первая статья" not in text)
         expect("экран показал статью из неодобренных", "Неодобренная" not in text)
+        # Подсказка обязана звать к кнопке, которая у владельца ЕСТЬ: до 31.10.2026
+        # она называла «📥 Новые вопросы в черновики», а в нижнем меню кнопка — «📥
+        # Новые вопросы (N)». Сверяем с образцом, по которому нижние кнопки узнаются.
+        from handlers.admin import panel_keys as _pk
+        hint = re.search(r"кнопка «([^»]+)»", text)
+        expect(f"экран зовёт к кнопке «{hint and hint.group(1)}», а в нижнем меню владельца "
+               f"такой нет (образец {_pk._STATEFUL['q_seed']})",
+               bool(hint) and re.fullmatch(_pk._STATEFUL["q_seed"], f"{hint.group(1)} (1)"))
         panel_text, panel_kb = panel_quiz._build_panel(None)
         buttons = {b.callback_data: b.text for row in panel_kb.inline_keyboard for b in row}
         expect(f"в панели нет кнопки списка со счётчиком 1: {buttons.get('quiz:noq')}",
