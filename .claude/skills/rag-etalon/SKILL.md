@@ -21,7 +21,7 @@ description: Как превращать новости wtmobile.com из knowle
 
 1. **Игровая карточка ТТХ из самой новости.** Парсер бота достаёт её сам:
    ```python
-   import sys; sys.path.insert(0, r"D:\WORK\Main Project")
+   import sys; sys.path.insert(0, r"D:\BOT-project")
    from services.scraper import fetch_article, _HEADERS
    art = fetch_article("https://wtmobile.com/news/<номер>")  # url из frontmatter сырого файла
    art["stat_images"]  # список URL карточек: *_stat_ru.jpg — обычная, *_prem_stat_ru.jpg — премиум (ТТХ одинаковые)
