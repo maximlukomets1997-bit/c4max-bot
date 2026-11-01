@@ -105,7 +105,9 @@ def build(root):
 
         info[me] = {
             "path": os.path.relpath(path, root).replace(os.sep, "/"),
-            "loc": src.count("\n") + 1,
+            # splitlines, а не count("\n") + 1: у файла с переводом строки
+            # в конце тот счёт давал на строку больше, чем есть.
+            "loc": len(src.splitlines()),
             "imports": sorted(imports),
             "public": pub,
         }
