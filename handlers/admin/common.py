@@ -10,7 +10,7 @@ import logging_setup
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
-from utils import register_and_clean_bot_message, delete_user_message_safe
+from utils import register_and_clean_bot_message, delete_user_message_safe, schedule_delete
 
 
 logger = logging.getLogger(__name__)
@@ -449,12 +449,33 @@ def _build_logs_menu_text() -> str:
     )
 
 
+def logs_keys_below(viewer_id: int) -> bool:
+    """
+    Кнопки экранов логов стоят в нижнем подменю (11.11.2026, решение Максима,
+    как у «🎮 Викторина»)? Тогда под сообщением их нет. Логи — только
+    владельца, а нижние кнопки у владельца есть всегда. viewer_id — номер
+    чата: в личке он совпадает с номером человека.
+    """
+    from services.roles import is_owner
+    return is_owner(viewer_id)
+
+
 async def send_logs_menu(bot, chat_id: int) -> None:
     """
     Прислать развилку «📜 Логи бота» новым сообщением (через гигиену панелей).
     Общая для кнопки /adm (router.py, adm_logs) и нижней кнопки владельца
     (panel_keys.py, 17.10.2026) — экран один, сборка его тоже одна.
+
+    ⚠️ У ВЛАДЕЛЬЦА В ЛИЧКЕ РАЗВИЛКА — ЭТО СООБЩЕНИЕ НИЖНЕГО ПОДМЕНЮ
+    (11.11.2026, решение Максима, как у «🎮 Викторина»): к тексту прикреплены
+    нижние кнопки (panel_keys.send_owner_keys(menu="logs")), под ним кнопок
+    нет, прежнее такое сообщение удаляется, в гигиену панелей оно НЕ попадает.
+    Сюда же приводит «⬅️ К логам» под списком людей и под записью человека.
     """
+    if logs_keys_below(chat_id):
+        from .panel_keys import send_owner_keys
+        await send_owner_keys(bot, chat_id, chat_id, menu="logs")
+        return
     sent_msg = await bot.send_message(
         chat_id=chat_id,
         text=_build_logs_menu_text(),
@@ -478,6 +499,146 @@ def _build_chat_log_header(stats: dict) -> str:
         f"🕐 с {stats['started']} · 🔍 проверок: {stats['checks']}{arc}\n\n"
         "Последние строки:\n"
     )
+
+
+# ─────────────────────────────────────────────
+#  Экраны и файлы логов — общая сборка (11.11.2026)
+#  Ею пользуются и кнопки под сообщением (router.py: adm_logs_bot,
+#  adm_logs_chat, adm_logs_file, adm_logs_archive, adm_logs_chat_file,
+#  adm_logs_chat_archive), и нижние кнопки владельца (panel_keys.py: l_*).
+#  Второй сборки тех же текстов и подписей в проекте быть не должно.
+# ─────────────────────────────────────────────
+
+LOG_EMPTY_TEXT = "⚠️ Файл лога текущей сессии пуст или не найден"
+_LOG_FILE_GONE_NOTE = ("<i>Сообщение исчезнет через минуту — успейте открыть "
+                       "или сохранить.</i>")
+# Что пишется в лог бота, когда файл скачали: «🔧 Админ <номер> <это>».
+_LOG_FILE_SAID = {
+    "file": "скачал файл лога текущей сессии",
+    "archive": "скачал архив логов прошлых запусков",
+    "chat_file": "скачал текущую запись разговора",
+    "chat_archive": "скачал архив разговора",
+}
+
+
+def logs_bot_text() -> str | None:
+    """
+    Текст экрана «⚙️ Работа бота»: максимум последних строк лога текущей
+    сессии. None — файл пуст или не найден (тогда экран не показывается, а
+    человеку говорится LOG_EMPTY_TEXT).
+    """
+    log_path, raw = _read_current_log()
+    if not raw:
+        return None
+    return _build_log_text(os.path.basename(log_path), raw)
+
+
+def logs_chat_text() -> str:
+    """
+    Текст экрана «💬 Разговор в группе»: последние строки дословной записи.
+    Экран показывается ВСЕГДА, даже когда текущей записи нет: в архиве при
+    этом обычно лежат прошлые, и отбивать нажатие табличкой было бы враньём
+    («логов нет» вместо «сегодняшних логов нет»).
+    """
+    from services import chat_log
+    stats = chat_log.stats()
+    _, raw = _read_file_bytes(stats["path"])
+    if raw:
+        return _build_log_text(stats["name"], raw, header=_build_chat_log_header(stats))
+    return (
+        "💬 <b>РАЗГОВОР В ГРУППЕ</b>\n"
+        "───────────────────────────\n"
+        "Записей пока нет: после очистки разговоров в группе ещё "
+        "никто не писал — либо выключен режим «Сам в разговор».\n\n"
+        "<i>Прошлые записи, если они были, лежат в архиве.</i>"
+    )
+
+
+def log_file_for(kind: str):
+    """
+    Файл лога для отправки документом. kind: "file" — лог текущей сессии,
+    "archive" — архив прошлых запусков (logs/archive.log собирает
+    logging_setup при каждом старте), "chat_file" — текущая запись разговора
+    в группе, "chat_archive" — её архив.
+
+    Возвращает (отказ, байты, имя файла, подпись). Отказ — готовый текст для
+    человека, когда слать нечего: файл пуст, не найден или больше потолка
+    Telegram; остальное тогда пустое. Иначе отказ — None.
+    """
+    if kind in ("chat_file", "chat_archive"):
+        from services import chat_log
+        is_archive = kind == "chat_archive"
+        path = chat_log.archive_path() if is_archive else chat_log.current_path()
+        _, raw = _read_file_bytes(path)
+        if not raw:
+            return ("🗄 Архив разговоров пуст: он наполняется по кнопке "
+                    "«🧹 Очистить ПАМЯТЬ»." if is_archive else
+                    "💬 Записей пока нет: после очистки разговоров в группе ещё не писали.",
+                    b"", "", "")
+        # ⚠️ ПОТОЛОК ТЕЛЕГРАМА. Запись растёт до следующей очистки разговоров,
+        # и ограничить её нечем, кроме этой кнопки. Файл больше потолка Telegram
+        # просто не уйдёт — лучше сказать словами, чем свалиться непонятной
+        # ошибкой отправки.
+        if len(raw) > _TG_FILE_MAX:
+            return (f"⚠️ Файл слишком велик для Telegram ({len(raw) // (1024 * 1024)} МБ).\n"
+                    f"Нажми «🧹 Очистить ПАМЯТЬ» — запись уедет в архив, "
+                    f"и начнётся новая. Учти: бот заодно забудет личную переписку со всеми.",
+                    b"", "", "")
+        fname = os.path.basename(path)
+        if is_archive:
+            sessions = chat_log.stats()["archive_sessions"]
+            caption = (f"🗄 <b>Архив разговоров</b>\n"
+                       f"<code>{html.escape(fname)}</code> · "
+                       f"{max(1, round(len(raw) / 1024))} КБ · записей: {sessions}\n")
+        else:
+            caption = (f"💬 <b>Текущая запись разговора</b>\n"
+                       f"<code>{html.escape(fname)}</code> · "
+                       f"{max(1, round(len(raw) / 1024))} КБ\n")
+        return None, raw, fname, caption + _LOG_FILE_GONE_NOTE
+    if kind == "archive":
+        log_path, raw = _read_archive_log()
+        if not raw:
+            return ("🗄 Архив пуст: логов прошлых запусков ещё нет.\n"
+                    "Он соберётся сам при следующем запуске бота.", b"", "", "")
+        fname = os.path.basename(log_path)
+        size_kb = max(1, round(len(raw) / 1024))
+        # Число сессий считаем по заголовкам в самом файле, а не по потолку
+        # ARCHIVE_SESSIONS_TO_KEEP: архив бывает и короче потолка.
+        sessions = _count_archive_sessions(raw)
+        sessions_part = f" · сессий: {sessions}" if sessions else ""
+        return None, raw, fname, (
+            f"🗄 <b>Архив логов прошлых запусков</b>\n"
+            f"<code>{html.escape(fname)}</code> · {size_kb} КБ{sessions_part}\n"
+            + _LOG_FILE_GONE_NOTE)
+    log_path, raw = _read_current_log()
+    if not raw:
+        return LOG_EMPTY_TEXT, b"", "", ""
+    fname = os.path.basename(log_path)
+    size_kb = max(1, round(len(raw) / 1024))
+    return None, raw, fname, (
+        f"📜 <b>Полный лог текущей сессии</b>\n"
+        f"<code>{html.escape(fname)}</code> · {size_kb} КБ\n"
+        + _LOG_FILE_GONE_NOTE)
+
+
+async def send_log_document(bot, chat_id: int, user_id: int, kind: str,
+                            raw: bytes, fname: str, caption: str) -> None:
+    """
+    Прислать файл лога документом (то, что вернула log_file_for).
+
+    ⚠️ ФАЙЛ ИДЁТ МИМО ГИГИЕНЫ ПАНЕЛЕЙ и БЕЗ клавиатуры (решение Максима
+    2026-07-28): экран логов остаётся на месте со своими кнопками, а файл
+    падает в чат следующим сообщением и через минуту исчезает сам. Не
+    «чинить» возвратом register_and_clean_bot_message: он удалил бы экран, из
+    которого нажали.
+    """
+    logger.info("🔧 Админ %s %s", user_id, _LOG_FILE_SAID[kind])
+    sent_msg = await bot.send_document(
+        chat_id=chat_id, document=raw, filename=fname,
+        caption=caption, parse_mode=ParseMode.HTML,
+    )
+    if sent_msg:
+        schedule_delete(bot, chat_id, sent_msg.message_id, _LOG_FILE_TTL)
 
 
 # ─────────────────────────────────────────────

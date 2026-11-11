@@ -11796,6 +11796,244 @@ def check_owner_keys():
                     hist.delete_setting(k)
                 else:
                     hist.set_setting(k, v)
+
+        # ═══ 14. Подменю «📜 Логи бота» и два экрана логов (11.11.2026) ═══
+        # Вариант А (решение Максима): развилка, «⚙️ Работа бота» и «💬 Разговор
+        # в группе» — сообщения нижнего подменю, под ними кнопок нет; тексты,
+        # файлы, отказы и подписи — те же, что у кнопок под сообщением; список
+        # людей «👤 Разговор с ботом» — по-прежнему сообщением с кнопками под
+        # ним. Логи на время проверки — свои, во временной папке: настоящую
+        # logs/ на ПК и сервере проверка не читает и не трогает.
+        import inspect as _linspect
+        import shutil as _lsh
+        import tempfile as _ltmp
+        import time as _ltime
+        import logging_setup as _ls
+        import handlers.admin.router as _lrouter
+        from services import chat_log as _cl, dialog_log as _dl
+        l_dir = _ltmp.mkdtemp(prefix="c4max-selftest-logs-")
+        l_saved = (_ls.LOG_DIR, _ls.CURRENT_LOG_FILE, _cl.DIR, _dl.DIR, cm._TG_FILE_MAX)
+        L_NOW = os.path.join(l_dir, "11.11 10-00.log")
+        L_ARC = os.path.join(l_dir, _ls.ARCHIVE_FILE)
+        L_CHAT = os.path.join(l_dir, "chat", "11.11 09-00.log")
+        L_CHAT_ARC = os.path.join(l_dir, "chat", _cl.ARCHIVE_FILE)
+        L_LINES = "строка лога один\nстрока лога два\n"
+
+        def l_write(path, text):
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+
+        def docs(bot):
+            return [e for e in bot.events if e[0] == "doc"]
+
+        def below_msgs(bot):
+            return [e for e in bot.events if e[0] == "send" and hasattr(e[3], "inline_keyboard")]
+
+        def minute_note(msg_id):
+            return any(c == OWNER and m == msg_id and 50 <= at - _ltime.time() <= 61
+                       for c, m, at in hist.list_pending_deletes())
+
+        try:
+            _ls.LOG_DIR, _ls.CURRENT_LOG_FILE = l_dir, L_NOW
+            _cl.DIR, _dl.DIR = os.path.join(l_dir, "chat"), os.path.join(l_dir, "dialog")
+            os.makedirs(_cl.DIR, exist_ok=True)
+            cm.send_logs_menu = saved_targets["logs"]
+            l_write(L_NOW, L_LINES)
+            asyncio.run(clean_bot_messages(Bot(), OWNER))     # уборка панелей — с чистого листа
+
+            WANT_L = [["⚙️ Работа бота", "💬 Разговор в группе"], ["👤 Разговор с ботом"],
+                      ["⬅️ Назад"]]
+            WANT_LB = [["💾 Текущий лог", "🗄 Архив логов"], ["⬅️ К логам"]]
+            WANT_LC = [["💾 Текущая запись", "🗄 Архив разговоров"], ["⬅️ К логам"]]
+            for menu, want in (("logs", WANT_L), ("logs_bot", WANT_LB), ("logs_chat", WANT_LC)):
+                lkb = pk.owner_keyboard(menu, OWNER)
+                expect(f"подменю логов «{menu}»: надписи или ряды не те: {rows_of(lkb)}",
+                       rows_of(lkb) == want)
+                expect(f"подменю логов «{menu}» не компактное или сворачивается само",
+                       lkb.resize_keyboard is True and lkb.is_persistent is True)
+            l_labels = sum(WANT_L + WANT_LB + WANT_LC, [])
+            for label in l_labels:
+                expect(f"нижняя «{label}» не узнаётся — нажатие ушло бы модели",
+                       pk._code_of(label) is not None)
+            seen = {}
+            lclash = [label for label, code in pk._ALL_KEYS if seen.setdefault(label, code) != code]
+            expect(f"одна надпись у двух разных нижних кнопок: {lclash}", not lclash)
+            # Кнопки под сообщениями (полный вариант — его меряет preflight) и
+            # внизу обещают одну и ту же работу.
+            L_WORK = {"l_bot": "adm_logs_bot", "l_chat": "adm_logs_chat", "l_dlg": "adm_logs_dlg",
+                      "l_file": "adm_logs_file", "l_archive": "adm_logs_archive",
+                      "l_chat_file": "adm_logs_chat_file",
+                      "l_chat_archive": "adm_logs_chat_archive"}
+            l_below = {b.callback_data for row in cm._logs_menu_rows()
+                       + [cm._log_files_row(), cm._chat_log_files_row()] for b in row}
+            # Неузнанная надпись — «?»: её уже назвала проверка выше, а сверка работы
+            # обязана назвать расхождение, а не сорваться на сортировке.
+            l_bottom = {pk._code_of(label) or "?" for label in l_labels} - {"back", "l_back"}
+            expect(f"внизу и под сообщениями логов разная работа: под сообщением "
+                   f"{sorted(l_below)}, внизу {sorted(l_bottom)}",
+                   l_below == set(L_WORK.values()) and l_bottom == set(L_WORK))
+
+            # Вход: развилка с её текстом и нижними кнопками — одно сообщение.
+            hist.set_setting(SLOT, "661")
+            bot = Bot(start_id=3000)
+            asyncio.run(reg(bot, OWNER, 4949))       # открытый раздел — через гигиену
+            bot.events.clear()
+            asyncio.run(cm.send_logs_menu(bot, OWNER))
+            sent = [e for e in bot.events if e[0] == "send"]
+            expect(f"«📜 Логи бота» владельца — не одно сообщение с текстом развилки и подменю "
+                   f"внизу: {[(e[2][:30], type(e[3]).__name__) for e in sent]}",
+                   len(sent) == 1 and isinstance(sent[0][3], ReplyKeyboardMarkup)
+                   and "ЛОГИ БОТА" in sent[0][2] and rows_of(sent[0][3]) == WANT_L)
+            expect("«📜 Логи бота» не убрала прежнее сообщение с нижними кнопками и открытый раздел",
+                   ("delete", OWNER, 661) in bot.events and ("delete", OWNER, 4949) in bot.events)
+            bot = Bot()
+            asyncio.run(cm.send_logs_menu(bot, MOD))
+            expect("не владельцу развилка логов ушла в нижние кнопки или потеряла кнопки под "
+                   "сообщением (полный вариант меряет preflight)",
+                   not keyboards(bot) and len(below_msgs(bot)) == 1
+                   and {"adm_logs_bot", "adm_logs_chat", "adm_logs_dlg", "adm_back"}
+                   <= set(datas_of(below_msgs(bot)[0][3])))
+            bot, gone, _ = press(OWNER, "📜 Логи бота")
+            rows, text, _ = last_keys(bot)
+            expect(f"нижняя «📜 Логи бота» не поставила подменю развилки или ушла модели: {rows}",
+                   rows == WANT_L and "ЛОГИ БОТА" in text and len(keyboards(bot)) == 1
+                   and not below_msgs(bot) and not asked and bool(gone))
+
+            # «⚙️ Работа бота»: последние строки лога — сообщением подменю, а
+            # само оно в уборку панелей не попадает.
+            bot, gone, _ = press(OWNER, "⚙️ Работа бота")
+            rows, text, carrier_id = last_keys(bot)
+            expect(f"нижняя «⚙️ Работа бота» не прислала последние строки лога одним сообщением "
+                   f"с кнопками файлов внизу: {rows}",
+                   rows == WANT_LB and "строка лога два" in text and text == cm.logs_bot_text()
+                   and len(keyboards(bot)) == 1 and not below_msgs(bot) and not asked
+                   and bool(gone))
+            b2 = Bot()
+            asyncio.run(clean_bot_messages(b2, OWNER))
+            expect("экран логов попал в уборку панелей — первый открытый раздел стёр бы его "
+                   "вместе с нижними кнопками", ("delete", OWNER, carrier_id) not in b2.events)
+
+            # Файлы: документом без кнопок, мимо уборки панелей, с самоудалением
+            # через минуту; экран логов остаётся на месте.
+            def file_ok(label, kind, fname, said, extra):
+                bot, gone, _ = press(OWNER, label)
+                got = docs(bot)
+                expect(f"нижняя «{label}» не прислала файл документом без кнопок или прислала "
+                       f"не тот: {[(e[5].get('filename'), (e[2] or '')[:40]) for e in got]}",
+                       len(got) == 1 and got[0][5].get("filename") == fname
+                       and said in got[0][2] and extra in got[0][2]
+                       and "исчезнет через минуту" in got[0][2] and got[0][3] is None
+                       and not asked and bool(gone))
+                expect(f"«{label}» прислала экран заново или ответ вместо файла — экран логов "
+                       f"должен остаться на месте", not keyboards(bot) and not notices(bot))
+                expect(f"подпись файла «{label}» у нижней кнопки не та, что у кнопки под "
+                       f"сообщением", bool(got) and got[0][2] == cm.log_file_for(kind)[3])
+                expect(f"файл «{label}» не встал на самоудаление через минуту — логи копились "
+                       f"бы в чате", bool(got) and minute_note(got[0][4]))
+                if got:
+                    hist.remove_pending_delete(OWNER, got[0][4])
+                b3 = Bot()
+                asyncio.run(clean_bot_messages(b3, OWNER))
+                expect(f"файл «{label}» попал в уборку панелей", not b3.events)
+
+            l_write(L_ARC, _ls._session_mark("10.11 09-00") + "\nстарая строка\n")
+            file_ok("💾 Текущий лог", "file", os.path.basename(L_NOW),
+                    "Полный лог текущей сессии", "")
+            file_ok("🗄 Архив логов", "archive", _ls.ARCHIVE_FILE,
+                    "Архив логов прошлых запусков", "сессий: 1")
+
+            # «💬 Разговор в группе»: экран есть всегда — и без записи, и с ней.
+            bot, gone, _ = press(OWNER, "💬 Разговор в группе")
+            rows, text, _ = last_keys(bot)
+            expect(f"нижняя «💬 Разговор в группе» без записи не прислала экран с пояснением: "
+                   f"{rows}", rows == WANT_LC and "Записей пока нет" in text
+                   and len(keyboards(bot)) == 1 and not below_msgs(bot) and not asked)
+
+            # Слать нечего — короткий ответ вместо всплывающей таблички: файла
+            # нет, экран на месте, текст отказа — тот же, что под сообщением.
+            os.remove(L_ARC)
+            for label, kind in (("🗄 Архив логов", "archive"), ("💾 Текущая запись", "chat_file"),
+                                ("🗄 Архив разговоров", "chat_archive")):
+                bot, gone, _ = press(OWNER, label)
+                want = cm.log_file_for(kind)[0]
+                expect(f"нижняя «{label}» при пустом файле не ответила отказом, как кнопка под "
+                       f"сообщением: {notices(bot)}",
+                       bool(want) and notices(bot) == [want] and not docs(bot)
+                       and not keyboards(bot) and not asked and bool(gone))
+
+            l_write(L_CHAT, "🕐 10:00 проверка\nреплика из группы\n")
+            l_write(L_CHAT_ARC, _cl._SESSION_MARK_PREFIX + "1" + _cl._SESSION_MARK_SUFFIX
+                    + "\nстарая реплика\n")
+            bot, gone, _ = press(OWNER, "💬 Разговор в группе")
+            rows, text, _ = last_keys(bot)
+            expect(f"нижняя «💬 Разговор в группе» с записью не показала её последние строки: "
+                   f"{rows}", rows == WANT_LC and "реплика из группы" in text
+                   and "РАЗГОВОР В ГРУППЕ" in text and text == cm.logs_chat_text()
+                   and len(keyboards(bot)) == 1 and not asked)
+            file_ok("💾 Текущая запись", "chat_file", os.path.basename(L_CHAT),
+                    "Текущая запись разговора", "")
+            file_ok("🗄 Архив разговоров", "chat_archive", _cl.ARCHIVE_FILE,
+                    "Архив разговоров", "записей: 1")
+
+            # Файл больше потолка Telegram — отказ словами, а не ошибка отправки.
+            cm._TG_FILE_MAX = 3
+            bot, gone, _ = press(OWNER, "💾 Текущая запись")
+            expect(f"«💾 Текущая запись» больше потолка Telegram — не отказ словами: "
+                   f"{notices(bot)}", len(notices(bot)) == 1
+                   and "слишком велик" in notices(bot)[0] and not docs(bot))
+            cm._TG_FILE_MAX = l_saved[4]
+
+            # Лога текущей сессии нет — экран не показывается, файл не шлётся.
+            os.remove(L_NOW)
+            bot, gone, _ = press(OWNER, "⚙️ Работа бота")
+            expect(f"«⚙️ Работа бота» без файла лога — не короткий отказ: {notices(bot)}",
+                   notices(bot) == [cm.LOG_EMPTY_TEXT] and not keyboards(bot) and not asked)
+            bot, gone, _ = press(OWNER, "💾 Текущий лог")
+            expect(f"«💾 Текущий лог» без файла лога — не короткий отказ: {notices(bot)}",
+                   notices(bot) == [cm.LOG_EMPTY_TEXT] and not docs(bot) and not asked)
+            l_write(L_NOW, L_LINES)
+
+            # «⬅️ К логам» — развилка, «⬅️ Назад» с неё — главная панель.
+            bot, gone, _ = press(OWNER, "⬅️ К логам")
+            rows, text, _ = last_keys(bot)
+            expect(f"«⬅️ К логам» не вернула развилку логов: {rows}",
+                   rows == WANT_L and "ЛОГИ БОТА" in text and not asked and bool(gone))
+            bot, gone, _ = press(OWNER, "⬅️ Назад")
+            expect(f"«⬅️ Назад» с развилки логов не вернула главную панель: {last_keys(bot)[0]}",
+                   sum(last_keys(bot)[0] or [], []) == WANT)
+
+            # «👤 Разговор с ботом» — список людей сообщением с кнопками под ним
+            # (вариант А); подменю развилки при этом остаётся внизу.
+            _dl.note_ask(777060050, 777060050, "text", "привет, бот")
+            hist.set_setting(SLOT, "662")
+            bot, gone, _ = press(OWNER, "👤 Разговор с ботом")
+            lists = below_msgs(bot)
+            expect(f"нижняя «👤 Разговор с ботом» не прислала список людей с кнопками под ним: "
+                   f"{[datas_of(e[3]) for e in lists]}",
+                   len(lists) == 1 and "РАЗГОВОР С БОТОМ" in lists[0][2]
+                   and {"dlg:card:777060050", "dlg:wipe", "adm_logs"}
+                   <= set(datas_of(lists[0][3])) and not asked and bool(gone))
+            expect("список людей заменил собой сообщение с нижними кнопками — подменю логов "
+                   "пропало бы", not keyboards(bot) and hist.get_setting(SLOT, "") == "662"
+                   and ("delete", OWNER, 662) not in bot.events)
+            b2 = Bot()
+            asyncio.run(clean_bot_messages(b2, OWNER))
+            expect("список людей прошёл мимо уборки панелей — следующий раздел оставил бы его "
+                   "висеть", bool(lists) and ("delete", OWNER, lists[0][4]) in b2.events)
+
+            # Кнопки под сообщениями — той же сборкой; чужой такой же текст — модели.
+            l_src = _linspect.getsource(_lrouter.handle_callback_query)
+            expect("кнопки логов под сообщением работают не общей сборкой с нижним подменю",
+                   all(f"{name}(" in l_src for name in
+                       ("logs_bot_text", "logs_chat_text", "log_file_for", "send_log_document")))
+            for title, uid in (("постороннего", PLAIN), ("модератора", MOD)):
+                bot, gone, _ = press(uid, "⚙️ Работа бота")
+                expect(f"«⚙️ Работа бота» от {title} перехвачена — а это обычный вопрос модели",
+                       asked == ["⚙️ Работа бота"])
+        finally:
+            _ls.LOG_DIR, _ls.CURRENT_LOG_FILE, _cl.DIR, _dl.DIR, cm._TG_FILE_MAX = l_saved
+            cm.send_logs_menu = recorder("logs")
+            _lsh.rmtree(l_dir, ignore_errors=True)
     finally:
         for k, v in saved_mod.items():
             if v == "":
@@ -11842,7 +12080,10 @@ def check_owner_keys():
                       f"«🎛 Админ-панель» — это и статистика: цифры в сообщении с версией, "
                       f"кнопки статистики внизу; "
                       f"подменю «PROMPTы» — так же, с объявлением группам у «Сам в разговор», "
-                      f"и держит его сама панель промптов одним сообщением")
+                      f"и держит его сама панель промптов одним сообщением; "
+                      f"подменю «Логи бота» — развилка и два экрана логов одним сообщением, "
+                      f"файлы, отказы и подписи те же, что под сообщением, список людей — "
+                      f"сообщением с кнопками под ним")
 
 
 CHECKS = (

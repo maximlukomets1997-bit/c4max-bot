@@ -44,9 +44,10 @@
 #     SERVICE_ROWS, «🛠 DDoS-Guard» (19.10.2026) — MOD_ROWS и «🎮 Викторина»
 #     (19.10.2026) — ряды из panel_quiz.quiz_keys_rows, «📚 База знаний»
 #     (19.10.2026) — ряды из panel_rag, в том числе очередь «Ждут одобрения»
-#     списком новостей (меню rag_pending): та же панель, другие
-#     кнопки; сообщение с ним — тот же один в чате. Подробности — у самих
-#     раскладок.
+#     списком новостей (меню rag_pending), «📜 Логи бота» (11.11.2026) —
+#     LOGS_ROWS и два экрана логов (LOGS_BOT_ROWS, LOGS_CHAT_ROWS): та же
+#     панель, другие кнопки; сообщение с ним — тот же один в чате.
+#     Подробности — у самих раскладок.
 #
 #  ⚠️ «🌐 Сайт» — НЕ кнопка-мини-приложение (проба 17.10.2026): открытый с
 #  нижней кнопки сайт не получает от Telegram, кто его открыл, и пишет «Вход
@@ -249,13 +250,46 @@ _KEEP_KB_TEST = {"rag", "r_settings", "r_back", "r_kb", "r_test",
 # надписей (user_data["kb_pending_keys"]) не стирается.
 _KEEP_PENDING_KEYS = {"r_art", "r_pend_prev", "r_pend_next"}
 
+# Подменю «📜 Логи бота» (2026-11-11, решение Максима, вариант А) — так же,
+# как у «🎮 Викторина»: сообщение с подменю — сам экран логов с его текстом,
+# под ним кнопок нет. Три меню: развилка (logs) и два экрана с последними
+# строками — «⚙️ Работа бота» (logs_bot) и «💬 Разговор в группе» (logs_chat);
+# у каждого экрана свои две кнопки файлов и «⬅️ К логам» — назад на развилку.
+# Тексты, файлы, отказы и подписи — те же, что у кнопок под сообщением
+# (common.logs_bot_text / logs_chat_text / log_file_for / send_log_document).
+# Всплывающих табличек у нижних кнопок нет — отказ («архив пуст») приходит
+# коротким сообщением, которое само исчезает.
+# ⚠️ «👤 Разговор с ботом» вниз НЕ переехал (вариант А): список людей и запись
+# человека приходят отдельным сообщением с кнопками под ним, как списки
+# статей в базе знаний; подменю развилки при этом остаётся внизу.
+LOGS_ROWS = (
+    (("⚙️ Работа бота", "l_bot"), ("💬 Разговор в группе", "l_chat")),
+    (("👤 Разговор с ботом", "l_dlg"),),
+    (("⬅️ Назад", "back"),),
+)
+LOGS_BOT_ROWS = (
+    (("💾 Текущий лог", "l_file"), ("🗄 Архив логов", "l_archive")),
+    (("⬅️ К логам", "l_back"),),
+)
+LOGS_CHAT_ROWS = (
+    (("💾 Текущая запись", "l_chat_file"), ("🗄 Архив разговоров", "l_chat_archive")),
+    (("⬅️ К логам", "l_back"),),
+)
+LOGS_KEYS = tuple(key for rows in (LOGS_ROWS, LOGS_BOT_ROWS, LOGS_CHAT_ROWS)
+                  for row in rows for key in row)
+
 # Подменю: раскладка и текст сообщения, с которым оно стоит. None — текст
 # собирается в момент отправки: у prompts и mod — сама панель раздела, у
-# service — сообщение с версией и цифрами.
+# service — сообщение с версией и цифрами, у трёх меню логов — экран логов.
 _MENUS = {"api": (API_ROWS, API_CARRIER_TEXT), "prompts": (PROMPTS_ROWS, None),
-          "service": (SERVICE_ROWS, None), "mod": (MOD_ROWS, None)}
+          "service": (SERVICE_ROWS, None), "mod": (MOD_ROWS, None),
+          "logs": (LOGS_ROWS, None), "logs_bot": (LOGS_BOT_ROWS, None),
+          "logs_chat": (LOGS_CHAT_ROWS, None)}
+# Меню логов: их сообщение — сам экран логов (текст собирает common.py).
+_LOGS_MENUS = ("logs", "logs_bot", "logs_chat")
 
-_ALL_KEYS = KEYS + API_KEYS + PROMPTS_KEYS + SERVICE_KEYS + MOD_KEYS + QUIZ_KEYS + RAG_KEYS
+_ALL_KEYS = (KEYS + API_KEYS + PROMPTS_KEYS + SERVICE_KEYS + MOD_KEYS + QUIZ_KEYS
+             + RAG_KEYS + LOGS_KEYS)
 # «💬 Статистика» ушла из панели 18.10.2026; если её кнопка осталась на
 # экране от прежней панели, нажатие — то же, что «🎛 Админ-панель», а не
 # вопрос модели.
@@ -452,7 +486,8 @@ async def send_owner_keys(bot, chat_id: int, user_id: int | None = None,
     неё не должны падать ни /start, ни запуск бота.
 
     prompts — это САМА ПАНЕЛЬ ПРОМПТОВ с нижними кнопками (18.10.2026), mod и
-    quiz — так же сами панели «🛠 DDoS-Guard» и «🎮 Викторина» (19.10.2026): она заменяет открытый
+    quiz — так же сами панели «🛠 DDoS-Guard» и «🎮 Викторина» (19.10.2026),
+    logs, logs_bot и logs_chat — экраны «📜 Логи бота» (11.11.2026): она заменяет открытый
     раздел так же, как заменяла его прежде через гигиену панелей, — только
     сама в гигиену не попадает (см. шапку файла).
     """
@@ -471,8 +506,15 @@ async def send_owner_keys(bot, chat_id: int, user_id: int | None = None,
         # Список новостей ушёл с экрана — его надписи больше не кнопки.
         context.user_data.pop("kb_pending_keys", None)
     keyboard = owner_keyboard(menu, uid, context)
-    if menu in ("prompts", "mod", "quiz", "rag", "rag_settings", "rag_pending"):
-        if menu == "prompts":
+    if menu in ("prompts", "mod", "quiz", "rag", "rag_settings", "rag_pending") + _LOGS_MENUS:
+        if menu in _LOGS_MENUS:
+            # Файл лога текущей сессии мог опустеть между нажатием и отправкой —
+            # тогда экран «⚙️ Работа бота» приходит с одной этой строкой.
+            from .common import (LOG_EMPTY_TEXT, _build_logs_menu_text,
+                                 logs_bot_text, logs_chat_text)
+            text = {"logs": _build_logs_menu_text, "logs_chat": logs_chat_text,
+                    "logs_bot": lambda: logs_bot_text() or LOG_EMPTY_TEXT}[menu]()
+        elif menu == "prompts":
             from .panel_prompts import prompts_panel_text
             text = prompts_panel_text(uid, getattr(bot, "username", None))
         elif menu == "quiz":
@@ -761,8 +803,41 @@ async def _run(code: str, context, chat_id: int, user_id: int, text: str = "") -
         if sent:
             await register_and_clean_bot_message(bot, chat_id, sent.message_id)
     elif code == "logs":
+        # У владельца развилка логов — сама с нижними кнопками подменю
+        # (send_logs_menu зовёт send_owner_keys(menu="logs")). Второй раз
+        # send_owner_keys здесь НЕ звать — развилка пришла бы дважды.
         from .common import send_logs_menu
         await send_logs_menu(bot, chat_id)
+    elif code == "l_back":
+        await send_owner_keys(bot, chat_id, user_id, menu="logs")
+    elif code == "l_bot":
+        # Файла лога нет — экран не показываем, как и кнопка под сообщением
+        # (там табличка, здесь короткий ответ); развилка остаётся внизу.
+        from .common import LOG_EMPTY_TEXT, logs_bot_text
+        if logs_bot_text() is None:
+            await _notice(bot, chat_id, LOG_EMPTY_TEXT)
+            return
+        await send_owner_keys(bot, chat_id, user_id, menu="logs_bot")
+    elif code == "l_chat":
+        await send_owner_keys(bot, chat_id, user_id, menu="logs_chat")
+    elif code == "l_dlg":
+        # Список людей — отдельным сообщением с кнопками под ним, как из-под
+        # развилки (вариант А: имена вниз не переезжали). Подменю развилки
+        # остаётся; «⬅️ К логам» под списком присылает развилку заново.
+        from .common import _build_dialog_list, _send_panel_message
+        text_, markup = _build_dialog_list(user_id)
+        await _send_panel_message(bot, chat_id, text_, markup)
+    elif code in ("l_file", "l_archive", "l_chat_file", "l_chat_archive"):
+        # Файл — тем же шагом, что кнопка под сообщением: мимо гигиены
+        # панелей, без кнопок, через минуту исчезает. Слать нечего — отказ
+        # коротким ответом (под сообщением это была всплывающая табличка).
+        from .common import log_file_for, send_log_document
+        kind = code[2:]
+        refusal, raw, fname, caption = log_file_for(kind)
+        if refusal:
+            await _notice(bot, chat_id, refusal, _INFO_TTL_SEC)
+            return
+        await send_log_document(bot, chat_id, user_id, kind, raw, fname, caption)
     elif code == "site":
         from telegram import InlineKeyboardMarkup
         from .panel_main import _web_row

@@ -19,13 +19,14 @@ from utils import schedule_delete
 
 
 logger = logging.getLogger(__name__)
-from .common import (_LOG_FILE_TTL, _TG_FILE_MAX, _adm_back_row, _audit,
-                     _build_chat_log_header, _build_dialog_card_header,
+from .common import (LOG_EMPTY_TEXT, _LOG_FILE_TTL, _TG_FILE_MAX, _adm_back_row, _audit,
+                     _build_dialog_card_header,
                      _build_dialog_list, _build_log_text, _build_logs_menu_text,
-                     _chat_log_files_row, _count_archive_sessions,
+                     _chat_log_files_row,
                      _dialog_card_rows, _dialog_person_label, _log_files_row,
-                     _logs_back_row, _logs_menu_rows, _read_archive_log,
-                     _read_current_log, _read_file_bytes)
+                     _logs_back_row, _logs_menu_rows,
+                     _read_file_bytes, log_file_for, logs_bot_text,
+                     logs_chat_text, send_log_document)
 from .panel_balance import _handle_balance_callback
 from .panel_digest import _handle_digest_callback
 from .panel_main import (BATCH_INFO_TEXT, _build_api_keyboard, flip_api_toggle, step_batch,
@@ -204,20 +205,20 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     # ── «⚙️ Работа бота»: текст с максимумом последних строк общего лога ──
     if data == "adm_logs_bot":
-        log_path, raw = _read_current_log()
-        if not raw:
-            await query.answer("⚠️ Файл лога текущей сессии пуст или не найден", show_alert=True)
+        # Текст — общий с нижней кнопкой «⚙️ Работа бота» (common.logs_bot_text).
+        text = logs_bot_text()
+        if text is None:
+            await query.answer(LOG_EMPTY_TEXT, show_alert=True)
             return
         await query.answer()
         logger.info("🔧 Админ %s запросил логи текущей сессии", user_id)
-        fname = os.path.basename(log_path)
         keyboard = InlineKeyboardMarkup([
             _log_files_row(),
             _logs_back_row(),
         ])
         sent_msg = await context.bot.send_message(
             chat_id=chat_id,
-            text=_build_log_text(fname, raw),
+            text=text,
             parse_mode=ParseMode.HTML,
             reply_markup=keyboard,
         )
@@ -230,26 +231,14 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     # этом обычно лежат прошлые, и отбивать нажатие табличкой было бы враньём
     # («логов нет» вместо «сегодняшних логов нет»).
     if data == "adm_logs_chat":
-        from services import chat_log
-        stats = chat_log.stats()
         await query.answer()
         logger.info("🔧 Админ %s запросил лог разговора", user_id)
         keyboard = InlineKeyboardMarkup([
             _chat_log_files_row(),
             _logs_back_row(),
         ])
-        _, raw = _read_file_bytes(stats["path"])
-        if raw:
-            text = _build_log_text(stats["name"], raw,
-                                   header=_build_chat_log_header(stats))
-        else:
-            text = (
-                "💬 <b>РАЗГОВОР В ГРУППЕ</b>\n"
-                "───────────────────────────\n"
-                "Записей пока нет: после очистки разговоров в группе ещё "
-                "никто не писал — либо выключен режим «Сам в разговор».\n\n"
-                "<i>Прошлые записи, если они были, лежат в архиве.</i>"
-            )
+        # Текст — общий с нижней кнопкой «💬 Разговор в группе» (common.logs_chat_text).
+        text = logs_chat_text()
         sent_msg = await context.bot.send_message(
             chat_id=chat_id, text=text, parse_mode=ParseMode.HTML,
             reply_markup=keyboard,
@@ -262,51 +251,15 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     # Отправка — как у логов бота: мимо гигиены панелей, без клавиатуры и с
     # минутным самоудалением. Экран разговора остаётся на месте.
     if data in ("adm_logs_chat_file", "adm_logs_chat_archive"):
-        from services import chat_log
-        is_archive = data == "adm_logs_chat_archive"
-        path = chat_log.archive_path() if is_archive else chat_log.current_path()
-        _, raw = _read_file_bytes(path)
-        if not raw:
-            await query.answer(
-                "🗄 Архив разговоров пуст: он наполняется по кнопке "
-                "«🧹 Очистить ПАМЯТЬ»." if is_archive else
-                "💬 Записей пока нет: после очистки разговоров в группе ещё не писали.",
-                show_alert=True,
-            )
-            return
-        # ⚠️ ПОТОЛОК ТЕЛЕГРАМА. Запись растёт до следующей очистки разговоров,
-        # и ограничить её нечем, кроме этой кнопки. Файл больше потолка Telegram
-        # просто не уйдёт — лучше сказать словами, чем свалиться непонятной
-        # ошибкой отправки.
-        if len(raw) > _TG_FILE_MAX:
-            await query.answer(
-                f"⚠️ Файл слишком велик для Telegram ({len(raw) // (1024 * 1024)} МБ).\n"
-                f"Нажми «🧹 Очистить ПАМЯТЬ» — запись уедет в архив, "
-                f"и начнётся новая. Учти: бот заодно забудет личную переписку со всеми.",
-                show_alert=True,
-            )
+        # Сам файл, отказ и подпись — общие с нижними кнопками
+        # (common.log_file_for / send_log_document).
+        kind = "chat_archive" if data == "adm_logs_chat_archive" else "chat_file"
+        refusal, raw, fname, caption = log_file_for(kind)
+        if refusal:
+            await query.answer(refusal, show_alert=True)
             return
         await query.answer()
-        fname = os.path.basename(path)
-        logger.info("🔧 Админ %s скачал %s разговора", user_id,
-                    "архив" if is_archive else "текущую запись")
-        if is_archive:
-            sessions = chat_log.stats()["archive_sessions"]
-            caption = (f"🗄 <b>Архив разговоров</b>\n"
-                       f"<code>{html.escape(fname)}</code> · "
-                       f"{max(1, round(len(raw) / 1024))} КБ · записей: {sessions}\n")
-        else:
-            caption = (f"💬 <b>Текущая запись разговора</b>\n"
-                       f"<code>{html.escape(fname)}</code> · "
-                       f"{max(1, round(len(raw) / 1024))} КБ\n")
-        sent_msg = await context.bot.send_document(
-            chat_id=chat_id, document=raw, filename=fname,
-            caption=caption + "<i>Сообщение исчезнет через минуту — успейте "
-                              "открыть или сохранить.</i>",
-            parse_mode=ParseMode.HTML,
-        )
-        if sent_msg:
-            schedule_delete(context.bot, chat_id, sent_msg.message_id, _LOG_FILE_TTL)
+        await send_log_document(context.bot, chat_id, user_id, kind, raw, fname, caption)
         return
 
     # ── «👤 Разговор с ботом»: список людей с записями ───────────────────
@@ -461,27 +414,12 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     # тем же экраном сверху. Не «чинить» возвратом register_and_clean_bot_message:
     # он удалил бы экран, из которого нажали.
     if data == "adm_logs_file":
-        log_path, raw = _read_current_log()
-        if not raw:
-            await query.answer("⚠️ Файл лога текущей сессии пуст или не найден", show_alert=True)
+        refusal, raw, fname, caption = log_file_for("file")
+        if refusal:
+            await query.answer(refusal, show_alert=True)
             return
         await query.answer()
-        logger.info("🔧 Админ %s скачал файл лога текущей сессии", user_id)
-        fname = os.path.basename(log_path)
-        size_kb = max(1, round(len(raw) / 1024))
-        sent_msg = await context.bot.send_document(
-            chat_id=chat_id,
-            document=raw,
-            filename=fname,
-            caption=(
-                f"📜 <b>Полный лог текущей сессии</b>\n"
-                f"<code>{html.escape(fname)}</code> · {size_kb} КБ\n"
-                f"<i>Сообщение исчезнет через минуту — успейте открыть или сохранить.</i>"
-            ),
-            parse_mode=ParseMode.HTML,
-        )
-        if sent_msg:
-            schedule_delete(context.bot, chat_id, sent_msg.message_id, _LOG_FILE_TTL)
+        await send_log_document(context.bot, chat_id, user_id, "file", raw, fname, caption)
         return
 
     # ── Кнопка «🗄 Архив логов»: логи прошлых запусков документом ─────────
@@ -489,35 +427,12 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     # логи прошлых сессий склеиваются подряд, хранятся последние 7.
     # Отправка — как у «Текущего лога»: мимо гигиены панелей и без кнопок.
     if data == "adm_logs_archive":
-        log_path, raw = _read_archive_log()
-        if not raw:
-            await query.answer(
-                "🗄 Архив пуст: логов прошлых запусков ещё нет.\n"
-                "Он соберётся сам при следующем запуске бота.",
-                show_alert=True
-            )
+        refusal, raw, fname, caption = log_file_for("archive")
+        if refusal:
+            await query.answer(refusal, show_alert=True)
             return
         await query.answer()
-        logger.info("🔧 Админ %s скачал архив логов прошлых запусков", user_id)
-        fname = os.path.basename(log_path)
-        size_kb = max(1, round(len(raw) / 1024))
-        sessions = _count_archive_sessions(raw)
-        # Число сессий считаем по заголовкам в самом файле, а не по потолку
-        # ARCHIVE_SESSIONS_TO_KEEP: архив бывает и короче потолка.
-        sessions_part = f" · сессий: {sessions}" if sessions else ""
-        sent_msg = await context.bot.send_document(
-            chat_id=chat_id,
-            document=raw,
-            filename=fname,
-            caption=(
-                f"🗄 <b>Архив логов прошлых запусков</b>\n"
-                f"<code>{html.escape(fname)}</code> · {size_kb} КБ{sessions_part}\n"
-                f"<i>Сообщение исчезнет через минуту — успейте открыть или сохранить.</i>"
-            ),
-            parse_mode=ParseMode.HTML,
-        )
-        if sent_msg:
-            schedule_delete(context.bot, chat_id, sent_msg.message_id, _LOG_FILE_TTL)
+        await send_log_document(context.bot, chat_id, user_id, "archive", raw, fname, caption)
         return
 
     # ── Кнопка «💾 Копия базы»: снять копию прямо сейчас ─────────────────
