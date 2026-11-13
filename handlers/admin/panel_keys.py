@@ -39,7 +39,8 @@
 #   • Номер сообщения с панелью — в settings 'owner_keys_msg_<номер владельца>':
 #     по нему удаляется предыдущее. ⚠️ Telegram не даёт ботам удалять сообщения
 #     старше двух суток — тогда старое остаётся, и в чате их два.
-#   • Подменю «📡 Настройки API» (18.10.2026, пилот) — API_ROWS, «⚙️ PROMPTы»
+#   • Подменю «📡 Настройки API» (18.10.2026, пилот; с 13.11.2026 — вся панель:
+#     ряды собирает panel_main.api_keys_rows), «⚙️ PROMPTы»
 #     (18.10.2026) — PROMPTS_ROWS, «🎛 Админ-панель» (18.10.2026) —
 #     SERVICE_ROWS, «🛠 DDoS-Guard» (19.10.2026) — MOD_ROWS и «🎮 Викторина»
 #     (19.10.2026) — ряды из panel_quiz.quiz_keys_rows, «📚 База знаний»
@@ -121,22 +122,21 @@ KEYS = (
     # подменю «🎛 Админ-панель» (SERVICE_ROWS, решение Максима). Не возвращать.
 )
 
-# Подменю «📡 Настройки API» (2026-10-18, пилот по решению Максима): нижняя
-# «📡 Настройки API» присылает панель раздела, как раньше, а нижняя панель на
-# время становится переключателями раздела. Ряды — раскладка; «⬅️ Назад»
-# возвращает главную. Переключатели — ТЕ ЖЕ шаги, что кнопки под панелью
-# (panel_main.flip_api_toggle / step_batch), а под самой панелью их тогда нет
-# (panel_main.api_toggles_below). /start и перезапуск бота всегда ставят
+# Подменю «📡 Настройки API» (2026-10-18, пилот по решению Максима; с
+# 2026-11-13 — ВСЯ панель, решение Максима): сообщение с подменю — сама
+# панель раздела с её текстом (как у «🎮 Викторина»), под ней кнопок нет.
+# Семь рядов по три-четыре кнопки собирает panel_main.api_keys_rows В МОМЕНТ
+# ОТПРАВКИ: показ ответа, склейка, модели текста (галочка у выбранной), модели
+# картинок, глубина раздумий (фаза луны), отчёты, счета и «⬅️ Назад». Надписи
+# короткие — в треть ширины длинные Telegram обрезал бы. Шаги — ТЕ ЖЕ, что у
+# кнопок под панелью (panel_main.flip_api_toggle / step_batch / set_text_model
+# / set_image_model / step_thinking). /start и перезапуск бота всегда ставят
 # главную: какое подменю открыто, бот не помнит и помнить не обязан.
-API_ROWS = (
-    (("🧠 МЫСЛИ ПОД КАПОТОМ", "thoughts"),),
-    (("✍️ ОТВЕТ НА ГЛАЗАХ", "live_answer"),),
-    (("🧠 МЫСЛИ В ЧЕРНОВИКЕ", "live_thoughts"),),
-    (("➖ склейка", "batch_dec"), ("🧩 СКЛЕЙКА", "batch_info"), ("➕ склейка", "batch_inc")),
-    (("⬅️ Назад", "back"),),
-)
-API_CARRIER_TEXT = "📡 Настройки API — переключатели внизу. «⬅️ Назад» — к разделам."
-API_KEYS = tuple(key for row in API_ROWS for key in row)
+# Здесь — только надписи без состояния; с состоянием узнаются по образцу
+# (_STATEFUL), модели и глубина — по panel_main.api_key_code.
+API_KEYS = (("➖ склейка", "batch_dec"), ("➕ склейка", "batch_inc"),
+            ("📊 Вчера", "a_daily"), ("📅 Неделя", "a_weekly"), ("💰 Счета", "a_bal"),
+            ("⬅️ Назад", "back"))
 
 # Подменю «⚙️ PROMPTы» (2026-10-18, решение Максима): переключатели и
 # регуляторы промптов — внизу (panel_prompts.flip_prompts_toggle /
@@ -281,7 +281,7 @@ LOGS_KEYS = tuple(key for rows in (LOGS_ROWS, LOGS_BOT_ROWS, LOGS_CHAT_ROWS)
 # Подменю: раскладка и текст сообщения, с которым оно стоит. None — текст
 # собирается в момент отправки: у prompts и mod — сама панель раздела, у
 # service — сообщение с версией и цифрами, у трёх меню логов — экран логов.
-_MENUS = {"api": (API_ROWS, API_CARRIER_TEXT), "prompts": (PROMPTS_ROWS, None),
+_MENUS = {"prompts": (PROMPTS_ROWS, None),
           "service": (SERVICE_ROWS, None), "mod": (MOD_ROWS, None),
           "logs": (LOGS_ROWS, None), "logs_bot": (LOGS_BOT_ROWS, None),
           "logs_chat": (LOGS_CHAT_ROWS, None)}
@@ -303,10 +303,12 @@ _BY_LABEL = {label: code for label, code in _ALL_KEYS + _LEGACY_LABELS}
 # «💬 3 сообщ.») — надпись целиком собирает тот же шаг, что у кнопки под
 # панелью, а узнаётся она по образцу при ЛЮБОМ состоянии.
 _STATEFUL = {
-    "thoughts": "🧠 МЫСЛИ ПОД КАПОТОМ: .+",
-    "live_answer": "✍️ ОТВЕТ НА ГЛАЗАХ: .+",
-    "live_thoughts": "🧠 МЫСЛИ В ЧЕРНОВИКЕ: .+",
-    "batch_info": "🧩 СКЛЕЙКА: .+",
+    # Переключатели API: короткая надпись (с 13.11.2026) и прежняя длинная —
+    # панель с ней могла остаться на экране.
+    "thoughts": "🧠 Мысли: .+|🧠 МЫСЛИ ПОД КАПОТОМ: .+",
+    "live_answer": "✍️ На глазах: .+|✍️ ОТВЕТ НА ГЛАЗАХ: .+",
+    "live_thoughts": "📝 Черновик: .+|🧠 МЫСЛИ В ЧЕРНОВИКЕ: .+",
+    "batch_info": "🧩 Склейка: .+|🧩 СКЛЕЙКА: .+",
     "p_prompt": "⚙️ PROMPT: .+",
     "p_ai_replies": "💬 ОТВЕТЫ ИИ: .+",
     "p_proactive": "🗣 САМ В РАЗГОВОР: .+",
@@ -348,6 +350,9 @@ _STATEFUL = {
     "r_margin_info": r"📈 \d+%",
 }
 _STATEFUL_RX = {code: re.compile(pattern) for code, pattern in _STATEFUL.items()}
+# Переключатели панели API: их надписи с состоянием собирает
+# panel_main.api_keys_rows, готовыми.
+_API_LIVE = {"thoughts", "live_answer", "live_thoughts", "batch_info"}
 
 # Сколько живут короткие ответы очисток — как у /clear.
 _NOTICE_TTL_SEC = 7
@@ -357,13 +362,15 @@ _INFO_TTL_SEC = 20
 
 def _shown(label: str, code: str, user_id: int | None = None) -> str:
     """
-    Надпись на кнопке с состоянием — целиком у кнопки под панелью
-    (panel_main.api_toggle_text, panel_prompts.prompts_toggle_text): разойтись
-    им нельзя. user_id нужен личному тумблеру «⚙️ PROMPT».
+    Надпись на кнопке с состоянием — у «⚙️ PROMPTы» и «🛠 DDoS-Guard» целиком
+    у кнопки под панелью (panel_prompts.prompts_toggle_text,
+    panel_mod.mod_toggle_text): разойтись им нельзя. user_id нужен личному
+    тумблеру «⚙️ PROMPT».
     """
-    if code.startswith(("q_", "r_")):
-        # Надписи викторины и базы знаний уже живые: их собрали
-        # panel_quiz.quiz_keys_rows и panel_rag.rag_keys_rows / rag_settings_rows.
+    if code.startswith(("q_", "r_", "a_")) or code in _API_LIVE:
+        # Надписи викторины, базы знаний и панели API уже живые: их собрали
+        # panel_quiz.quiz_keys_rows, panel_rag.rag_keys_rows / rag_settings_rows
+        # и panel_main.api_keys_rows.
         return label
     if code.startswith("p_") and code in _STATEFUL:
         from .panel_prompts import prompts_toggle_text
@@ -371,9 +378,6 @@ def _shown(label: str, code: str, user_id: int | None = None) -> str:
     if code.startswith("m_") and code in _STATEFUL:
         from .panel_mod import mod_toggle_text
         return mod_toggle_text(code[2:].removesuffix("_info"))
-    if code in _STATEFUL:
-        from .panel_main import api_toggle_text
-        return api_toggle_text(code)
     return label
 
 
@@ -391,15 +395,18 @@ def _code_of(text: str) -> str | None:
     for key, rx in _STATEFUL_RX.items():
         if rx.fullmatch(text):
             return key
-    return None
+    # Модели и глубина раздумий: надпись зависит от набора моделей в config и
+    # от состояния (галочка, фаза луны) — все варианты знает панель API.
+    from .panel_main import api_key_code
+    return api_key_code(text)
 
 
 def owner_keyboard(menu: str = "main", user_id: int | None = None,
                    context=None) -> ReplyKeyboardMarkup:
     """
     Сама панель, компактная, не сворачивается сама. main — «🎛 Админ-панель»
-    во всю ширину, остальные разделы по две кнопки в ряд; api, prompts и
-    service — подменю по своим рядам; у mod последний ряд — «⬅️ Назад», а при
+    во всю ширину, остальные разделы по две кнопки в ряд; prompts и
+    service — подменю по своим рядам; api — ряды panel_main.api_keys_rows; у mod последний ряд — «⬅️ Назад», а при
     уликах рядом с ним «📜 Улики».
     """
     if menu == "mod":
@@ -407,6 +414,9 @@ def owner_keyboard(menu: str = "main", user_id: int | None = None,
         last = ((MOD_EVIDENCE_KEY, ("⬅️ Назад", "back")) if _evidence_buttons()
                 else (("⬅️ Назад", "back"),))
         layout = MOD_ROWS + (last,)
+    elif menu == "api":
+        from .panel_main import api_keys_rows
+        layout = api_keys_rows(user_id)
     elif menu == "quiz":
         from .panel_quiz import quiz_keys_rows
         layout = quiz_keys_rows()
@@ -506,8 +516,11 @@ async def send_owner_keys(bot, chat_id: int, user_id: int | None = None,
         # Список новостей ушёл с экрана — его надписи больше не кнопки.
         context.user_data.pop("kb_pending_keys", None)
     keyboard = owner_keyboard(menu, uid, context)
-    if menu in ("prompts", "mod", "quiz", "rag", "rag_settings", "rag_pending") + _LOGS_MENUS:
-        if menu in _LOGS_MENUS:
+    if menu in ("api", "prompts", "mod", "quiz", "rag", "rag_settings", "rag_pending") + _LOGS_MENUS:
+        if menu == "api":
+            from .panel_main import api_panel_text
+            text = api_panel_text(uid, below=True)
+        elif menu in _LOGS_MENUS:
             # Файл лога текущей сессии мог опустеть между нажатием и отправкой —
             # тогда экран «⚙️ Работа бота» приходит с одной этой строкой.
             from .common import (LOG_EMPTY_TEXT, _build_logs_menu_text,
@@ -624,10 +637,37 @@ async def _run(code: str, context, chat_id: int, user_id: int, text: str = "") -
         if not await send_prompt_files(bot, chat_id, user_id):
             await _notice(bot, chat_id, NO_PROMPT_FILES_TEXT, 15)
     elif code == "api":
-        # Панель раздела — как раньше, а внизу — его переключатели.
+        # Панель раздела — сама с нижними кнопками подменю (send_api_panel у
+        # владельца зовёт send_owner_keys(menu="api"), с 13.11.2026). Второй
+        # раз send_owner_keys здесь НЕ звать — панель пришла бы дважды.
         from .panel_main import send_api_panel
         await send_api_panel(bot, chat_id, user_id)
+    elif code.startswith(("a_model:", "a_image:")):
+        # Тот же шаг, что у кнопки под панелью. Модель уже выбрана — панель
+        # заново не нужна: надписи остались бы теми же.
+        from .panel_main import set_image_model, set_text_model
+        kind, _, key = code.partition(":")
+        outcome, said = (set_text_model if kind == "a_model" else set_image_model)(key, user_id)
+        await _notice(bot, chat_id, said)
+        if outcome == "changed":
+            await send_owner_keys(bot, chat_id, user_id, menu="api")
+    elif code.startswith("a_think:"):
+        from .panel_main import step_thinking
+        said = step_thinking(code.partition(":")[2], user_id)
+        if said is None:
+            await _notice(bot, chat_id, "❌ Неизвестный провайдер!")
+            return
+        await _notice(bot, chat_id, said)
         await send_owner_keys(bot, chat_id, user_id, menu="api")
+    elif code in ("a_daily", "a_weekly"):
+        # Отчёт — отдельным сообщением с кнопками под ним, как из-под панели;
+        # панель API остаётся: она держит нижние кнопки.
+        from .panel_main import send_daily_report_panel, send_weekly_report_panel
+        await (send_daily_report_panel if code == "a_daily"
+               else send_weekly_report_panel)(bot, chat_id, user_id)
+    elif code == "a_bal":
+        from .panel_balance import send_balance_panel
+        await send_balance_panel(bot, chat_id, user_id)
     elif code in ("thoughts", "live_answer", "live_thoughts"):
         from .panel_main import flip_api_toggle
         await _notice(bot, chat_id, flip_api_toggle(code, user_id))

@@ -424,8 +424,12 @@ async def send_db_backup(bot, chat_id: int, user_id: int) -> None:
         logger.error("⚠️ Архив статей базы знаний по кнопке не сделан: %s", e)
 
 
-async def send_api_panel(bot, chat_id: int, user_id: int):
-    """Панель «🤖 УПРАВЛЕНИЕ МОДЕЛЯМИ»: вызовы API по провайдерам + кнопки моделей."""
+def api_panel_text(user_id, below: bool = False) -> str:
+    """
+    Текст панели «🤖 УПРАВЛЕНИЕ МОДЕЛЯМИ»: вызовы API по провайдерам, расход и
+    остатки. Один и для сообщения с кнопками под ним, и для сообщения нижнего
+    подменю владельца (below=True — тогда приписки «где переключатели» нет).
+    """
     from services import daily_report
 
     stats = get_bot_stats()
@@ -484,10 +488,218 @@ async def send_api_panel(bot, chat_id: int, user_id: int):
         f"  • Всего: <b>{stats['api_calls_total']}</b>\n"
         f"  • Сегодня: <b>{stats['api_calls_today']}</b>"
     )
-    if api_toggles_below(user_id):
+    if not below and api_toggles_below(user_id):
         # Переключателей под панелью нет — сказать, где они (2026-10-18).
         text += "\n\n⌨️ <i>Мысли, ответ на глазах и склейка — в нижних кнопках.</i>"
-    await _send_panel_message(bot, chat_id, text, _build_api_keyboard(user_id))
+    return text
+
+
+async def send_api_panel(bot, chat_id: int, user_id: int):
+    """
+    Панель «🤖 УПРАВЛЕНИЕ МОДЕЛЯМИ»: вызовы API по провайдерам + кнопки моделей.
+
+    ⚠️ У ВЛАДЕЛЬЦА В ЛИЧКЕ ПАНЕЛЬ — ЭТО СООБЩЕНИЕ НИЖНЕГО ПОДМЕНЮ (13.11.2026,
+    решение Максима, как у «🎮 Викторина»): к тексту панели прикреплены нижние
+    кнопки (panel_keys.send_owner_keys(menu="api")) — модели, глубина, показ
+    ответа, отчёты и счета; под ним кнопок нет, прежнее такое сообщение
+    удаляется, в гигиену панелей оно НЕ попадает. До этого дня раздел
+    приходил двумя сообщениями: короткое держало переключатели внизу, а под
+    панелью оставались модели, глубина, отчёты и счета.
+    """
+    if chat_id == user_id and api_toggles_below(user_id):
+        from .panel_keys import send_owner_keys
+        await send_owner_keys(bot, chat_id, user_id, menu="api")
+        return
+    await _send_panel_message(bot, chat_id, api_panel_text(user_id), _build_api_keyboard(user_id))
+
+
+# ─── Общие шаги: модель, модель картинок, глубина раздумий (13.11.2026) ───
+# Ими пользуются и кнопки под панелью (router.py), и нижние кнопки владельца
+# (panel_keys.py): настройка, строка лога, журнал и ответ — одни на обе.
+
+def set_text_model(key: str, user_id: int) -> tuple[str, str]:
+    """
+    Сменить активную модель текста. Возвращает (итог, что сказать): итог —
+    "unknown" (такой модели нет), "same" (она уже выбрана — перерисовка «в то
+    же самое» дала бы ошибку Telegram «Message is not modified») или "changed".
+    """
+    from database.history import set_setting
+    if key not in AVAILABLE_MODELS:
+        return "unknown", "❌ Неизвестная модель!"
+    name = AVAILABLE_MODELS[key]["name"]
+    if get_setting("active_model", GEMINI_MODEL) == key:
+        return "same", f"Модель {name} уже выбрана"
+    set_setting("active_model", key)
+    logger.info("🔧 Админ переключил модель: %s", name)
+    return "changed", f"Модель изменена на {name}"
+
+
+def set_image_model(key: str, user_id: int) -> tuple[str, str]:
+    """Сменить модель картинок — так же, как set_text_model."""
+    from database.history import set_setting
+    if key not in AVAILABLE_IMAGE_MODELS:
+        return "unknown", "❌ Неизвестная модель картинок!"
+    name = AVAILABLE_IMAGE_MODELS[key]["name"]
+    if get_setting("active_image_model", next(iter(AVAILABLE_IMAGE_MODELS))) == key:
+        return "same", f"Модель картинок {name} уже выбрана"
+    set_setting("active_image_model", key)
+    logger.info("🔧 Админ переключил модель картинок: %s", name)
+    return "changed", f"Модель картинок изменена на {name}"
+
+
+def _thinking_state(provider: str):
+    """(коды положений, номер текущего, фазы луны) — для кнопки и для шага."""
+    from services.gemini import thinking_level
+    codes = [code for code, _ in THINKING_LEVELS.get(provider, ())]
+    cur = thinking_level(provider)
+    # Текущего кода может не оказаться в списке (правка настройки руками) —
+    # тогда `index` бросил бы ValueError. thinking_level такое уже чинит,
+    # но защёлка дешевле, чем упавшая кнопка у Максима в руках.
+    pos = codes.index(cur) if cur in codes else 0
+    return codes, pos, THINKING_PHASES.get(len(codes))
+
+
+def _phase(phases, pos: int) -> str:
+    """Фаза луны по МЕСТУ в шкале; незнакомая длина шкалы — только края."""
+    return phases[pos] if phases else ("🌑" if pos == 0 else "🌕")
+
+
+def step_thinking(provider: str, user_id: int) -> str | None:
+    """
+    Следующее положение глубины раздумий провайдера, ПО КРУГУ: с последнего —
+    на первое. Возвращает, что сказать («🐋 DeepSeek 🌔 Высокая» — как на
+    кнопке под панелью); None — такого провайдера нет.
+
+    ⚠️ Настройка ОБЩАЯ и действует на все ОТВЕТЫ бота: личка, группы, режим
+    «Сам в разговор», голосовые и видео. Исключение одно, намеренное: РАЗБОР
+    вложений (у него свои зашитые уровни, services/gemini.py).
+    """
+    from config import THINKING_SETTING_PREFIX
+    from database.history import set_setting
+    from .common import _audit
+    levels = THINKING_LEVELS.get(provider)
+    if not levels:
+        return None
+    codes, pos, phases = _thinking_state(provider)
+    new_pos = (pos + 1) % len(codes)
+    new_label = dict(levels)[codes[new_pos]]
+    set_setting(THINKING_SETTING_PREFIX + provider, codes[new_pos])
+    meta = PROVIDERS.get(provider, {})
+    title = meta.get("title", provider)
+    logger.info("🔧 Админ %s: глубина раздумий %s → %s", user_id, title, new_label)
+    _audit(user_id, "thinking", 0, f"глубина {title}: {new_label}")
+    return f"{meta.get('icon', '')} {title} {_phase(phases, new_pos)} {new_label}"
+
+
+# ─── Нижнее подменю «📡 Настройки API» (13.11.2026, решение Максима) ───
+# Вся панель — внизу, семь рядов по три-четыре кнопки: показ ответа, склейка,
+# модели текста, модели картинок, глубина раздумий, отчёты со счетами и
+# возвратом. Надписи КОРОТКИЕ: в треть ширины полное имя Telegram обрезал бы.
+# Нажатие приходит ТЕКСТОМ надписи, поэтому каждая обязана узнаваться
+# (api_key_code) и не совпадать ни с одной другой нижней кнопкой.
+
+_MODELS_PER_ROW = 3
+
+
+def _circle(is_on) -> str:
+    return "🟢" if is_on else "🔴"
+
+
+def api_key_text(code: str) -> str:
+    """
+    Короткая надпись нижнего переключателя с состоянием.
+    code: thoughts | live_answer | live_thoughts | batch_info.
+    Под панелью (полный вариант) надписи прежние, длинные — api_toggle_text.
+    """
+    if code == "thoughts":
+        from utils_format import thoughts_enabled
+        return f"🧠 Мысли: {_circle(thoughts_enabled())}"
+    if code == "live_answer":
+        from services.live_answer import live_answer_enabled
+        return f"✍️ На глазах: {_circle(live_answer_enabled())}"
+    if code == "live_thoughts":
+        from services.live_answer import live_thoughts_enabled
+        return f"📝 Черновик: {_circle(live_thoughts_enabled())}"
+    if code == "batch_info":
+        from services.message_batch import wait_sec
+        batch = wait_sec()
+        return f"🧩 Склейка: {f'{batch} с' if batch else '🔴'}"
+    raise ValueError(f"нет такого переключателя: {code}")
+
+
+def _text_model_label(key: str) -> str:
+    """«♊️ 3.6 Flash»: значок провайдера и короткое имя из config ("short")."""
+    cfg = AVAILABLE_MODELS.get(key, {})
+    icon = PROVIDERS.get(cfg.get("provider"), {}).get("icon", "")
+    return f"{icon} {cfg.get('short') or cfg.get('name', key)}".strip()
+
+
+def _image_model_label(key: str) -> str:
+    cfg = AVAILABLE_IMAGE_MODELS.get(key, {})
+    return cfg.get("short") or cfg.get("name", key)
+
+
+def _thinking_label(provider: str, pos: int) -> str:
+    """«🐋 🌔 Высокая»: значок провайдера, фаза луны и название положения."""
+    levels = THINKING_LEVELS.get(provider, ())
+    icon = PROVIDERS.get(provider, {}).get("icon", "")
+    return f"{icon} {_phase(THINKING_PHASES.get(len(levels)), pos)} {levels[pos][1]}"
+
+
+def _chunks(items: list, size: int) -> list:
+    return [tuple(items[i:i + size]) for i in range(0, len(items), size)]
+
+
+def api_keys_rows(user_id=None) -> tuple:
+    """
+    Ряды нижнего подменю «📡 Настройки API»: (надпись, код) — panel_keys их
+    показывает, а нажатие узнаёт по надписи. Собираются В МОМЕНТ ОТПРАВКИ:
+    галочка стоит у выбранной модели, луна — в текущей фазе.
+    """
+    active = get_setting("active_model", GEMINI_MODEL)
+    active_image = get_setting("active_image_model", next(iter(AVAILABLE_IMAGE_MODELS)))
+    rows = [
+        tuple((api_key_text(code), code) for code in ("thoughts", "live_answer", "live_thoughts")),
+        (("➖ склейка", "batch_dec"), (api_key_text("batch_info"), "batch_info"),
+         ("➕ склейка", "batch_inc")),
+    ]
+    models = [(("✅ " if key == active else "") + _text_model_label(key), f"a_model:{key}")
+              for row in _MODEL_BUTTON_ROWS for key in row]
+    rows += _chunks(models, _MODELS_PER_ROW)
+    images = [(("✅ " if key == active_image else "") + _image_model_label(key), f"a_image:{key}")
+              for key in _IMAGE_BUTTON_ROW]
+    rows += _chunks(images, _MODELS_PER_ROW)
+    thinking = [(_thinking_label(provider, _thinking_state(provider)[1]), f"a_think:{provider}")
+                for provider in THINKING_LEVELS]
+    rows += _chunks(thinking, _MODELS_PER_ROW)
+    rows.append((("📊 Вчера", "a_daily"), ("📅 Неделя", "a_weekly"),
+                 ("💰 Счета", "a_bal"), ("⬅️ Назад", "back")))
+    return tuple(rows)
+
+
+def api_key_labels() -> dict:
+    """
+    Все надписи моделей и глубины при ЛЮБОМ состоянии → код нажатия. Панель с
+    прежней галочкой или фазой могла остаться на экране (а настройку поменяли
+    на сайте) — её нажатие обязано сработать, а не уйти модели вопросом.
+    """
+    out = {}
+    for row in _MODEL_BUTTON_ROWS:
+        for key in row:
+            label = _text_model_label(key)
+            out[label] = out[f"✅ {label}"] = f"a_model:{key}"
+    for key in _IMAGE_BUTTON_ROW:
+        label = _image_model_label(key)
+        out[label] = out[f"✅ {label}"] = f"a_image:{key}"
+    for provider, levels in THINKING_LEVELS.items():
+        for pos in range(len(levels)):
+            out[_thinking_label(provider, pos)] = f"a_think:{provider}"
+    return out
+
+
+def api_key_code(text: str) -> str | None:
+    """Код нажатия по надписи модели или глубины; None — это не она."""
+    return api_key_labels().get((text or "").strip())
 
 
 def _report_back_rows():

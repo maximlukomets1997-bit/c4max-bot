@@ -10725,18 +10725,59 @@ def check_owner_keys():
                bool(carrier) and ("delete", OWNER, carrier) not in bot.events)
         asyncio.run(clean_bot_messages(Bot(), OWNER))  # уборка за собой: дальше чистый лист
 
-        # ═══ 8. Подменю «📡 Настройки API» (18.10.2026, пилот) ═══
-        # Нижняя «📡 Настройки API» присылает панель и ставит внизу её
-        # переключатели; каждый — тот же шаг, что кнопка под панелью; под
-        # панелью их тогда нет. «⬅️ Назад» — главная.
+        # ═══ 8. Подменю «📡 Настройки API» (18.10.2026; с 13.11.2026 — вся панель) ═══
+        # Нижняя «📡 Настройки API» присылает ОДНО сообщение — панель раздела с
+        # нижними кнопками, под ним кнопок нет. Семь рядов по три-четыре: показ
+        # ответа, склейка, модели текста, модели картинок, глубина раздумий,
+        # отчёты со счетами и «⬅️ Назад». Каждая кнопка — тот же шаг, что под
+        # панелью. Набор моделей берётся из config (он меняется), а надписи
+        # переключателей, отчётов и раскладка рядов выписаны руками.
         mb.wait_sec = saved_h[1]                     # регулятору нужна настоящая склейка
+        from handlers.admin import panel_balance as pbal
+        API_SET = ["active_model", "active_image_model"] + [
+            c.THINKING_SETTING_PREFIX + prov for prov in c.THINKING_LEVELS]
+        saved_api = {k: hist.get_setting(k, "") for k in API_SET}
+        saved_api_fn = (pm.send_daily_report_panel, pm.send_weekly_report_panel,
+                        pbal.send_balance_panel)
+        pm.send_api_panel = saved_targets["api"]
         hist.set_setting(uf.THOUGHTS_SETTING_KEY, "1")
         hist.set_setting(la.SETTING_KEY, "0")
         hist.set_setting(la.THOUGHTS_SETTING_KEY, "1")
         hist.set_setting(mb.SETTING_KEY, "0")
-        WANT_API = [["🧠 МЫСЛИ ПОД КАПОТОМ: 🟢ВКЛ"], ["✍️ ОТВЕТ НА ГЛАЗАХ: 🔴ВЫКЛ"],
-                    ["🧠 МЫСЛИ В ЧЕРНОВИКЕ: 🟢ВКЛ"],
-                    ["➖ склейка", "🧩 СКЛЕЙКА: 🔴ВЫКЛ", "➕ склейка"], ["⬅️ Назад"]]
+        M_KEYS = [key for row in pm._MODEL_BUTTON_ROWS for key in row]
+        I_KEYS = list(pm._IMAGE_BUTTON_ROW)
+        PROVS = list(c.THINKING_LEVELS)
+        hist.set_setting("active_model", M_KEYS[0])
+        hist.set_setting("active_image_model", I_KEYS[0])
+        for prov in PROVS:                           # глубина — на первом положении шкалы
+            hist.set_setting(c.THINKING_SETTING_PREFIX + prov, c.THINKING_LEVELS[prov][0][0])
+
+        def m_label(key):
+            cfg = c.AVAILABLE_MODELS[key]
+            return f"{c.PROVIDERS[cfg['provider']]['icon']} {cfg.get('short', '')}"
+
+        def i_label(key):
+            return c.AVAILABLE_IMAGE_MODELS[key].get("short", "")
+
+        def t_label(prov, pos):
+            levels = c.THINKING_LEVELS[prov]
+            return f"{c.PROVIDERS[prov]['icon']} {c.THINKING_PHASES[len(levels)][pos]} {levels[pos][1]}"
+
+        def by3(items):
+            return [items[i:i + 3] for i in range(0, len(items), 3)]
+
+        def want_api(model=None, image=None, think=None, toggles=("🟢", "🔴", "🟢"), batch="🔴"):
+            model, image = model or M_KEYS[0], image or I_KEYS[0]
+            think = think or {}
+            return ([[f"🧠 Мысли: {toggles[0]}", f"✍️ На глазах: {toggles[1]}",
+                      f"📝 Черновик: {toggles[2]}"],
+                     ["➖ склейка", f"🧩 Склейка: {batch}", "➕ склейка"]]
+                    + by3([("✅ " if k == model else "") + m_label(k) for k in M_KEYS])
+                    + by3([("✅ " if k == image else "") + i_label(k) for k in I_KEYS])
+                    + by3([t_label(prov, think.get(prov, 0)) for prov in PROVS])
+                    + [["📊 Вчера", "📅 Неделя", "💰 Счета", "⬅️ Назад"]])
+
+        WANT_API = want_api()
 
         def rows_of(markup):
             return [[b.text for b in row] for row in markup.keyboard]
@@ -10748,49 +10789,101 @@ def check_owner_keys():
         def notices(bot):
             return [e[2] for e in bot.events if e[0] == "send" and e[3] is None]
 
-        akb = pk.owner_keyboard("api")
+        def under(bot):
+            return [e for e in bot.events if e[0] == "send" and hasattr(e[3], "inline_keyboard")]
+
+        # У каждой модели в config есть короткое имя, и оно влезает в треть ряда.
+        no_short = [k for k in M_KEYS if not c.AVAILABLE_MODELS[k].get("short")] + [
+            k for k in I_KEYS if not c.AVAILABLE_IMAGE_MODELS[k].get("short")]
+        expect(f"у модели в config нет короткого имени «short» для нижней кнопки: {no_short}",
+               not no_short)
+        api_labels = sum(WANT_API, [])
+        too_long = [label for label in api_labels if len(label) > 16]
+        expect(f"надпись нижней кнопки API длиннее 16 знаков — в треть ряда Telegram её "
+               f"обрежет: {too_long}", not too_long)
+
+        akb = pk.owner_keyboard("api", OWNER)
         expect(f"подменю «Настройки API»: надписи или ряды не те: {rows_of(akb)}",
                rows_of(akb) == WANT_API)
+        expect(f"подменю «Настройки API» не в семь рядов по три-четыре кнопки: "
+               f"{[len(r) for r in rows_of(akb)]}",
+               len(M_KEYS) != 6 or len(I_KEYS) != 2 or len(PROVS) != 3
+               or [len(r) for r in rows_of(akb)] == [3, 3, 3, 3, 2, 3, 4])
         expect("подменю «Настройки API» не компактное или сворачивается само",
                akb.resize_keyboard is True and akb.is_persistent is True)
-        all_labels = [label for label, _ in pk.KEYS + pk.API_KEYS]
-        expect("у двух нижних кнопок одна надпись — одна из них никогда не сработает",
-               len(all_labels) == len(set(all_labels)))
-        # Надпись внизу — та же, что у кнопки под панелью: разойтись им нельзя.
-        inline = {b.callback_data: b.text
-                  for row in pm._build_api_keyboard(OWNER, full=True).inline_keyboard for b in row}
-        bottom = {code: pk._shown(label, code) for label, code in pk.API_KEYS}
-        for code, data in (("thoughts", "toggle_thoughts"), ("live_answer", "toggle_live_answer"),
-                           ("live_thoughts", "toggle_live_thoughts"), ("batch_info", "batch_info")):
-            expect(f"надпись «{bottom[code]}» внизу и «{inline.get(data)}» под панелью разошлись",
-                   bottom[code] == inline.get(data))
-        for row in WANT_API:
-            for label in row:
-                expect(f"нижняя «{label}» не узнаётся — нажатие ушло бы модели",
-                       pk._code_of(label) is not None)
+        every = dict(pk._ALL_KEYS)
+        clash8 = [label for label, code in pm.api_key_labels().items()
+                  if every.get(label, code) != code or pk._STATEFUL_RX and any(
+                      rx.fullmatch(label) for rx in pk._STATEFUL_RX.values())]
+        expect(f"надпись модели или глубины совпала с другой нижней кнопкой: {clash8}",
+               not clash8)
+        expect("у двух нижних кнопок API одна надпись — одна из них никогда не сработает",
+               len(api_labels) == len(set(api_labels)))
+        for label in api_labels:
+            expect(f"нижняя «{label}» не узнаётся — нажатие ушло бы модели",
+                   pk._code_of(label) is not None)
 
-        # Вход в подменю: панель раздела, как раньше, и переключатели внизу.
+        # Кнопки под панелью (полный вариант — его меряет preflight) и внизу
+        # обещают одну и ту же работу.
+        A_WORK = {"thoughts": "toggle_thoughts", "live_answer": "toggle_live_answer",
+                  "live_thoughts": "toggle_live_thoughts", "batch_dec": "batch_dec",
+                  "batch_info": "batch_info", "batch_inc": "batch_inc",
+                  "a_daily": "adm_daily_report", "a_weekly": "adm_weekly_report",
+                  "a_bal": "bal:panel"}
+        A_WORK.update({f"a_model:{k}": f"set_model:{k}" for k in M_KEYS})
+        A_WORK.update({f"a_image:{k}": f"set_image_model:{k}" for k in I_KEYS})
+        A_WORK.update({f"a_think:{prov}": f"think:{prov}" for prov in PROVS})
+        a_below = set(datas_of(pm._build_api_keyboard(OWNER, full=True))) - {"adm_back"}
+        a_bottom = {pk._code_of(label) or "?" for label in api_labels} - {"back"}
+        expect(f"внизу и под панелью API разная работа: только под панелью "
+               f"{sorted(a_below - set(A_WORK.values()))}, только внизу "
+               f"{sorted(a_bottom - set(A_WORK))}",
+               a_below == set(A_WORK.values()) and a_bottom == set(A_WORK))
+
+        # Вход: панель с её текстом и нижними кнопками — ОДНО сообщение.
+        hist.set_setting(SLOT, "663")
+        bot = Bot(start_id=3200)
+        asyncio.run(reg(bot, OWNER, 4950))           # открытый раздел — через гигиену
+        bot.events.clear()
+        asyncio.run(pm.send_api_panel(bot, OWNER, OWNER))
+        sent = [e for e in bot.events if e[0] == "send"]
+        expect(f"«📡 Настройки API» владельца — не одно сообщение с текстом панели и подменю "
+               f"внизу: {[(e[2][:30], type(e[3]).__name__) for e in sent]}",
+               len(sent) == 1 and isinstance(sent[0][3], ReplyKeyboardMarkup)
+               and "УПРАВЛЕНИЕ МОДЕЛЯМИ" in sent[0][2] and rows_of(sent[0][3]) == WANT_API)
+        expect("«📡 Настройки API» не убрала прежнее сообщение с нижними кнопками и открытый "
+               "раздел", ("delete", OWNER, 663) in bot.events and ("delete", OWNER, 4950) in bot.events)
+        bot = Bot()
+        asyncio.run(pm.send_api_panel(bot, MOD, MOD))
+        expect("не владельцу панель API ушла в нижние кнопки или потеряла кнопки под сообщением",
+               not keyboards(bot) and len(under(bot)) == 1
+               and f"set_model:{M_KEYS[0]}" in datas_of(under(bot)[0][3]))
         bot, gone, _ = press(OWNER, "📡 Настройки API")
         rows, text, msg_id = last_keys(bot)
-        expect("нижняя «📡 Настройки API» не открыла панель раздела", opened == ["api"])
-        expect(f"после «📡 Настройки API» внизу не подменю раздела: {rows}",
-               rows == WANT_API and text == pk.API_CARRIER_TEXT and not asked)
+        expect(f"нижняя «📡 Настройки API» не прислала панель одним сообщением с подменю: {rows}",
+               rows == WANT_API and "УПРАВЛЕНИЕ МОДЕЛЯМИ" in text and len(keyboards(bot)) == 1
+               and not under(bot) and not asked and bool(gone))
         expect("сообщение с подменю не запомнено — следующее не уберёт его",
                bool(msg_id) and hist.get_setting(SLOT, "") == str(msg_id))
+        b2 = Bot()
+        asyncio.run(clean_bot_messages(b2, OWNER))
+        expect("панель API попала в уборку панелей — первый открытый раздел стёр бы её "
+               "вместе с нижними кнопками", ("delete", OWNER, msg_id) not in b2.events)
 
         # Каждый переключатель: та же настройка и тот же код журнала, что под
-        # панелью; надпись следует; нажатие с прежней надписью — тоже работает.
-        for label_on, key, audit, label_off in (
-                ("🧠 МЫСЛИ ПОД КАПОТОМ: 🟢ВКЛ", uf.THOUGHTS_SETTING_KEY, "thoughts",
-                 "🧠 МЫСЛИ ПОД КАПОТОМ: 🔴ВЫКЛ"),
-                ("🧠 МЫСЛИ В ЧЕРНОВИКЕ: 🟢ВКЛ", la.THOUGHTS_SETTING_KEY, "live_thoughts",
-                 "🧠 МЫСЛИ В ЧЕРНОВИКЕ: 🔴ВЫКЛ")):
+        # панелью; надпись следует; прежняя надпись — и короткая, и длинная
+        # (со старой панели на экране) — тоже работает.
+        for label_on, key, audit, label_off, old_label in (
+                ("🧠 Мысли: 🟢", uf.THOUGHTS_SETTING_KEY, "thoughts", "🧠 Мысли: 🔴",
+                 "🧠 МЫСЛИ ПОД КАПОТОМ: 🟢ВКЛ"),
+                ("📝 Черновик: 🟢", la.THOUGHTS_SETTING_KEY, "live_thoughts", "📝 Черновик: 🔴",
+                 "🧠 МЫСЛИ В ЧЕРНОВИКЕ: 🟢ВКЛ")):
             bot, gone, _ = press(OWNER, label_on)
             rows, text, _ = last_keys(bot)
             expect(f"нижняя «{label_on}» не выключила свою настройку или ушла модели",
                    hist.get_setting(key, "") == "0" and not asked and bool(gone))
-            expect(f"после «{label_on}» подменю не пришло заново с новой надписью: {rows}",
-                   bool(rows) and label_off in sum(rows, []) and text == pk.API_CARRIER_TEXT)
+            expect(f"после «{label_on}» панель не пришла заново с новой надписью: {rows}",
+                   bool(rows) and label_off in sum(rows, []) and "УПРАВЛЕНИЕ МОДЕЛЯМИ" in text)
             expect(f"после «{label_on}» нет короткого ответа, что произошло",
                    bool(notices(bot)))
             last = hist.get_recent_staff_actions(1)
@@ -10799,20 +10892,24 @@ def check_owner_keys():
             press(OWNER, label_on)                   # прежняя надпись на экране
             expect(f"нажатие «{label_on}» с прежней надписью не вернуло настройку",
                    hist.get_setting(key, "") == "1" and not asked)
-        bot, gone, _ = press(OWNER, "✍️ ОТВЕТ НА ГЛАЗАХ: 🔴ВЫКЛ")
-        expect("нижняя «✍️ ОТВЕТ НА ГЛАЗАХ» не включила ответ на глазах",
+            press(OWNER, old_label)                  # длинная надпись со старой панели
+            expect(f"прежняя длинная «{old_label}» не сработала — ушла бы модели вопросом",
+                   hist.get_setting(key, "") == "0" and not asked)
+            hist.set_setting(key, "1")
+        bot, gone, _ = press(OWNER, "✍️ На глазах: 🔴")
+        expect("нижняя «✍️ На глазах» не включила ответ на глазах",
                hist.get_setting(la.SETTING_KEY, "") == "1" and not asked)
-        expect("нижняя «✍️ ОТВЕТ НА ГЛАЗАХ» не записана в журнал персонала тем же кодом",
+        expect("нижняя «✍️ На глазах» не записана в журнал персонала тем же кодом",
                hist.get_recent_staff_actions(1)[0].get("action") == "live_answer")
         press(OWNER, "✍️ ОТВЕТ НА ГЛАЗАХ: 🔴ВЫКЛ")
-        expect("нижняя «✍️ ОТВЕТ НА ГЛАЗАХ» не выключила его обратно",
+        expect("прежняя длинная «✍️ ОТВЕТ НА ГЛАЗАХ» не выключила его обратно",
                hist.get_setting(la.SETTING_KEY, "") == "0")
 
         # Склейка: шаг, предел и пояснение.
         bot, gone, _ = press(OWNER, "➕ склейка")
         rows, _, _ = last_keys(bot)
         expect(f"нижняя «➕ склейка» не прибавила шаг или надпись не следует: {rows}",
-               mb.wait_sec() == 1 and bool(rows) and "🧩 СКЛЕЙКА: 1 с" in sum(rows, [])
+               mb.wait_sec() == 1 and bool(rows) and "🧩 Склейка: 1 с" in sum(rows, [])
                and not asked)
         expect("нижняя «➕ склейка» не записана в журнал персонала тем же кодом",
                hist.get_recent_staff_actions(1)[0].get("action") == "batch")
@@ -10822,10 +10919,78 @@ def check_owner_keys():
         expect("«➖ склейка» на нуле: не сказано «крайнее значение» или прислано подменю "
                "«в то же самое»", mb.wait_sec() == 0 and not keyboards(bot)
                and notices(bot) == ["Это крайнее значение."])
-        bot, gone, _ = press(OWNER, "🧩 СКЛЕЙКА: 3 с")   # прежняя надпись на экране
-        expect("нижняя «🧩 СКЛЕЙКА» не пояснила, что это, или что-то поменяла",
-               notices(bot) == [pm.BATCH_INFO_TEXT] and mb.wait_sec() == 0
-               and not keyboards(bot) and not asked)
+        for old_batch in ("🧩 Склейка: 3 с", "🧩 СКЛЕЙКА: 3 с"):   # прежние надписи на экране
+            bot, gone, _ = press(OWNER, old_batch)
+            expect(f"нижняя «{old_batch}» не пояснила, что это, или что-то поменяла",
+                   notices(bot) == [pm.BATCH_INFO_TEXT] and mb.wait_sec() == 0
+                   and not keyboards(bot) and not asked)
+
+        # Модель текста: тот же шаг, галочка переезжает; уже выбранная —
+        # панель заново не шлётся; панель с прежней галочкой тоже работает.
+        second = M_KEYS[1]
+        bot, gone, _ = press(OWNER, m_label(second))
+        rows, text, _ = last_keys(bot)
+        expect(f"нижняя «{m_label(second)}» не сменила модель или ушла модели вопросом: "
+               f"{hist.get_setting('active_model', '')}",
+               hist.get_setting("active_model", "") == second and not asked and bool(gone))
+        expect(f"после смены модели панель не пришла заново с галочкой на новой: {rows}",
+               rows == want_api(model=second) and "УПРАВЛЕНИЕ МОДЕЛЯМИ" in text)
+        expect(f"после смены модели нет ответа с её полным именем: {notices(bot)}",
+               notices(bot) == [f"Модель изменена на {c.AVAILABLE_MODELS[second]['name']}"])
+        bot, gone, _ = press(OWNER, f"✅ {m_label(second)}")
+        expect(f"нажатие уже выбранной модели прислало панель «в то же самое» или промолчало: "
+               f"{notices(bot)}", not keyboards(bot) and len(notices(bot)) == 1
+               and "уже выбрана" in notices(bot)[0] and not asked)
+        press(OWNER, f"✅ {m_label(M_KEYS[0])}")       # панель с прежней галочкой на экране
+        expect("модель с прежней галочкой на кнопке не выбралась — нажатие ушло бы модели",
+               hist.get_setting("active_model", "") == M_KEYS[0] and not asked)
+
+        # Модель картинок — так же.
+        bot, gone, _ = press(OWNER, i_label(I_KEYS[1]))
+        rows, _, _ = last_keys(bot)
+        expect(f"нижняя «{i_label(I_KEYS[1])}» не сменила модель картинок или галочка не "
+               f"переехала: {rows}",
+               hist.get_setting("active_image_model", "") == I_KEYS[1]
+               and rows == want_api(image=I_KEYS[1]) and not asked
+               and notices(bot) == [f"Модель картинок изменена на "
+                                    f"{c.AVAILABLE_IMAGE_MODELS[I_KEYS[1]]['name']}"])
+        press(OWNER, i_label(I_KEYS[0]))
+
+        # Глубина раздумий: шаг по кругу, луна следует, журнал тот же.
+        prov = PROVS[0]
+        levels = c.THINKING_LEVELS[prov]
+        bot, gone, _ = press(OWNER, t_label(prov, 0))
+        rows, _, _ = last_keys(bot)
+        expect(f"нижняя «{t_label(prov, 0)}» не сдвинула глубину на шаг или надпись не следует: "
+               f"{rows}", hist.get_setting(c.THINKING_SETTING_PREFIX + prov, "") == levels[1][0]
+               and rows == want_api(think={prov: 1}) and not asked and bool(gone))
+        expect(f"после шага глубины нет ответа, как на кнопке под панелью: {notices(bot)}",
+               notices(bot) == [f"{c.PROVIDERS[prov]['icon']} {c.PROVIDERS[prov]['title']} "
+                                f"{c.THINKING_PHASES[len(levels)][1]} {levels[1][1]}"])
+        expect("шаг глубины не записан в журнал персонала кодом «thinking»",
+               hist.get_recent_staff_actions(1)[0].get("action") == "thinking")
+        hist.set_setting(c.THINKING_SETTING_PREFIX + prov, levels[-1][0])
+        press(OWNER, t_label(prov, len(levels) - 1))
+        expect("глубина с последнего положения не вернулась на первое",
+               hist.get_setting(c.THINKING_SETTING_PREFIX + prov, "") == levels[0][0])
+
+        # Отчёты и счета — свой экран отдельным сообщением; панель API остаётся.
+        seen8 = []
+
+        def rec8(name):
+            async def _r(*a, **kw):
+                seen8.append(name)
+            return _r
+        pm.send_daily_report_panel = rec8("daily")
+        pm.send_weekly_report_panel = rec8("weekly")
+        pbal.send_balance_panel = rec8("bal")
+        for label, name in (("📊 Вчера", "daily"), ("📅 Неделя", "weekly"), ("💰 Счета", "bal")):
+            seen8.clear()
+            bot, gone, _ = press(OWNER, label)
+            expect(f"нижняя «{label}» открыла не свой экран, прислала панель заново или ушла "
+                   f"модели: {seen8}", seen8 == [name] and not keyboards(bot) and not asked
+                   and bool(gone))
+        pm.send_daily_report_panel, pm.send_weekly_report_panel, pbal.send_balance_panel = saved_api_fn
 
         # «⬅️ Назад» — главная; /start после подменю — тоже главная.
         bot, gone, _ = press(OWNER, "⬅️ Назад")
@@ -10841,9 +11006,9 @@ def check_owner_keys():
         expect("/start после подменю поставил не главную нижнюю панель",
                rows is not None and sum(rows, []) == WANT)
 
-        # Под панелью переключателей нет — они внизу. С 18.10.2026 выключателя
-        # нижних кнопок нет, и старая запись «выключено» их под панель не
-        # возвращает: под панелью они только в полном варианте для preflight.
+        # Под панелью у владельца переключателей нет; полный вариант (его меряет
+        # preflight) — со всеми. Старая запись «нижние кнопки выключены» ничего
+        # не возвращает: выключателя нет с 18.10.2026.
         TOGGLES = {"toggle_thoughts", "toggle_live_answer", "toggle_live_thoughts",
                    "batch_dec", "batch_info", "batch_inc"}
         compact = set(datas_of(pm._build_api_keyboard(OWNER)))
@@ -10851,17 +11016,9 @@ def check_owner_keys():
                f"{sorted(TOGGLES & compact)}", not TOGGLES & compact and "bal:panel" in compact)
         expect("полный вариант панели API (его меряет preflight) потерял переключатели",
                TOGGLES <= set(datas_of(pm._build_api_keyboard(OWNER, full=True))))
-        bot = Bot()
-        asyncio.run(saved_targets["api"](bot, OWNER, OWNER))
-        sent = [e for e in bot.events if e[0] == "send"]
-        expect("панель API с переключателями внизу не говорит, где они",
-               bool(sent) and "в нижних кнопках" in sent[-1][2]
-               and not TOGGLES & set(datas_of(sent[-1][3])))
         hist.set_setting(OLD_KEY, "0")
-        expect("старая запись «нижние кнопки выключены» вернула переключатели под панель API",
-               not TOGGLES & set(datas_of(pm._build_api_keyboard(OWNER))))
         hist.set_setting(uf.THOUGHTS_SETTING_KEY, "1")
-        bot, gone, _ = press(OWNER, "🧠 МЫСЛИ ПОД КАПОТОМ: 🟢ВКЛ")
+        bot, gone, _ = press(OWNER, "🧠 Мысли: 🟢")
         expect("старая запись «нижние кнопки выключены» — и нажатие переключателя ушло модели",
                hist.get_setting(uf.THOUGHTS_SETTING_KEY, "") == "0" and not asked)
         hist.delete_setting(OLD_KEY)
@@ -10869,15 +11026,29 @@ def check_owner_keys():
             bot, gone, _ = press(uid, "⬅️ Назад")
             expect(f"«⬅️ Назад» от {title} перехвачен — а это обычный вопрос модели",
                    not keyboards(bot) and asked == ["⬅️ Назад"])
-        # Кнопки под панелью переключают тем же шагом — второго набора правил нет.
+            before_model = hist.get_setting("active_model", "")
+            bot, gone, _ = press(uid, m_label(second))
+            expect(f"«{m_label(second)}» от {title} сменила модель — а это обычный вопрос модели",
+                   asked == [m_label(second)]
+                   and hist.get_setting("active_model", "") == before_model)
+        # Кнопки под панелью работают теми же шагами — второго набора правил нет.
         for name, step in (('if data == "toggle_thoughts"', 'flip_api_toggle("thoughts"'),
                            ('if data == "toggle_live_answer"', 'flip_api_toggle("live_answer"'),
                            ('if data == "toggle_live_thoughts"', 'flip_api_toggle("live_thoughts"'),
-                           ('if data in ("batch_dec", "batch_inc", "batch_info")', "step_batch(")):
+                           ('if data in ("batch_dec", "batch_inc", "batch_info")', "step_batch("),
+                           ('if data.startswith("set_model:")', "set_text_model("),
+                           ('if data.startswith("set_image_model:")', "set_image_model("),
+                           ('if data.startswith("think:")', "step_thinking(")):
             branch = router_src[router_src.find(name):]
             branch = branch[:branch.find("\n    if data", 10)]
-            expect(f"ветка «{name}» переключает не общим шагом с нижним подменю",
+            expect(f"ветка «{name}» работает не общим шагом с нижним подменю",
                    step in branch)
+        for k, v in saved_api.items():
+            if v == "":
+                hist.delete_setting(k)
+            else:
+                hist.set_setting(k, v)
+        pm.send_api_panel = recorder("api")
 
         # ═══ 9. Подменю «⚙️ PROMPTы» (18.10.2026) ═══
         # Нижняя «⚙️ PROMPTы» присылает панель и ставит внизу её переключатели
@@ -12382,8 +12553,9 @@ def check_owner_keys():
                       f"текст — модели; выключателя нет, старая запись «выключено» ничего не "
                       f"гасит; /start и запуск ставят панель; /adm владельца — это же одно "
                       f"сообщение с версией, раздел убирает, а сам в уборку панелей не "
-                      f"попадает; подменю «Настройки API» — "
-                      f"те же переключатели и надписи, что под панелью, а под панелью их нет; "
+                      f"попадает; подменю «Настройки API» — вся панель одним сообщением: "
+                      f"показ ответа, склейка, модели, глубина, отчёты и счета теми же шагами, "
+                      f"что под панелью; "
                       f"подменю «DDoS-Guard» — одно сообщение с панелью, те же шаги, улики "
                       f"и вопрос перед очисткой журнала; "
                       f"подменю «Викторина» — одно сообщение с панелью, кнопка только при "

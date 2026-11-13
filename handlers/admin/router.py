@@ -11,9 +11,6 @@ from telegram import (Update, InlineKeyboardButton, InlineKeyboardMarkup,
                       LinkPreviewOptions)
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
-from config import (AVAILABLE_MODELS, AVAILABLE_IMAGE_MODELS, GEMINI_MODEL,
-                    PROVIDERS, THINKING_LEVELS, THINKING_SETTING_PREFIX, THINKING_PHASES)
-from database.history import set_setting, get_setting
 from utils import register_and_clean_bot_message
 from utils import schedule_delete
 
@@ -30,6 +27,7 @@ from .common import (LOG_EMPTY_TEXT, _LOG_FILE_TTL, _TG_FILE_MAX, _adm_back_row,
 from .panel_balance import _handle_balance_callback
 from .panel_digest import _handle_digest_callback
 from .panel_main import (BATCH_INFO_TEXT, _build_api_keyboard, flip_api_toggle, step_batch,
+                         set_image_model, set_text_model, step_thinking,
                          send_adm_panel, send_api_panel,
                          send_daily_report_panel, send_weekly_report_panel,
                          send_stats_panel)
@@ -688,36 +686,15 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         # разное (у MiMo вообще только «думает/не думает») — см.
         # config.THINKING_LEVELS, там же живые замеры.
         #
-        # ⚠️ Настройка ОБЩАЯ и действует на все ОТВЕТЫ бота: личка, группы,
-        # режим «Сам в разговор», голосовые и видео. Исключение одно,
-        # намеренное: РАЗБОР вложений (у него свои зашитые уровни,
-        # services/gemini.py). Второе — машинная сборка вопросов викторины,
-        # думавшая в полную силу мимо кнопки, — удалено 04.10.2026.
-        provider = data.split(":", 1)[1]
-        levels = THINKING_LEVELS.get(provider)
-        if not levels:
+        # Сам шаг — общий с нижней кнопкой владельца (panel_main.step_thinking,
+        # 13.11.2026): настройка, строка лога и журнал — одни на обе.
+        said = step_thinking(data.split(":", 1)[1], user_id)
+        if said is None:
             await query.answer("❌ Неизвестный провайдер!", show_alert=True)
             return
-        codes = [code for code, _ in levels]
-        from services.gemini import thinking_level
-        cur = thinking_level(provider)
-        # Текущего кода может не оказаться в списке (правка настройки руками) —
-        # тогда `index` бросил бы ValueError. thinking_level такое уже чинит,
-        # но защёлка дешевле, чем упавшая кнопка у Максима в руках.
-        pos = codes.index(cur) if cur in codes else 0
-        new_code = codes[(pos + 1) % len(codes)]
-        new_label = dict(levels)[new_code]
-        set_setting(THINKING_SETTING_PREFIX + provider, new_code)
-        meta = PROVIDERS.get(provider, {})
-        title = meta.get("title", provider)
-        logger.info("🔧 Админ %s: глубина раздумий %s → %s", user_id, title, new_label)
-        _audit(user_id, "thinking", 0, f"глубина {title}: {new_label}")
         # Всплывашка повторяет надпись кнопки, включая фазу луны: человек
         # видит подтверждение в том же виде, в каком оно осталось на кнопке.
-        phases = THINKING_PHASES.get(len(codes))
-        new_pos = codes.index(new_code)
-        phase = phases[new_pos] if phases else ("🌑" if new_pos == 0 else "🌕")
-        await query.answer(f"{meta.get('icon', '')} {title} {phase} {new_label}")
+        await query.answer(said)
         try:
             await query.edit_message_reply_markup(reply_markup=_build_api_keyboard(user_id))
         except Exception as e:
@@ -725,20 +702,15 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     if data.startswith("set_model:"):
-        new_model = data.split(":", 1)[1]
-        if new_model not in AVAILABLE_MODELS:
-            await query.answer("❌ Неизвестная модель!", show_alert=True)
-            return
-        # Нажали кнопку уже активной модели: клавиатура получится точь-в-точь
-        # прежней, а Telegram на такую перерисовку отвечает ошибкой
+        # Шаг — общий с нижней кнопкой владельца (panel_main.set_text_model).
+        # Нажали кнопку уже активной модели («same»): клавиатура получится
+        # точь-в-точь прежней, а Telegram на такую перерисовку отвечает ошибкой
         # «Message is not modified» (шум в логе). Просто говорим об этом.
-        if get_setting("active_model", GEMINI_MODEL) == new_model:
-            await query.answer(f"Модель {AVAILABLE_MODELS[new_model]['name']} уже выбрана", show_alert=False)
+        outcome, said = set_text_model(data.split(":", 1)[1], user_id)
+        if outcome != "changed":
+            await query.answer(said, show_alert=(outcome == "unknown"))
             return
-        set_setting("active_model", new_model)
-        model_name_display = AVAILABLE_MODELS[new_model]['name']
-        logger.info("🔧 Админ переключил модель: %s", model_name_display)
-        await query.answer(f"Модель изменена на {model_name_display}", show_alert=True)
+        await query.answer(said, show_alert=True)
         try:
             await query.edit_message_reply_markup(reply_markup=_build_api_keyboard(user_id))
         except Exception as e:
@@ -746,20 +718,13 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     if data.startswith("set_image_model:"):
-        new_model = data.split(":", 1)[1]
-        if new_model not in AVAILABLE_IMAGE_MODELS:
-            await query.answer("❌ Неизвестная модель картинок!", show_alert=True)
-            return
         # Та же защита от «Message is not modified», что и у текстовых моделей
         # (наступили на этом 2026-07-19 именно на кнопке картинок).
-        if get_setting("active_image_model", next(iter(AVAILABLE_IMAGE_MODELS))) == new_model:
-            await query.answer(f"Модель картинок {AVAILABLE_IMAGE_MODELS[new_model]['name']} уже выбрана",
-                               show_alert=False)
+        outcome, said = set_image_model(data.split(":", 1)[1], user_id)
+        if outcome != "changed":
+            await query.answer(said, show_alert=(outcome == "unknown"))
             return
-        set_setting("active_image_model", new_model)
-        model_name_display = AVAILABLE_IMAGE_MODELS[new_model]['name']
-        logger.info("🔧 Админ переключил модель картинок: %s", model_name_display)
-        await query.answer(f"Модель картинок изменена на {model_name_display}", show_alert=True)
+        await query.answer(said, show_alert=True)
         try:
             await query.edit_message_reply_markup(reply_markup=_build_api_keyboard(user_id))
         except Exception as e:

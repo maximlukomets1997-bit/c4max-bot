@@ -571,6 +571,10 @@ KB_LOG_DAYS            = 30                    # срок хранения жу�
 AVAILABLE_MODELS = {
     "gemini-3.5-flash-lite": {
         "name": "Gemini 3.5 Flash-Lite",
+        # "short" — короткое имя для нижней кнопки владельца (13.11.2026): там
+        # модели стоят по три в ряд, и полное имя Telegram обрезал бы. Значок
+        # провайдера дописывает панель (handlers/admin/panel_main.py).
+        "short": "3.5 Lite",
         "public_name": "3.5 Flash-Lite",
         "provider": "gemini",
         "thinking": True,
@@ -579,6 +583,7 @@ AVAILABLE_MODELS = {
     },
     "gemini-3.6-flash": {
         "name": "Gemini 3.6 Flash",
+        "short": "3.6 Flash",
         "public_name": "3.6 Flash",
         "provider": "gemini",
         "thinking": True,
@@ -622,6 +627,7 @@ AVAILABLE_MODELS = {
     # очередях ниже они стояли бы дублями соседей.
     "gemini-3.8-flash": {
         "name": "Gemini 3.8 Flash",
+        "short": "3.8 Flash",
         "public_name": "3.8 Flash",
         "provider": "gemini",
         "thinking": True,
@@ -640,6 +646,7 @@ AVAILABLE_MODELS = {
     #     пиксельный камуфляж, кресты на броне.
     "deepseek-flash": {
         "name": "DeepSeek V4.1 Flash",
+        "short": "V4.1 Flash",
         "public_name": "DS V4.1 Flash",
         "provider": "deepseek",
         "thinking": True,
@@ -660,6 +667,7 @@ AVAILABLE_MODELS = {
     # видео и речь нашим путём не проверялись: для них нужен отдельный код.
     "mimo-v2.6-flash": {
         "name": "MiMo V2.6 Flash",
+        "short": "MiMo Flash",
         "public_name": "MiMo V2.6 Flash",
         "provider": "xiaomi",
         "thinking": True,
@@ -667,6 +675,7 @@ AVAILABLE_MODELS = {
     },
     "mimo-v2.6-pro": {
         "name": "MiMo V2.6 Pro",
+        "short": "MiMo Pro",
         "public_name": "MiMo V2.6 Pro",
         "provider": "xiaomi",
         "thinking": True,
@@ -1045,12 +1054,15 @@ PROACTIVE_OFF_MSGS_KEY = "proactive_off_msgs"
 AVAILABLE_IMAGE_MODELS = {
     "gemini-nano-banana-2.1": {
         "name": "🏞️Nano Banana 2.1",
+        # "short" — надпись нижней кнопки владельца целиком, со значком.
+        "short": "🏞️ Banana 2.1",
         "public_name": "Banana 2.1",
         "limit": 0,
         "show_limit": False
     },
     "gemini-3.1-flash-lite-image": {
         "name": "🏜️Gemini 3.1 Flash Lite",
+        "short": "🏜️ Flash Lite",
         "public_name": "3.1 Lite",
         "limit": 0,
         "show_limit": False
