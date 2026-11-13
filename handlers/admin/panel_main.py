@@ -592,13 +592,15 @@ def step_thinking(provider: str, user_id: int) -> str | None:
 
 
 # ─── Нижнее подменю «📡 Настройки API» (13.11.2026, решение Максима) ───
-# Вся панель — внизу, семь рядов по три-четыре кнопки: показ ответа, склейка,
-# модели текста, модели картинок, глубина раздумий, отчёты со счетами и
-# возвратом. Надписи КОРОТКИЕ: в треть ширины полное имя Telegram обрезал бы.
+# Вся панель — внизу, шесть рядов по три-четыре кнопки: показ ответа, склейка,
+# модели текста вместе с глубиной раздумий их провайдера (с 13.11.2026 кнопка
+# глубины стоит сразу за моделями своего провайдера, по четыре в ряд; до этого
+# у глубины был свой ряд), модели картинок, отчёты со счетами и возвратом.
+# Надписи КОРОТКИЕ: в четверть ширины полное имя Telegram обрезал бы.
 # Нажатие приходит ТЕКСТОМ надписи, поэтому каждая обязана узнаваться
 # (api_key_code) и не совпадать ни с одной другой нижней кнопкой.
 
-_MODELS_PER_ROW = 3
+_MODELS_PER_ROW = 4
 
 
 def _circle(is_on) -> str:
@@ -663,15 +665,23 @@ def api_keys_rows(user_id=None) -> tuple:
         (("➖ склейка", "batch_dec"), (api_key_text("batch_info"), "batch_info"),
          ("➕ склейка", "batch_inc")),
     ]
-    models = [(("✅ " if key == active else "") + _text_model_label(key), f"a_model:{key}")
-              for row in _MODEL_BUTTON_ROWS for key in row]
+    # Модели текста и глубина раздумий — одной лентой: за последней моделью
+    # провайдера стоит кнопка его глубины (если она у него есть — у Xiaomi
+    # нет, он думает всегда).
+    keys = [key for row in _MODEL_BUTTON_ROWS for key in row]
+    models = []
+    for i, key in enumerate(keys):
+        models.append((("✅ " if key == active else "") + _text_model_label(key), f"a_model:{key}"))
+        provider = AVAILABLE_MODELS.get(key, {}).get("provider")
+        next_provider = (AVAILABLE_MODELS.get(keys[i + 1], {}).get("provider")
+                         if i + 1 < len(keys) else None)
+        if provider != next_provider and provider in THINKING_LEVELS:
+            models.append((_thinking_label(provider, _thinking_state(provider)[1]),
+                           f"a_think:{provider}"))
     rows += _chunks(models, _MODELS_PER_ROW)
     images = [(("✅ " if key == active_image else "") + _image_model_label(key), f"a_image:{key}")
               for key in _IMAGE_BUTTON_ROW]
     rows += _chunks(images, _MODELS_PER_ROW)
-    thinking = [(_thinking_label(provider, _thinking_state(provider)[1]), f"a_think:{provider}")
-                for provider in THINKING_LEVELS]
-    rows += _chunks(thinking, _MODELS_PER_ROW)
     rows.append((("📊 Вчера", "a_daily"), ("📅 Неделя", "a_weekly"),
                  ("💰 Счета", "a_bal"), ("⬅️ Назад", "back")))
     return tuple(rows)

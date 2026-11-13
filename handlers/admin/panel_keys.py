@@ -125,9 +125,10 @@ KEYS = (
 # Подменю «📡 Настройки API» (2026-10-18, пилот по решению Максима; с
 # 2026-11-13 — ВСЯ панель, решение Максима): сообщение с подменю — сама
 # панель раздела с её текстом (как у «🎮 Викторина»), под ней кнопок нет.
-# Семь рядов по три-четыре кнопки собирает panel_main.api_keys_rows В МОМЕНТ
-# ОТПРАВКИ: показ ответа, склейка, модели текста (галочка у выбранной), модели
-# картинок, глубина раздумий (фаза луны), отчёты, счета и «⬅️ Назад». Надписи
+# Шесть рядов по три-четыре кнопки собирает panel_main.api_keys_rows В МОМЕНТ
+# ОТПРАВКИ: показ ответа, склейка, модели текста (галочка у выбранной) вместе
+# с глубиной раздумий их провайдера (фаза луны), модели картинок, отчёты,
+# счета и «⬅️ Назад». Надписи
 # короткие — в треть ширины длинные Telegram обрезал бы. Шаги — ТЕ ЖЕ, что у
 # кнопок под панелью (panel_main.flip_api_toggle / step_batch / set_text_model
 # / set_image_model / step_thinking). /start и перезапуск бота всегда ставят
@@ -295,7 +296,11 @@ _ALL_KEYS = (KEYS + API_KEYS + PROMPTS_KEYS + SERVICE_KEYS + MOD_KEYS + QUIZ_KEY
 # вопрос модели.
 # «🧹 Очистить журнал» (DDoS-Guard) убрана 20.10.2026 — со старой панели на
 # экране её нажатие отвечает, что очистки больше нет, а не уходит модели.
-_LEGACY_LABELS = (("💬 Статистика", "adm"), ("🧹 Очистить журнал", "m_clearlog_gone"))
+# Кнопка глубины раздумий Xiaomi убрана 13.11.2026 (MiMo думает всегда) — со
+# старой панели на экране её нажатие отвечает об этом, а не уходит модели.
+_LEGACY_LABELS = (("💬 Статистика", "adm"), ("🧹 Очистить журнал", "m_clearlog_gone"),
+                  ("🍚 🌕 Думает", "a_think_gone"), ("🍚 🌑 Выкл", "a_think_gone"))
+XIAOMI_THINK_GONE_TEXT = "🍚 Xiaomi теперь думает всегда — кнопки глубины у неё больше нет."
 MOD_CLEARLOG_GONE_TEXT = ("🧹 Очистки журнала модерации больше нет — старые записи "
                           "и улики бот убирает сам, ночной уборкой.")
 _BY_LABEL = {label: code for label, code in _ALL_KEYS + _LEGACY_LABELS}
@@ -651,6 +656,9 @@ async def _run(code: str, context, chat_id: int, user_id: int, text: str = "") -
         await _notice(bot, chat_id, said)
         if outcome == "changed":
             await send_owner_keys(bot, chat_id, user_id, menu="api")
+    elif code == "a_think_gone":
+        await _notice(bot, chat_id, XIAOMI_THINK_GONE_TEXT)
+        await send_owner_keys(bot, chat_id, user_id, menu="api")
     elif code.startswith("a_think:"):
         from .panel_main import step_thinking
         said = step_thinking(code.partition(":")[2], user_id)

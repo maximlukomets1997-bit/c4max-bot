@@ -10727,9 +10727,10 @@ def check_owner_keys():
 
         # ═══ 8. Подменю «📡 Настройки API» (18.10.2026; с 13.11.2026 — вся панель) ═══
         # Нижняя «📡 Настройки API» присылает ОДНО сообщение — панель раздела с
-        # нижними кнопками, под ним кнопок нет. Семь рядов по три-четыре: показ
-        # ответа, склейка, модели текста, модели картинок, глубина раздумий,
-        # отчёты со счетами и «⬅️ Назад». Каждая кнопка — тот же шаг, что под
+        # нижними кнопками, под ним кнопок нет. Шесть рядов по три-четыре: показ
+        # ответа, склейка, модели текста с глубиной раздумий их провайдера (с
+        # 13.11.2026 — в одних рядах, по четыре; Xiaomi думает всегда, кнопки у
+        # него нет), модели картинок, отчёты со счетами и «⬅️ Назад». Каждая кнопка — тот же шаг, что под
         # панелью. Набор моделей берётся из config (он меняется), а надписи
         # переключателей, отчётов и раскладка рядов выписаны руками.
         mb.wait_sec = saved_h[1]                     # регулятору нужна настоящая склейка
@@ -10763,18 +10764,26 @@ def check_owner_keys():
             levels = c.THINKING_LEVELS[prov]
             return f"{c.PROVIDERS[prov]['icon']} {c.THINKING_PHASES[len(levels)][pos]} {levels[pos][1]}"
 
-        def by3(items):
-            return [items[i:i + 3] for i in range(0, len(items), 3)]
+        def by(items, n):
+            return [items[i:i + n] for i in range(0, len(items), n)]
 
         def want_api(model=None, image=None, think=None, toggles=("🟢", "🔴", "🟢"), batch="🔴"):
             model, image = model or M_KEYS[0], image or I_KEYS[0]
             think = think or {}
+            # Лента моделей: за последней моделью провайдера — кнопка его
+            # глубины, если она у него есть.
+            band = []
+            for n, k in enumerate(M_KEYS):
+                band.append(("✅ " if k == model else "") + m_label(k))
+                here = c.AVAILABLE_MODELS[k]["provider"]
+                after = c.AVAILABLE_MODELS[M_KEYS[n + 1]]["provider"] if n + 1 < len(M_KEYS) else None
+                if here != after and here in PROVS:
+                    band.append(t_label(here, think.get(here, 0)))
             return ([[f"🧠 Мысли: {toggles[0]}", f"✍️ На глазах: {toggles[1]}",
                       f"📝 Черновик: {toggles[2]}"],
                      ["➖ склейка", f"🧩 Склейка: {batch}", "➕ склейка"]]
-                    + by3([("✅ " if k == model else "") + m_label(k) for k in M_KEYS])
-                    + by3([("✅ " if k == image else "") + i_label(k) for k in I_KEYS])
-                    + by3([t_label(prov, think.get(prov, 0)) for prov in PROVS])
+                    + by(band, 4)
+                    + by([("✅ " if k == image else "") + i_label(k) for k in I_KEYS], 4)
                     + [["📊 Вчера", "📅 Неделя", "💰 Счета", "⬅️ Назад"]])
 
         WANT_API = want_api()
@@ -10805,10 +10814,42 @@ def check_owner_keys():
         akb = pk.owner_keyboard("api", OWNER)
         expect(f"подменю «Настройки API»: надписи или ряды не те: {rows_of(akb)}",
                rows_of(akb) == WANT_API)
-        expect(f"подменю «Настройки API» не в семь рядов по три-четыре кнопки: "
+        expect(f"подменю «Настройки API» не в шесть рядов по три-четыре кнопки: "
                f"{[len(r) for r in rows_of(akb)]}",
-               len(M_KEYS) != 6 or len(I_KEYS) != 2 or len(PROVS) != 3
-               or [len(r) for r in rows_of(akb)] == [3, 3, 3, 3, 2, 3, 4])
+               len(M_KEYS) != 6 or len(I_KEYS) != 2 or len(PROVS) != 2
+               or [len(r) for r in rows_of(akb)] == [3, 3, 4, 4, 2, 4])
+        # Глубина стоит сразу за моделями СВОЕГО провайдера (макет 13.11.2026).
+        flat8 = sum(rows_of(akb), [])
+        lost8 = [prov for prov in PROVS if t_label(prov, 0) not in flat8]
+        expect(f"кнопки глубины раздумий нет в нижнем меню API: {lost8}", not lost8)
+        misplaced = [prov for prov in PROVS if prov not in lost8
+                     and c.PROVIDERS[prov]["icon"] not in flat8[flat8.index(t_label(prov, 0)) - 1]]
+        expect(f"кнопка глубины стоит не за моделью своего провайдера: {misplaced}",
+               not misplaced)
+
+        # Xiaomi думает ВСЕГДА (13.11.2026, решение Максима): кнопки глубины у
+        # него нет нигде, а старая запись «выключено» в базе ничего не гасит.
+        from services import gemini as _g8
+        X_KEY = c.THINKING_SETTING_PREFIX + "xiaomi"
+        saved_x = hist.get_setting(X_KEY, "")
+        hist.set_setting(X_KEY, "off")
+        x_models = [k for k in M_KEYS if c.AVAILABLE_MODELS[k]["provider"] == "xiaomi"
+                    and c.AVAILABLE_MODELS[k].get("thinking")]
+        expect("у Xiaomi снова есть кнопка глубины раздумий",
+               "xiaomi" not in c.THINKING_LEVELS and "xiaomi" not in c.THINKING_DEFAULT
+               and not any("xiaomi" in d for d in datas_of(pm._build_api_keyboard(OWNER, full=True))))
+        expect(f"старая запись «глубина Xiaomi выключена» погасила его раздумья: "
+               f"{[(k, _g8._is_thinking(k)) for k in x_models]}",
+               bool(x_models) and all(_g8._is_thinking(k) for k in x_models))
+        for old_x in ("🍚 🌕 Думает", "🍚 🌑 Выкл"):     # кнопка со старой панели на экране
+            bot, gone, _ = press(OWNER, old_x)
+            expect(f"старая кнопка «{old_x}» ушла модели вопросом или промолчала: {notices(bot)}",
+                   notices(bot) == [pk.XIAOMI_THINK_GONE_TEXT] and not asked and bool(gone)
+                   and len(keyboards(bot)) == 1 and hist.get_setting(X_KEY, "") == "off")
+        if saved_x == "":
+            hist.delete_setting(X_KEY)
+        else:
+            hist.set_setting(X_KEY, saved_x)
         expect("подменю «Настройки API» не компактное или сворачивается само",
                akb.resize_keyboard is True and akb.is_persistent is True)
         every = dict(pk._ALL_KEYS)
