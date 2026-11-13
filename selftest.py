@@ -5671,6 +5671,294 @@ def _quiz_week_for_check() -> tuple:
     return _quiz_week(save=False)
 
 
+def check_rag_rebuild():
+    """
+    Пересборка базы знаний не оставляет бота без индекса (11.11.2026).
+
+    ⚠️ Ради чего проверка существует. 11.11.2026 бот молчал десять минут:
+    «🔄 Пересобрать RAG» первым делом стирала файл индекса, а новый писала
+    только через восемь минут; отправка с ПК перезапустила бота на середине.
+    Старый процесс не остановился за 90 секунд (индексация остановки не
+    слышала) и был выключен принудительно, недосчитанное пропало, а новый
+    процесс при запуске считал всю базу заново и до конца счёта не отвечал.
+
+    Гоняются настоящие `services/rag.py` (синхронизация, пересборка, запись
+    и загрузка индекса) и сторож остановки из `jobs/rag.py`; поддельные —
+    только запрос векторов у Google и папки: статьи и индекс свои, временные.
+    """
+    import ast
+    import asyncio
+    import inspect
+    import json
+    import shutil
+    import types
+
+    import services.rag as rag
+    import jobs.rag as jr
+
+    # main.py НЕ импортируется: при загрузке он заводит файл лога (setup_logging),
+    # а на сервере проверки идут рядом с живым ботом. Функции читаются текстом.
+    _main_src = pathlib.Path(ROOT, "main.py").read_text(encoding="utf-8")
+    _main_defs = {n.name: ast.get_source_segment(_main_src, n) or ""
+                  for n in ast.parse(_main_src).body
+                  if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+
+    problems = []
+    done = 0
+
+    def expect(title, ok):
+        nonlocal done
+        done += 1
+        if not ok:
+            problems.append(title)
+
+    class _Killed(BaseException):
+        """Процесс выключили принудительно: мимо всех except Exception."""
+
+    tmp = tempfile.mkdtemp(prefix="c4max-selftest-rag-")
+    art_dir = os.path.join(tmp, "approved")
+    os.makedirs(art_dir)
+    index = os.path.join(tmp, "vectors.json")
+    NAMES = ["A.md", "B.md", "C.md"]
+    for i, name in enumerate(NAMES):
+        with open(os.path.join(art_dir, name), "w", encoding="utf-8") as f:
+            f.write(f"# Машина {i}\n\nМашина {i} — танк в War Thunder Mobile. Текст статьи номер {i}.\n")
+
+    calls = []
+    state = {"mark": 1.0, "hook": None}
+
+    def fake_embedding(text, is_query=False):
+        calls.append(text)
+        if state["hook"]:
+            state["hook"]()
+        return [state["mark"], float(len(calls)), 0.5]
+
+    def on_disk():
+        with open(index, "r", encoding="utf-8") as f:
+            return json.load(f)["files"]
+
+    def marks():
+        return {name: entry["chunks"][0]["vector"][0] for name, entry in on_disk().items()}
+
+    saved = (rag.RAG_ENABLED, rag.RAG_INDEX_FILE, rag.KNOWLEDGE_APPROVED_DIR, rag.get_embedding,
+             rag._INDEX_PAUSE_SEC, rag._SAVE_EVERY, rag._KNOWLEDGE_INDEX, rag._COMMON_STEMS,
+             jr.STOP_WATCH_SEC)
+    try:
+        rag.RAG_ENABLED = True
+        rag.RAG_INDEX_FILE = index
+        rag.KNOWLEDGE_APPROVED_DIR = art_dir
+        rag.get_embedding = fake_embedding
+        rag._INDEX_PAUSE_SEC = 0
+        rag._STOP.clear()
+
+        # ── 1. Обычная синхронизация: считает только новое ──
+        expect(f"первая синхронизация не проиндексировала все статьи: {rag.sync_knowledge_base()}",
+               rag.sync_knowledge_base() == (3, 3) and sorted(on_disk()) == NAMES)
+        calls.clear()
+        rag.sync_knowledge_base()
+        expect(f"повторная синхронизация пересчитала статьи, которые не менялись: {len(calls)}",
+               not calls)
+        expect("после записи индекса рядом остался временный файл",
+               not os.path.exists(index + ".tmp"))
+
+        # ── 2. Полная пересборка: считает ВСЁ, а индекс всё это время на месте ──
+        seen_missing = []
+        state["mark"] = 2.0
+        state["hook"] = lambda: seen_missing.append(not os.path.exists(index))
+        calls.clear()
+        result = rag.rebuild_knowledge_base()
+        expect(f"полная пересборка не пересчитала вектора всех статей: вызовов {len(calls)}, "
+               f"итог {result}, метки {marks()}",
+               result == (3, 3) and len(calls) == 3 and set(marks().values()) == {2.0})
+        expect("во время пересборки файла индекса на диске не было — перезапуск в эту минуту "
+               "оставил бы бота без базы знаний", seen_missing and not any(seen_missing))
+
+        # ── 3. Остановка бота посреди пересборки ──
+        state["mark"] = 3.0
+
+        def stop_after_first():
+            if len(calls) == 1:
+                rag.request_stop()
+        state["hook"] = stop_after_first
+        calls.clear()
+        result = rag.rebuild_knowledge_base()
+        got = marks()
+        expect(f"просьба остановиться не прервала пересборку: посчитано статей {len(calls)} из 3",
+               len(calls) == 1)
+        expect(f"после прерванной пересборки в индексе не все статьи или вектора не те: {got}",
+               sorted(got) == NAMES and sorted(got.values()) == [2.0, 2.0, 3.0])
+        expect(f"прерванная пересборка не оставила в памяти рабочий индекс: "
+               f"{len(rag._KNOWLEDGE_INDEX)} чанков", len(rag._KNOWLEDGE_INDEX) == 3)
+        # Итог — сколько пересчитано ЗАНОВО: прежние вектора в индексе остались,
+        # и без этого прерванная пересборка докладывала бы «3 из 3».
+        expect(f"прерванная пересборка доложила итог как полная: {result}", result == (1, 3))
+        # Что скажут сайт и бот: прервана перезапуском — а не «лимит Google».
+        import web.actions as wa
+        import web.longjobs as wl
+        import handlers.admin.panel_rag as prag
+        caught = {}
+        saved_start = wl.start
+        wl.start = lambda app, latch, fn, describe: caught.setdefault("describe", describe) and "ок"
+        try:
+            wa.kb_rebuild(0, None)
+        finally:
+            wl.start = saved_start
+        describe = caught.get("describe")
+        said_stop = describe((1, 3)) if describe else ""
+        rag._STOP.clear()
+        said_quota = describe((1, 3)) if describe else ""
+        expect(f"сайт назвал прерванную перезапуском пересборку иначе: {said_stop!r}",
+               "прервана перезапуском" in said_stop and "лимит" not in said_stop)
+        expect(f"сайт при упоре в лимит Google сказал не то: {said_quota!r}",
+               "лимит Google" in said_quota and "прежнему" in said_quota)
+        # Бот: настоящий обработчик «Да» у пересборки; её фоновая задача
+        # ловится и прогоняется здесь с подставным итогом (1 из 3).
+        sent_texts, panels, tasks = [], [], []
+
+        class _PBot:
+            async def send_message(self, chat_id=None, text=None, **kw):
+                sent_texts.append(text)
+                return types.SimpleNamespace(message_id=777)
+
+            async def delete_message(self, *a, **kw):
+                return True
+
+        async def _no_answer(*a, **kw):
+            return True
+
+        async def _rec_panel(*a, **kw):
+            panels.append(True)
+
+        papp = types.SimpleNamespace(bot_data={},
+                                     create_task=lambda coro: tasks.append(coro))
+        pctx = types.SimpleNamespace(bot=_PBot(), user_data={}, application=papp)
+        pquery = types.SimpleNamespace(answer=_no_answer)
+        saved_bot = (rag.rebuild_knowledge_base, prag.send_rag_panel, prag.schedule_delete)
+        bot_said = {}
+        try:
+            rag.rebuild_knowledge_base = lambda: (1, 3)
+            prag.send_rag_panel = _rec_panel
+            prag.schedule_delete = lambda *a, **kw: None
+            for case, stopping in (("stop", True), ("quota", False)):
+                sent_texts.clear(), panels.clear(), tasks.clear()
+                papp.bot_data["kb_rebuild_running"] = False
+                (rag._STOP.set if stopping else rag._STOP.clear)()
+                asyncio.run(prag._handle_kb_callback(pquery, pctx, "kb_rebuild_yes", 1, 1))
+                if tasks:
+                    asyncio.run(tasks[0])
+                bot_said[case] = (list(sent_texts), bool(panels))
+        finally:
+            (rag.rebuild_knowledge_base, prag.send_rag_panel, prag.schedule_delete) = saved_bot
+            rag._STOP.clear()
+        stop_texts, stop_panel = bot_said.get("stop", ([], True))
+        quota_texts, quota_panel = bot_said.get("quota", ([], False))
+        expect(f"бот назвал прерванную перезапуском пересборку иначе или прислал панель "
+               f"уходящим процессом: {stop_texts}, панель {stop_panel}",
+               any("прервана перезапуском" in t for t in stop_texts)
+               and not any("лимит" in t for t in stop_texts) and not stop_panel)
+        expect(f"бот при упоре в лимит Google сказал не то или не вернул панель: {quota_texts}",
+               any("лимит Google" in t and "прежнему" in t for t in quota_texts) and quota_panel)
+
+        # ── 4. Процесс выключили принудительно: пропадает не больше пачки ──
+        state["mark"] = 4.0
+        rag._SAVE_EVERY = 2
+
+        def kill_on_third():
+            if len(calls) == 3:
+                raise _Killed()
+        state["hook"] = kill_on_third
+        calls.clear()
+        try:
+            rag.rebuild_knowledge_base()
+            killed = False
+        except _Killed:
+            killed = True
+        got = marks()
+        expect(f"принудительное выключение посреди пересборки потеряло уже посчитанное или "
+               f"испортило индекс: {got}",
+               killed and sorted(got) == NAMES and sorted(got.values()) == [2.0, 4.0, 4.0])
+        rag._SAVE_EVERY = saved[5]
+
+        # ── 5. Запись подменой: сбой посреди записи не портит прежний индекс ──
+        before = open(index, "rb").read()
+        real_dump = rag.json.dump
+
+        def broken_dump(obj, f, **kw):
+            f.write('{"format": 2, "files": {"A.md"')
+            raise OSError("диск переполнен")
+        rag.json.dump = broken_dump
+        try:
+            rag._save_index_file({"A.md": {"mtime": 0, "chunks": []}})
+        finally:
+            rag.json.dump = real_dump
+        expect("сбой посреди записи индекса испортил прежний файл — следующий запуск "
+               "пересчитывал бы всю базу", open(index, "rb").read() == before)
+
+        # ── 6. Запуск: грузит что есть, ничего не досчитывая ──
+        state["hook"] = None
+        state["mark"] = 5.0
+        rag.sync_knowledge_base()                # индекс снова полный и свежий
+        files = on_disk()
+        del files["C.md"]
+        rag._save_index_file(files)
+        rag._KNOWLEDGE_INDEX = []
+        calls.clear()
+        lag = rag.load_existing_index()
+        expect(f"загрузка индекса при запуске пошла считать вектора ({len(calls)} запросов) — "
+               f"бот молчал бы до конца счёта", not calls)
+        expect(f"загрузка индекса при запуске не подняла то, что есть, или не назвала "
+               f"недостачу: в памяти {len(rag._KNOWLEDGE_INDEX)}, не хватает {lag}",
+               len(rag._KNOWLEDGE_INDEX) == 2 and lag == 1)
+        os.remove(index)
+        rag._KNOWLEDGE_INDEX = [1]
+        expect("без файла индекса загрузка при запуске упала или пошла считать",
+               rag.load_existing_index() == 3 and rag._KNOWLEDGE_INDEX == [] and not calls)
+        main_src = _main_defs.get("main", "")
+        expect("main.py при запуске снова ждёт полной синхронизации базы знаний",
+               "load_existing_index()" in main_src and "sync_knowledge_base()" not in main_src)
+
+        # ── 7. Сторож остановки: бот перестал принимать сообщения — индексации велено выйти ──
+        jr.STOP_WATCH_SEC = 0
+        updater = types.SimpleNamespace(running=False)
+        app = types.SimpleNamespace(updater=updater)
+
+        async def scenario():
+            task = asyncio.create_task(jr.rag_stop_watch_loop(app))
+            for _ in range(5):
+                await asyncio.sleep(0)
+            early = rag._STOP.is_set()           # бот ещё не запускался — рано
+            updater.running = True
+            for _ in range(5):
+                await asyncio.sleep(0)
+            working = rag._STOP.is_set()
+            updater.running = False
+            await asyncio.wait_for(task, 2)
+            return early, working
+
+        early, working = asyncio.run(scenario())
+        expect("сторож остановки велел индексации выйти, пока бот ещё работал",
+               not early and not working)
+        expect("бот перестал принимать сообщения, а индексации не велено выйти — остановка "
+               "ждала бы конца пересборки", rag._STOP.is_set())
+        post_init_src = _main_defs.get("post_init", "")
+        expect("сторож остановки индексации не запущен среди фоновых задач бота",
+               "rag_stop_watch_loop(application)" in post_init_src)
+        expect("post_stop не просит индексацию остановиться",
+               "request_stop()" in _main_defs.get("post_stop", ""))
+    finally:
+        rag._STOP.clear()
+        (rag.RAG_ENABLED, rag.RAG_INDEX_FILE, rag.KNOWLEDGE_APPROVED_DIR, rag.get_embedding,
+         rag._INDEX_PAUSE_SEC, rag._SAVE_EVERY, rag._KNOWLEDGE_INDEX, rag._COMMON_STEMS,
+         jr.STOP_WATCH_SEC) = saved
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    return problems, (f"{done} проверок: пересборка считает всё, а индекс остаётся на диске; "
+                      f"остановка прерывает её между статьями и сохраняет посчитанное; "
+                      f"принудительное выключение теряет не больше пачки; сбой записи не "
+                      f"портит прежний файл; запуск грузит что есть и не считает; сторож "
+                      f"остановки велит индексации выйти")
+
+
 def check_rag_notice():
     """
     Уведомления о базе знаний: «✅ снова полная» исчезает само, а «⚠️ неполная»
@@ -5705,15 +5993,23 @@ def check_rag_notice():
     class _Stop(Exception):
         """Останов сценария. Бросается из sleep — он стоит ВНЕ try цикла."""
 
-    def run(script, admins=(OWNER,), fail_for=()):
+    naps = []
+
+    def run(script, admins=(OWNER,), fail_for=(), startup=(0, None)):
         """
         Прогоняет цикл по сценарию. script — шаги вида
         (сколько статей без векторов, что вернёт синхронизация).
         Возвращает: что отправлено, что поставлено на самоудаление, что стёрто.
+
+        startup — шаг ПЕРВОГО прохода, сразу после запуска бота (11.11.2026):
+        по умолчанию база полная и проход ничего не делает, так что сценарии
+        ниже по-прежнему описывают ежечасные проходы.
         """
         sent, deletes, dropped = [], [], []
+        script = [startup] + list(script)
         steps = iter(script)
         current = {}
+        naps.clear()
 
         class _Msg:
             def __init__(self, mid):
@@ -5742,7 +6038,8 @@ def check_rag_notice():
             calls = 0
 
             @staticmethod
-            async def sleep(_):
+            async def sleep(sec):
+                naps.append(sec)
                 _Sleeper.calls += 1
                 if _Sleeper.calls > len(script):
                     raise _Stop()
@@ -5776,6 +6073,26 @@ def check_rag_notice():
              rag_mod.index_lag, rag_mod.sync_knowledge_base,
              u.schedule_delete, jr.asyncio) = saved
         return sent, deletes, dropped
+
+    # ── 0. Первый проход — сразу после запуска и тихий (11.11.2026) ──
+    # main.py при запуске только загружает готовый индекс; недостающее
+    # дотягивает этот проход. Он не ждёт часа и при успехе не пишет в личку:
+    # иначе «✅» приходило бы после каждого перезапуска с поправленной статьёй.
+    sent, deletes, dropped = run([], startup=(1, (92, 92)))
+    done += 1
+    if sent:
+        problems.append(f"добор сразу после запуска написал в личку, хотя всё дотянул: {sent!r}")
+    done += 1
+    if not naps or naps[0] != jr.STARTUP_DELAY_SEC or jr.STARTUP_DELAY_SEC > 60:
+        problems.append(f"первый проход добора ждёт не секунды после запуска, а {naps[:1]!r} — "
+                        f"бот без индекса отвечал бы без базы знаний целый час")
+    done += 1
+    if len(naps) < 2 or naps[1] != 3600:
+        problems.append(f"после первого прохода добор не перешёл на ежечасный шаг: {naps!r}")
+    sent, deletes, dropped = run([], startup=(2, (90, 92)))
+    done += 1
+    if len(sent) != 1 or "⚠️" not in sent[0][1]:
+        problems.append(f"добор после запуска не дотянул базу и промолчал: {sent!r}")
 
     # ── 1. Рутина: поправили статью, цикл её дотянул ────────────────────────
     # Именно этот случай Максим и видит чаще всего — инцидента не было вовсе.
@@ -12124,6 +12441,7 @@ CHECKS = (
     ("уведомление об обновлении уходит по сроку", check_update_notice),
     ("ручная правка счёта викторины", check_quiz_score),
     ("уведомления о базе знаний живут по сроку", check_rag_notice),
+    ("пересборка базы знаний не оставляет бота без индекса", check_rag_rebuild),
     ("фото уходит зрячей модели, а не в пустоту", check_photo_route),
     ("секундомер — время ответившей модели, а не всей очереди", check_stopwatch),
     ("голосовое и видео доходят до конца пути", check_media_twins),

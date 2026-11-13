@@ -23,7 +23,7 @@ from handlers import setup_handlers
 from utils import register_and_clean_bot_message
 from jobs import news_polling_loop
 from jobs import cleanup_loop
-from jobs import rag_catchup_loop
+from jobs import rag_catchup_loop, rag_stop_watch_loop
 from jobs import balance_sync_loop
 from jobs import daily_report_loop
 from jobs import watchdog_loop
@@ -329,6 +329,9 @@ async def post_init(application):
         # Ежечасный добор базы знаний после сбоев лимита Google;
         # при выключенном RAG задача сама завершается сразу.
         asyncio.create_task(rag_catchup_loop(application)),
+        # Сторож остановки: велит индексации базы знаний выйти, как только
+        # бот перестал принимать сообщения (иначе остановка ждёт её до конца).
+        asyncio.create_task(rag_stop_watch_loop(application)),
         # Сверка остатка на счету с платформой провайдера раз в 10 минут
         # (14.09.2026). Первая — через 15 секунд после запуска: иначе экраны
         # до 10 минут показывали бы собственную оценку бота, а она занижена на
@@ -417,6 +420,15 @@ async def post_stop(application):
     новый процесс сам сообщит о запуске. Иначе остановка ручная (Ctrl+C, стоп
     службы) — сообщаем об этом.
     """
+    # Индексация базы знаний идёт в рабочем потоке и сама остановки не
+    # заметит (11.11.2026: служба ждала её 90 секунд и убила процесс). Просим
+    # её выйти между статьями — ПЕРВЫМ делом и при любой причине остановки.
+    try:
+        from services.rag import request_stop
+        request_stop()
+    except Exception as e:
+        logger.debug("🚀 Не удалось попросить индексацию остановиться: %s", e)
+
     if application.bot_data.get("shutdown_reason") == "restart":
         return
     # Отправка с ПК перезапускает службу снаружи и пометку в память бота
@@ -582,7 +594,13 @@ def main():
         try:
             import services.rag as rag_module
             logger.info("🚀 Загрузка базы знаний RAG")
-            rag_module.sync_knowledge_base()
+            # Только то, что уже лежит в индексе (11.11.2026): досчитывать
+            # вектора здесь нельзя — бот молчал бы до конца счёта. Недостающее
+            # сразу после запуска дотягивает фоновый добор (jobs/rag.py).
+            lag = rag_module.load_existing_index()
+            if lag:
+                logger.info("🚀 В индексе базы знаний не хватает статей: %d — "
+                            "дотяну в фоне, бот уже работает", lag)
         except Exception as e:
             logger.error(f"⚠️ Не удалось инициализировать RAG: {e}")
 

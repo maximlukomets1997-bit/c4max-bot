@@ -495,7 +495,7 @@ def kb_rebuild(actor_id: int, application) -> str:
     указателя. См. web/longjobs.py.
     """
     from . import longjobs
-    from services.rag import rebuild_knowledge_base
+    from services.rag import rebuild_knowledge_base, stop_requested
     from database.history import add_kb_action
 
     def describe(result):
@@ -506,8 +506,11 @@ def kb_rebuild(actor_id: int, application) -> str:
                       actor_id)
         if indexed >= total:
             return f"✅ Указатель пересобран: {indexed} из {total}."
-        return (f"⚠️ Упёрлись в лимит Google: {indexed} из {total}. "
-                f"Недостающее бот доберёт сам или нажмите ещё раз позже.")
+        if stop_requested():
+            return (f"⏹ Пересборка прервана перезапуском бота: обновлено {indexed} из {total}. "
+                    f"Остальные статьи работают по прежнему указателю — нажмите ещё раз.")
+        return (f"⚠️ Упёрлись в лимит Google: обновлено {indexed} из {total}. "
+                f"Остальные статьи работают по прежнему указателю — нажмите ещё раз позже.")
 
     logger.info("🌐 Сайт: запущена пересборка базы знаний (админ %s)", actor_id)
     return longjobs.start(application, KB_REBUILD_LATCH, rebuild_knowledge_base,

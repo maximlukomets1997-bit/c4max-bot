@@ -27,7 +27,7 @@ from .news import send_news_to_chat, news_polling_loop
 from .cleanup import cleanup_loop, _monthly_stats_reset
 from .reports import (daily_report_loop, nightly_backup, weekly_group_digest,
                       daily_quiz)
-from .rag import rag_catchup_loop
+from .rag import rag_catchup_loop, rag_stop_watch_loop
 from .balance import balance_sync_loop, sync_balances_once
 from .update import (auto_update_loop, forget_update_notice,
                      drop_expired_notice, notice_expired, notice_since)
@@ -38,7 +38,7 @@ __all__ = [
     "send_news_to_chat", "news_polling_loop",
     "cleanup_loop", "_monthly_stats_reset",
     "daily_report_loop", "nightly_backup", "weekly_group_digest", "daily_quiz",
-    "rag_catchup_loop", "balance_sync_loop", "sync_balances_once",
+    "rag_catchup_loop", "rag_stop_watch_loop", "balance_sync_loop", "sync_balances_once",
     "auto_update_loop", "forget_update_notice",
     "drop_expired_notice", "notice_expired", "notice_since",
     "watchdog_loop", "web_loop",

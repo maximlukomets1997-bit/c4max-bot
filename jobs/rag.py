@@ -66,6 +66,37 @@ async def drop_notices(bot, coords) -> None:
 #  Ежечасный добор базы знаний (RAG)
 # ───────────────────────────────────────────────
 
+# Через сколько секунд после запуска бота идёт первый проход добора.
+STARTUP_DELAY_SEC = 5
+# Как часто сторож остановки смотрит, не начал ли бот останавливаться.
+STOP_WATCH_SEC = 0.5
+
+
+async def rag_stop_watch_loop(application):
+    """
+    Сторож остановки (11.11.2026): как только бот перестал принимать
+    сообщения, просит индексацию базы знаний выйти (services.rag.request_stop).
+
+    Зачем отдельная задача. Пересборку панель запускает через
+    application.create_task, а библиотека при остановке ЖДЁТ такие задачи —
+    и до post_stop дело не доходит, пока пересборка не досчитает все статьи.
+    11.11.2026 служба ждала 90 секунд и выключила бота принудительно. Приём
+    сообщений (updater) библиотека гасит раньше — по нему и видно остановку.
+    """
+    from services import rag
+    seen_running = False
+    while True:
+        await asyncio.sleep(STOP_WATCH_SEC)
+        updater = getattr(application, "updater", None)
+        running = bool(updater and updater.running)
+        if running:
+            seen_running = True
+        elif seen_running:
+            rag.request_stop()
+            logger.info("🚀 Бот останавливается — индексации базы знаний велено выйти")
+            return
+
+
 async def rag_catchup_loop(application):
     """
     Раз в час проверяет, полон ли векторный индекс базы знаний, и дотягивает
@@ -110,9 +141,14 @@ async def rag_catchup_loop(application):
 
     notified_broken = False  # об ЭТОМ инциденте в личку уже жаловались?
     broken_msgs = []         # координаты отправленного «⚠️» — чтобы стереть при выздоровлении
+    # Первый проход — сразу после запуска (11.11.2026): main.py теперь только
+    # загружает готовый индекс и ничего не досчитывает, чтобы бот не молчал.
+    # Этот проход тихий: дотянул — строка в логе, без «✅» в личку (иначе оно
+    # приходило бы после каждого перезапуска с поправленной статьёй).
+    startup = True
     while True:
-        # Стартовую синхронизацию делает main.py при запуске — первый час пропускаем
-        await asyncio.sleep(3600)
+        await asyncio.sleep(STARTUP_DELAY_SEC if startup else 3600)
+        first_pass, startup = startup, False
         try:
             if application.bot_data.get("kb_rebuild_running"):
                 continue  # идёт ручная пересборка — не мешаем, проверим через час
@@ -139,7 +175,10 @@ async def rag_catchup_loop(application):
             if result is None:
                 continue
             indexed, total = result
-            if indexed >= total:
+            if indexed >= total and first_pass and not notified_broken:
+                logger.info("🚀 Добор базы знаний после запуска: база полная (%d из %d)",
+                            indexed, total)
+            elif indexed >= total:
                 logger.info("🚀 Добор базы знаний: база снова полная (%d из %d)", indexed, total)
                 await _recovered(
                     f"✅ База знаний снова полная: {indexed} из {total} статей (автоматический добор)."

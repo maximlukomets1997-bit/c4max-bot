@@ -30,6 +30,7 @@ import requests
 # Подробности и запрет на повторы — в services/http.py.
 from services.http import session as _http
 import re
+import threading
 import time
 
 from config import (
@@ -55,6 +56,28 @@ _KNOWLEDGE_INDEX = []
 # в лексическом бонусе не участвуют: они не различают статьи, а только
 # раздувают баллы всем подряд. Пересчитывается при каждой загрузке индекса.
 _COMMON_STEMS = set()
+
+# Просьба остановиться (11.11.2026). Индексация идёт в рабочем потоке и на
+# остановку бота сама не реагирует: 11.11.2026 служба ждала её 90 секунд и
+# была выключена принудительно, а недосчитанный индекс пропал. Теперь
+# main.post_stop зовёт request_stop(), и синхронизация выходит между
+# статьями, сохранив уже посчитанное. Флаг живёт до конца процесса: новый
+# процесс начинает с чистого.
+_STOP = threading.Event()
+# Через сколько посчитанных статей индекс сбрасывается на диск: если процесс
+# всё же выключат принудительно, пропадёт не больше этой пачки.
+_SAVE_EVERY = 20
+
+
+def request_stop() -> None:
+    """Попросить идущую индексацию остановиться (зовёт main.post_stop)."""
+    _STOP.set()
+
+
+def stop_requested() -> bool:
+    """Бот останавливается? Тогда неполный итог пересборки — не лимит Google,
+    а прерывание: панель и сайт говорят об этом своими словами."""
+    return _STOP.is_set()
 
 
 def _norm(vector: list) -> float:
@@ -263,12 +286,36 @@ def _load_index_file() -> dict:
 
 
 def _save_index_file(files_index: dict) -> None:
+    """
+    Пишет индекс на диск ПОДМЕНОЙ (11.11.2026): сначала во временный файл
+    рядом, потом одним движением на место настоящего. Процесс выключили
+    посреди записи — на диске остаётся прежний целый индекс, а не обрубок,
+    из-за которого следующий запуск пересчитывал бы всю базу.
+    """
+    tmp = RAG_INDEX_FILE + ".tmp"
     try:
-        with open(RAG_INDEX_FILE, "w", encoding="utf-8") as f:
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump({"format": 2, "chunk_mode": RAG_CHUNK_MODE, "files": files_index}, f, ensure_ascii=False)
+        os.replace(tmp, RAG_INDEX_FILE)
         logger.info("🚀 Векторный индекс сохранён: %s (файлов: %d)", RAG_INDEX_FILE, len(files_index))
     except Exception as e:
         logger.error("⚠️ Не удалось сохранить векторный индекс: %s", e)
+
+
+def load_existing_index() -> int:
+    """
+    Загрузить в память индекс КАК ОН ЕСТЬ на диске, ничего не досчитывая
+    (11.11.2026). Зовёт main.py при запуске: бот начинает отвечать сразу, а
+    недостающие статьи через несколько секунд дотягивает фоновый добор
+    (jobs/rag.py::rag_catchup_loop). До этого дня запуск ждал полной
+    синхронизации — и без индекса бот молчал восемь минут.
+
+    Возвращает, сколько статей ещё требуют пересчёта (index_lag).
+    """
+    if not RAG_ENABLED:
+        return 0
+    _load_into_memory(_load_index_file())
+    return index_lag()
 
 
 # ─────────────────────────────────────────────
@@ -336,9 +383,22 @@ def _load_into_memory(files_index: dict) -> None:
                 len(flat), len(files_index), len(_COMMON_STEMS))
 
 
-def sync_knowledge_base() -> tuple[int, int] | None:
+def sync_knowledge_base(force: bool = False) -> tuple[int, int] | None:
     """
     Синхронизирует базу знаний с папкой одобренных статей KNOWLEDGE_APPROVED_DIR.
+
+    force=True — полная пересборка (rebuild_knowledge_base): вектора
+    пересчитываются у ВСЕХ статей, но прежний индекс при этом не стирается —
+    запись статьи заменяется новой, когда та посчитана. Прервали на середине
+    — в индексе часть статей с новыми векторами, часть с прежними, и все
+    годные. Поиск всё это время работает по прежнему индексу в памяти.
+
+    Каждые _SAVE_EVERY посчитанных статей индекс сбрасывается на диск, а на
+    просьбу остановиться (request_stop) выходит между статьями.
+
+    ⚠️ Итог при force=True — сколько статей ПЕРЕСЧИТАНО в этом проходе, а не
+    сколько их есть в индексе: прежние вектора остаются, и иначе прерванная
+    пересборка докладывала бы «139 из 139», будто прошла целиком.
 
     Поштучно: эмбеддинги пересчитываются только для новых и изменённых
     файлов (по mtime), записи удалённых файлов выкидываются из индекса.
@@ -362,11 +422,17 @@ def sync_knowledge_base() -> tuple[int, int] | None:
 
     changed = False
     did_embed = False  # была ли уже индексация в этом проходе (для паузы между статьями)
+    unsaved = 0        # посчитано статей с последнего сброса на диск
+    stopped = False
+    refreshed = set()  # статьи, чьи вектора посчитаны в этом проходе
 
-    # Новые и изменённые файлы
+    # Новые и изменённые файлы (при force — все)
     for fname, mtime in files_on_disk.items():
+        if _STOP.is_set():
+            stopped = True
+            break
         entry = files_index.get(fname)
-        if entry and entry.get("mtime") == mtime:
+        if not force and entry and entry.get("mtime") == mtime:
             continue  # файл не менялся — вектора актуальны
 
         file_path = os.path.join(KNOWLEDGE_APPROVED_DIR, fname)
@@ -385,8 +451,9 @@ def sync_knowledge_base() -> tuple[int, int] | None:
 
         # Пауза между статьями — чтобы серия запросов не влетала в минутный
         # лимит Google (см. _INDEX_PAUSE_SEC). Первая статья идёт без паузы.
-        if did_embed:
-            time.sleep(_INDEX_PAUSE_SEC)
+        if did_embed and _STOP.wait(_INDEX_PAUSE_SEC):
+            stopped = True
+            break
         did_embed = True
 
         embedded = []
@@ -415,7 +482,16 @@ def sync_knowledge_base() -> tuple[int, int] | None:
 
         files_index[fname] = {"mtime": mtime, "chunks": embedded}
         changed = True
+        refreshed.add(fname)
         logger.info("🚀 Статья проиндексирована: %s (чанков: %d)", fname, len(embedded))
+        unsaved += 1
+        if unsaved >= _SAVE_EVERY:
+            _save_index_file(files_index)
+            unsaved = 0
+
+    if stopped:
+        logger.info("🚀 Индексация прервана остановкой бота — посчитанное сохраняю, "
+                    "остальное дотянет следующий запуск")
 
     # Удалённые файлы
     for fname in [f for f in files_index if f not in files_on_disk]:
@@ -428,8 +504,12 @@ def sync_knowledge_base() -> tuple[int, int] | None:
 
     _load_into_memory(files_index)
 
-    # Честный итог: сколько статей с диска реально имеют вектора в индексе.
-    indexed = sum(1 for f in files_on_disk if f in files_index)
+    # Честный итог: сколько статей с диска реально имеют вектора в индексе,
+    # а у полной пересборки — сколько пересчитано заново (см. докстринг).
+    if force:
+        indexed = sum(1 for f in files_on_disk if f in refreshed)
+    else:
+        indexed = sum(1 for f in files_on_disk if f in files_index)
     return indexed, len(files_on_disk)
 
 
@@ -467,9 +547,9 @@ def index_lag() -> int:
 def rebuild_knowledge_base() -> tuple[int, int] | None:
     """
     Полная пересборка индекса (кнопка «Пересобрать» в панели /rag):
-    старый индекс удаляется целиком, вектора ВСЕХ одобренных статей
-    считаются заново. Нужна, если индекс вызывает подозрения или после
-    ручных правок файлов задним числом (mtime мог не измениться).
+    вектора ВСЕХ одобренных статей считаются заново и по одной заменяют
+    прежние. Нужна, если индекс вызывает подозрения или после ручных
+    правок файлов задним числом (mtime мог не измениться).
 
     Возвращает итог sync_knowledge_base (проиндексировано, всего) или
     None, если пересборка не запускалась.
@@ -477,14 +557,13 @@ def rebuild_knowledge_base() -> tuple[int, int] | None:
     if not RAG_ENABLED:
         logger.info("🚀 RAG отключён в конфигурации — пересборка пропущена")
         return None
-    if os.path.exists(RAG_INDEX_FILE):
-        try:
-            os.remove(RAG_INDEX_FILE)
-            logger.info("🚀 Старый векторный индекс удалён — начинаю полную пересборку")
-        except Exception as e:
-            logger.error("⚠️ Не удалось удалить старый векторный индекс: %s", e)
-            return None
-    return sync_knowledge_base()
+    # ⚠️ СТАРЫЙ ИНДЕКС НЕ УДАЛЯЕТСЯ (11.11.2026). До этого дня файл стирался
+    # первым делом, а новый писался только в самом конце — через восемь
+    # минут. Перезапуск в эти минуты (отправка с ПК) оставил бота без
+    # индекса, и следующий запуск молчал, пока не пересчитал всю базу.
+    logger.info("🚀 Полная пересборка: вектора всех статей считаются заново, "
+                "прежний индекс работает до её конца")
+    return sync_knowledge_base(force=True)
 
 
 def _live_rag_enabled() -> bool:

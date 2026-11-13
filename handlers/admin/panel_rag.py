@@ -1065,6 +1065,7 @@ async def _handle_kb_callback(query, context, data: str, chat_id: int, user_id: 
         logger.info("🔧 Админ %s запустил полную пересборку базы знаний", user_id)
         import asyncio
         from services.rag import rebuild_knowledge_base
+        from services.rag import stop_requested as rag_stopping
         from database.history import add_kb_action
         bot = context.bot
 
@@ -1087,16 +1088,24 @@ async def _handle_kb_callback(query, context, data: str, chat_id: int, user_id: 
                 add_kb_action("пересборка базы", f"проиндексировано {indexed} из {total}", user_id)
                 if indexed >= total:
                     text = f"✅ RAG пересобрана заново!\n\nПроиндексировано: {indexed} из {total}"
+                elif rag_stopping():
+                    # 13.11.2026: остановка бота прерывает пересборку между
+                    # статьями; прежний индекс при этом цел.
+                    text = (f"⏹ Пересборка прервана перезапуском бота: обновлено {indexed} из {total}.\n"
+                            f"Остальные статьи работают по прежнему индексу — "
+                            f"нажмите «🔄 Пересобрать RAG» ещё раз.")
                 else:
-                    text = (f"⚠️ Пересборка упёрлась в лимит Google: проиндексировано {indexed} из {total}.\n"
-                            f"Недостающее бот доберёт при следующем запуске, "
-                            f"либо нажмите пересборку ещё раз чуть позже.")
+                    text = (f"⚠️ Пересборка упёрлась в лимит Google: обновлено {indexed} из {total}.\n"
+                            f"Остальные статьи работают по прежнему индексу — "
+                            f"нажмите пересборку ещё раз чуть позже.")
             try:
                 msg = await bot.send_message(chat_id=chat_id, text=text)
                 if msg:
                     schedule_delete(bot, chat_id, msg.message_id, 60)
             except Exception as e:
                 logger.warning("⚠️ Не удалось отправить итог пересборки: %s", e)
+            if rag_stopping():
+                return  # бот уходит: панель пришлёт уже новый процесс по /adm
             await send_rag_panel(bot, chat_id, context)
 
         context.application.bot_data["kb_rebuild_running"] = True
