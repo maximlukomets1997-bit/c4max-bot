@@ -253,11 +253,82 @@ def _build_cost_panel():
     return text, InlineKeyboardMarkup(rows)
 
 
+# ─── Нижние меню экранов счетов (14.11.2026, решение Максима) ───
+# У владельца в личке экраны «💰 Счета», «✏️ Потрачено» и ввод числа — сообщения
+# нижнего подменю (как панель API): под ними кнопок нет, каждый шаг присылает
+# экран заново. Три меню: bal — счета, bal_cost — правка «потрачено»,
+# bal_input — ожидание числа (одна «❌ Отмена»). Надписи собираются из тех же
+# реестров, что кнопки под сообщением; нажатие узнаётся по надписи
+# (balance_key_code). Сам ввод числа и его правила — прежние.
+
+BALANCE_INPUT_GONE_TEXT = "⚠️ Такого счётчика больше нет — открой экран заново."
+
+
+def balance_keys_below(chat_id: int, user_id: int) -> bool:
+    """Экраны счетов стоят в нижнем подменю? Только у владельца в личке."""
+    from services.roles import is_owner
+    return chat_id == user_id and is_owner(user_id)
+
+
+def balance_keys_rows(menu: str) -> tuple:
+    """Ряды нижнего меню: (надпись, код). menu: bal | bal_cost | bal_input."""
+    if menu == "bal_input":
+        return ((("❌ Отмена", "b_cancel"),),)
+    if menu == "bal_cost":
+        return (tuple((f"{_icon(cfg['provider'])} {cfg['name']}", f"b_set:cost:{code}")
+                      for code, cfg in _COST_FIELDS.items())
+                + (("⬅️ К счетам", "b_bal"),),)
+    # Счёт правится кнопкой только у тех, у кого в реестре есть balance_btn
+    # (у DeepSeek её нет с 14.09.2026: его остаток сверяется с платформой).
+    return (tuple((f"💵 {cfg['name']}", f"b_set:{code}")
+                  for code, cfg in _BALANCE_FIELDS.items() if cfg["btn"])
+            + (("✏️ Потрачено", "b_cost"), ("⬅️ К API", "b_api")),)
+
+
+def balance_key_code(text: str) -> str | None:
+    """Код нажатия по надписи нижней кнопки счетов; None — это не она."""
+    text = (text or "").strip()
+    for menu in ("bal", "bal_cost", "bal_input"):
+        for row in balance_keys_rows(menu):
+            for label, code in row:
+                if label == text:
+                    return code
+    return None
+
+
+def balance_input_text(field_id: str) -> str | None:
+    """
+    Текст экрана ввода числа — один для кнопки под сообщением и нижней.
+    None — такого счётчика нет (кнопка со старого сообщения).
+    """
+    info = _balance_field(field_id)
+    if not info:
+        return None
+    # Значок в заголовке уже стоит внутри title (провайдерский, из
+    # PROVIDER_ICONS) — второго не добавляем.
+    now = _value_str(info["key"], info["absent"])
+    return (
+        f"<b>{html.escape(info['title'])}</b>\n"
+        "───────────────────────────\n"
+        f"Сейчас: {now}\n\n"
+        "Пришли новое число одним сообщением.\n"
+        f"Например: <code>{info['example']}</code>\n"
+        f"Прочерк <code>-</code> — {info['clear']}."
+    )
+
+
 async def send_balance_panel(bot, chat_id: int, user_id: int, flash: str = ""):
     """Присылает экран «💰 Счета» новым сообщением (через общую гигиену
     панелей — предыдущая панель удаляется). Используется после ввода числа:
-    ответ пришёл сообщением, править «то же самое» сообщение уже нечем."""
+    ответ пришёл сообщением, править «то же самое» сообщение уже нечем.
+
+    ⚠️ У ВЛАДЕЛЬЦА В ЛИЧКЕ ЭКРАН — СООБЩЕНИЕ НИЖНЕГО ПОДМЕНЮ (14.11.2026):
+    кнопки внизу (panel_keys.send_owner_keys(menu="bal")), под ним их нет."""
     text, markup = _build_balance_panel(flash)
+    if balance_keys_below(chat_id, user_id):
+        from .panel_keys import send_owner_keys
+        await send_owner_keys(bot, chat_id, user_id, menu="bal", text=text)
+        return
     await _send_panel_message(bot, chat_id, text, markup)
 
 
@@ -306,24 +377,12 @@ async def _handle_balance_callback(query, context, data: str, chat_id: int, user
 
     if action == "set":
         field_id = ":".join(parts[2:])
-        info = _balance_field(field_id)
-        if not info:
-            await query.answer("⚠️ Такого счётчика больше нет — открой экран заново.",
-                               show_alert=True)
+        text = balance_input_text(field_id)
+        if text is None:
+            await query.answer(BALANCE_INPUT_GONE_TEXT, show_alert=True)
             return
         context.user_data["balance_edit"] = field_id
         await query.answer()
-        # Значок в заголовке уже стоит внутри title (провайдерский, из
-        # PROVIDER_ICONS) — второго не добавляем.
-        now = _value_str(info["key"], info["absent"])
-        text = (
-            f"<b>{html.escape(info['title'])}</b>\n"
-            "───────────────────────────\n"
-            f"Сейчас: {now}\n\n"
-            "Пришли новое число одним сообщением.\n"
-            f"Например: <code>{info['example']}</code>\n"
-            f"Прочерк <code>-</code> — {info['clear']}."
-        )
         markup = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="bal:cancel")]])
         await _show_screen(context, query, text, markup)
         return
@@ -383,7 +442,9 @@ async def handle_balance_input(update: Update, context: ContextTypes.DEFAULT_TYP
             chat_id=chat_id,
             text=(f"⚠️ {err}.\n"
                   f"Пришли число — например <code>{info['example']}</code>, "
-                  f"или нажми «❌ Отмена» на экране выше."),
+                  f"или нажми «❌ Отмена» "
+                  + ("внизу." if balance_keys_below(chat_id, update.effective_user.id)
+                     else "на экране выше.")),
             parse_mode=ParseMode.HTML,
         )
         if warn:

@@ -11091,6 +11091,171 @@ def check_owner_keys():
                 hist.set_setting(k, v)
         pm.send_api_panel = recorder("api")
 
+        # ═══ 8б. Счета, «потрачено» и отчёты — в нижнем меню (14.11.2026) ═══
+        # Экраны «💰 Счета», «✏️ Потрачено» и ввод числа у владельца в личке —
+        # сообщения нижнего подменю: под ними кнопок нет, каждый шаг присылает
+        # экран заново. Ввод числа и его правила прежние. Отчёты «📊 Вчера» и
+        # «📅 Неделя» приходят без кнопок возврата: внизу остаётся меню API.
+        from handlers.admin import panel_balance as pbal8
+        BAL_SET = ["xiaomi_balance_usd", "image_balance_usd", "deepseek_cost_usd",
+                   "xiaomi_cost_usd", "image_cost_usd"]
+        saved_bal8 = {k: hist.get_setting(k, "") for k in BAL_SET}
+        pm.send_api_panel = saved_targets["api"]
+        hist.set_setting("xiaomi_balance_usd", "5.000000")
+        hist.set_setting("deepseek_cost_usd", "1.000000")
+        WANT_B = [["💵 Xiaomi", "💵 Картинки", "✏️ Потрачено", "⬅️ К API"]]
+        WANT_BC = [["🐋 DeepSeek", "🍚 Xiaomi", "🎨 Картинки", "⬅️ К счетам"]]
+        WANT_BI = [["❌ Отмена"]]
+        for menu, want in (("bal", WANT_B), ("bal_cost", WANT_BC), ("bal_input", WANT_BI)):
+            bkb = pk.owner_keyboard(menu, OWNER)
+            expect(f"нижнее меню счетов «{menu}»: надписи или ряды не те: {rows_of(bkb)}",
+                   rows_of(bkb) == want)
+            expect(f"нижнее меню счетов «{menu}» не компактное или сворачивается само",
+                   bkb.resize_keyboard is True and bkb.is_persistent is True)
+        b_labels = sum(WANT_B + WANT_BC + WANT_BI, [])
+        others8 = set(dict(pk._ALL_KEYS)) | set(pm.api_key_labels())
+        expect(f"надпись кнопки счетов совпала с другой нижней кнопкой: "
+               f"{sorted(set(b_labels) & others8)}",
+               not set(b_labels) & others8 and len(b_labels) == len(set(b_labels))
+               and not any(rx.fullmatch(label) for label in b_labels
+                           for rx in pk._STATEFUL_RX.values()))
+        for label in b_labels:
+            expect(f"нижняя «{label}» не узнаётся — нажатие ушло бы модели",
+                   pk._code_of(label) is not None)
+        # Кнопки под сообщением (полный вариант — его меряет preflight) и внизу
+        # обещают одну и ту же работу.
+        B_WORK = {"b_set:xiaomi": "bal:set:xiaomi", "b_set:image": "bal:set:image",
+                  "b_cost": "bal:cost", "b_api": "adm_open_api",
+                  "b_set:cost:deepseek": "bal:set:cost:deepseek",
+                  "b_set:cost:xiaomi": "bal:set:cost:xiaomi",
+                  "b_set:cost:image": "bal:set:cost:image", "b_bal": "bal:panel"}
+        b_below = (set(datas_of(pbal8._build_balance_panel()[1]))
+                   | set(datas_of(pbal8._build_cost_panel()[1]))) - {"adm_back"}
+        b_bottom = {pk._code_of(label) or "?" for label in b_labels} - {"b_cancel"}
+        expect(f"внизу и под экранами счетов разная работа: только под сообщением "
+               f"{sorted(b_below - set(B_WORK.values()))}, только внизу "
+               f"{sorted(b_bottom - set(B_WORK))}",
+               b_below == set(B_WORK.values()) and b_bottom == set(B_WORK))
+
+        # Вход из меню API: экран счетов с нижними кнопками — одно сообщение.
+        bud = {}
+        bot, gone, _ = press(OWNER, "💰 Счета", user_data=bud)
+        rows, text, msg_id = last_keys(bot)
+        expect(f"нижняя «💰 Счета» не прислала экран счетов одним сообщением с кнопками "
+               f"внизу: {rows}", rows == WANT_B and "СЧЕТА" in text and len(keyboards(bot)) == 1
+               and not under(bot) and not asked and bool(gone))
+        b2 = Bot()
+        asyncio.run(clean_bot_messages(b2, OWNER))
+        expect("экран счетов попал в уборку панелей — первый открытый раздел стёр бы его "
+               "вместе с нижними кнопками", ("delete", OWNER, msg_id) not in b2.events)
+        bot = Bot()
+        asyncio.run(pbal8.send_balance_panel(bot, MOD, MOD))
+        expect("не владельцу экран счетов ушёл в нижние кнопки или потерял кнопки под "
+               "сообщением", not keyboards(bot) and len(under(bot)) == 1
+               and "bal:cost" in datas_of(under(bot)[0][3]))
+
+        # Ввод числа: бот ждёт, внизу одна «❌ Отмена»; число принимается теми
+        # же правилами, что из-под сообщения; итог — на экране счетов.
+        bot, gone, _ = press(OWNER, "💵 Xiaomi", user_data=bud)
+        rows, text, _ = last_keys(bot)
+        expect(f"нижняя «💵 Xiaomi» не начала ввод числа: ждёт {bud.get('balance_edit')!r}, "
+               f"внизу {rows}", bud.get("balance_edit") == "xiaomi" and rows == WANT_BI
+               and "ОСТАТОК НА СЧЕТУ" in text and "5.00" in text and not under(bot)
+               and not asked and bool(gone))
+        bot, gone, _ = press(OWNER, "абв", user_data=bud)
+        expect(f"не число при вводе счёта: бот не объяснил, сбросил ожидание или отдал "
+               f"модели: {notices(bot)}",
+               len(notices(bot)) == 1 and "не число" in notices(bot)[0]
+               and "внизу" in notices(bot)[0] and bud.get("balance_edit") == "xiaomi"
+               and not keyboards(bot) and not asked
+               and hist.get_setting("xiaomi_balance_usd", "") == "5.000000")
+        bot, gone, _ = press(OWNER, "7,32", user_data=bud)
+        rows, text, _ = last_keys(bot)
+        expect(f"число с нижнего ввода не записалось или ожидание не снято: "
+               f"{hist.get_setting('xiaomi_balance_usd', '')!r}",
+               hist.get_setting("xiaomi_balance_usd", "") == "7.320000"
+               and "balance_edit" not in bud and not asked)
+        expect(f"после ввода числа не пришёл экран счетов с итогом «было → стало» и "
+               f"кнопками внизу: {rows}", rows == WANT_B and "было" in text and "стало" in text
+               and "7.32" in text and not under(bot))
+        expect("правка счёта с нижнего ввода не записана в журнал персонала кодом «balance»",
+               hist.get_recent_staff_actions(1)[0].get("action") == "balance")
+
+        # «❌ Отмена» — ожидание снято, значение прежнее, снова счета.
+        press(OWNER, "💵 Xiaomi", user_data=bud)
+        bot, gone, _ = press(OWNER, "❌ Отмена", user_data=bud)
+        rows, text, _ = last_keys(bot)
+        expect(f"«❌ Отмена» не сняла ожидание числа, поменяла значение или не вернула счета: "
+               f"{rows}", "balance_edit" not in bud and rows == WANT_B and "СЧЕТА" in text
+               and hist.get_setting("xiaomi_balance_usd", "") == "7.320000"
+               and notices(bot) == ["Отменено."] and not asked and bool(gone))
+        # Прочерк убирает значение совсем (не ноль).
+        press(OWNER, "💵 Xiaomi", user_data=bud)
+        bot, gone, _ = press(OWNER, "-", user_data=bud)
+        expect("прочерк при вводе счёта не убрал значение совсем или не вернул счета",
+               hist.get_setting("xiaomi_balance_usd", "") == "" and "balance_edit" not in bud
+               and last_keys(bot)[0] == WANT_B and not asked)
+        # Любая другая нижняя кнопка гасит ожидание — следующий вопрос не съестся.
+        press(OWNER, "💵 Картинки", user_data=bud)
+        bot, gone, _ = press(OWNER, "✏️ Потрачено", user_data=bud)
+        rows, text, _ = last_keys(bot)
+        expect(f"другая нижняя кнопка не погасила ожидание числа: {bud.get('balance_edit')!r}",
+               "balance_edit" not in bud)
+
+        # «✏️ Потрачено»: свой экран и свой ввод числа.
+        expect(f"нижняя «✏️ Потрачено» не прислала экран правки с кнопками внизу: {rows}",
+               rows == WANT_BC and "ПОТРАЧЕНО" in text and not under(bot) and not asked)
+        bot, gone, _ = press(OWNER, "🐋 DeepSeek", user_data=bud)
+        rows, text, _ = last_keys(bot)
+        expect(f"нижняя «🐋 DeepSeek» на экране «потрачено» не начала ввод: ждёт "
+               f"{bud.get('balance_edit')!r}", bud.get("balance_edit") == "cost:deepseek"
+               and rows == WANT_BI and "ПОТРАЧЕНО" in text and not asked)
+        bot, gone, _ = press(OWNER, "3", user_data=bud)
+        expect(f"«потрачено» с нижнего ввода не записалось: "
+               f"{hist.get_setting('deepseek_cost_usd', '')!r}",
+               hist.get_setting("deepseek_cost_usd", "") == "3.000000"
+               and last_keys(bot)[0] == WANT_B and "balance_edit" not in bud)
+        press(OWNER, "✏️ Потрачено", user_data=bud)
+        bot, gone, _ = press(OWNER, "⬅️ К счетам", user_data=bud)
+        expect(f"«⬅️ К счетам» не вернула экран счетов: {last_keys(bot)[0]}",
+               last_keys(bot)[0] == WANT_B and "СЧЕТА" in last_keys(bot)[1] and not asked)
+        bot, gone, _ = press(OWNER, "⬅️ К API", user_data=bud)
+        rows, text, _ = last_keys(bot)
+        expect(f"«⬅️ К API» не вернула панель API с её нижним меню: {rows}",
+               bool(rows) and rows[-1] == ["📊 Вчера", "📅 Неделя", "💰 Счета", "⬅️ Назад"]
+               and "УПРАВЛЕНИЕ МОДЕЛЯМИ" in text and not asked)
+
+        # Отчёты: у владельца в личке — без кнопок под текстом (меню API внизу
+        # остаётся); в остальных случаях возврат под сообщением на месте.
+        for title, send in (("за вчера", pm.send_daily_report_panel),
+                            ("за неделю", pm.send_weekly_report_panel)):
+            bot = Bot()
+            asyncio.run(send(bot, OWNER, OWNER))
+            sent = [e for e in bot.events if e[0] == "send"]
+            expect(f"отчёт {title} у владельца пришёл с кнопками под текстом или сменил "
+                   f"нижнее меню: {[type(e[3]).__name__ for e in sent]}",
+                   len(sent) == 1 and sent[0][3] is None and "ОТЧЁТ" in sent[0][2].upper())
+            bot = Bot()
+            asyncio.run(send(bot, MOD, MOD))
+            expect(f"отчёт {title} не владельцу потерял кнопки возврата под сообщением",
+                   len(under(bot)) == 1 and "adm_open_api" in datas_of(under(bot)[0][3]))
+
+        # Кнопка под сообщением начинает ввод тем же текстом; чужой текст — модели.
+        expect("кнопка счёта под сообщением собирает экран ввода не общим текстом с нижней",
+               "balance_input_text(" in __import__("inspect").getsource(
+                   pbal8._handle_balance_callback))
+        for title, uid in (("постороннего", PLAIN), ("модератора", MOD)):
+            fud = {}
+            bot, gone, _ = press(uid, "💵 Xiaomi", user_data=fud)
+            expect(f"«💵 Xiaomi» от {title} перехвачена — а это обычный вопрос модели",
+                   asked == ["💵 Xiaomi"] and "balance_edit" not in fud)
+        for k, v in saved_bal8.items():
+            if v == "":
+                hist.delete_setting(k)
+            else:
+                hist.set_setting(k, v)
+        pm.send_api_panel = recorder("api")
+
         # ═══ 9. Подменю «⚙️ PROMPTы» (18.10.2026) ═══
         # Нижняя «⚙️ PROMPTы» присылает панель и ставит внизу её переключатели
         # и регуляторы; каждый — тот же шаг, что кнопка под панелью (с
@@ -12596,7 +12761,8 @@ def check_owner_keys():
                       f"сообщение с версией, раздел убирает, а сам в уборку панелей не "
                       f"попадает; подменю «Настройки API» — вся панель одним сообщением: "
                       f"показ ответа, склейка, модели, глубина, отчёты и счета теми же шагами, "
-                      f"что под панелью; "
+                      f"что под панелью; счета, «потрачено» и ввод числа — тоже внизу, отчёты "
+                      f"без кнопок возврата; "
                       f"подменю «DDoS-Guard» — одно сообщение с панелью, те же шаги, улики "
                       f"и вопрос перед очисткой журнала; "
                       f"подменю «Викторина» — одно сообщение с панелью, кнопка только при "

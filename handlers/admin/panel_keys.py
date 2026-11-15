@@ -288,6 +288,10 @@ _MENUS = {"prompts": (PROMPTS_ROWS, None),
           "logs_chat": (LOGS_CHAT_ROWS, None)}
 # Меню логов: их сообщение — сам экран логов (текст собирает common.py).
 _LOGS_MENUS = ("logs", "logs_bot", "logs_chat")
+# Меню экранов счетов (14.11.2026): счета, правка «потрачено» и ввод числа.
+# Ряды и тексты — у panel_balance; текст экрана передаёт тот, кто зовёт
+# (у счетов в нём бывает строка «было → стало», у ввода — имя счётчика).
+_BAL_MENUS = ("bal", "bal_cost", "bal_input")
 
 _ALL_KEYS = (KEYS + API_KEYS + PROMPTS_KEYS + SERVICE_KEYS + MOD_KEYS + QUIZ_KEYS
              + RAG_KEYS + LOGS_KEYS)
@@ -372,7 +376,7 @@ def _shown(label: str, code: str, user_id: int | None = None) -> str:
     panel_mod.mod_toggle_text): разойтись им нельзя. user_id нужен личному
     тумблеру «⚙️ PROMPT».
     """
-    if code.startswith(("q_", "r_", "a_")) or code in _API_LIVE:
+    if code.startswith(("q_", "r_", "a_", "b_")) or code in _API_LIVE:
         # Надписи викторины, базы знаний и панели API уже живые: их собрали
         # panel_quiz.quiz_keys_rows, panel_rag.rag_keys_rows / rag_settings_rows
         # и panel_main.api_keys_rows.
@@ -403,7 +407,12 @@ def _code_of(text: str) -> str | None:
     # Модели и глубина раздумий: надпись зависит от набора моделей в config и
     # от состояния (галочка, фаза луны) — все варианты знает панель API.
     from .panel_main import api_key_code
-    return api_key_code(text)
+    code = api_key_code(text)
+    if code:
+        return code
+    # Экраны счетов: надписи собраны из реестра провайдеров (panel_balance).
+    from .panel_balance import balance_key_code
+    return balance_key_code(text)
 
 
 def owner_keyboard(menu: str = "main", user_id: int | None = None,
@@ -422,6 +431,9 @@ def owner_keyboard(menu: str = "main", user_id: int | None = None,
     elif menu == "api":
         from .panel_main import api_keys_rows
         layout = api_keys_rows(user_id)
+    elif menu in _BAL_MENUS:
+        from .panel_balance import balance_keys_rows
+        layout = balance_keys_rows(menu)
     elif menu == "quiz":
         from .panel_quiz import quiz_keys_rows
         layout = quiz_keys_rows()
@@ -493,7 +505,7 @@ async def _post(bot, chat_id: int, text: str, markup, html: bool = True) -> None
 
 
 async def send_owner_keys(bot, chat_id: int, user_id: int | None = None,
-                          menu: str = "main", context=None) -> None:
+                          menu: str = "main", context=None, text: str | None = None) -> None:
     """
     Поставить нижние кнопки в личке владельца: главную панель (main) или
     подменю раздела (api — «📡 Настройки API», prompts — «⚙️ PROMPTы»). Не
@@ -504,11 +516,13 @@ async def send_owner_keys(bot, chat_id: int, user_id: int | None = None,
     quiz — так же сами панели «🛠 DDoS-Guard» и «🎮 Викторина» (19.10.2026),
     logs, logs_bot и logs_chat — экраны «📜 Логи бота» (11.11.2026): она заменяет открытый
     раздел так же, как заменяла его прежде через гигиену панелей, — только
-    сама в гигиену не попадает (см. шапку файла).
+    сама в гигиену не попадает (см. шапку файла). bal, bal_cost и bal_input —
+    экраны счетов (14.11.2026); им текст экрана можно передать готовым (text).
     """
     uid = chat_id if user_id is None else user_id
     if not _is_owner_private(chat_id, uid):
         return
+    given_text = text
     if menu == "rag_pending":
         # Очередь пуста (разобрали последнюю) — вместо пустого списка подменю
         # базы знаний со свежими числами, без строки «Ждут одобрения».
@@ -521,8 +535,13 @@ async def send_owner_keys(bot, chat_id: int, user_id: int | None = None,
         # Список новостей ушёл с экрана — его надписи больше не кнопки.
         context.user_data.pop("kb_pending_keys", None)
     keyboard = owner_keyboard(menu, uid, context)
-    if menu in ("api", "prompts", "mod", "quiz", "rag", "rag_settings", "rag_pending") + _LOGS_MENUS:
-        if menu == "api":
+    if menu in (("api", "prompts", "mod", "quiz", "rag", "rag_settings", "rag_pending")
+                + _LOGS_MENUS + _BAL_MENUS):
+        if menu in _BAL_MENUS:
+            from .panel_balance import _build_balance_panel, _build_cost_panel
+            text = given_text or (_build_cost_panel()[0] if menu == "bal_cost"
+                                  else _build_balance_panel()[0])
+        elif menu == "api":
             from .panel_main import api_panel_text
             text = api_panel_text(uid, below=True)
         elif menu in _LOGS_MENUS:
@@ -674,8 +693,34 @@ async def _run(code: str, context, chat_id: int, user_id: int, text: str = "") -
         await (send_daily_report_panel if code == "a_daily"
                else send_weekly_report_panel)(bot, chat_id, user_id)
     elif code == "a_bal":
+        # У владельца экран счетов — сам с нижними кнопками (send_balance_panel
+        # зовёт send_owner_keys(menu="bal")).
         from .panel_balance import send_balance_panel
         await send_balance_panel(bot, chat_id, user_id)
+    elif code.startswith("b_set:"):
+        # Начать ввод числа — тот же шаг, что у кнопки под сообщением: бот
+        # ждёт число следующим сообщением (handlers/messages.py). Ожидание
+        # ставится ЗДЕСЬ, после общей уборки handle_owner_key, которая гасит
+        # его на любое нажатие.
+        from .panel_balance import BALANCE_INPUT_GONE_TEXT, balance_input_text
+        field_id = code.partition(":")[2]
+        prompt = balance_input_text(field_id)
+        if prompt is None:
+            await _notice(bot, chat_id, BALANCE_INPUT_GONE_TEXT)
+            return
+        context.user_data["balance_edit"] = field_id
+        await send_owner_keys(bot, chat_id, user_id, menu="bal_input", text=prompt)
+    elif code == "b_cost":
+        await send_owner_keys(bot, chat_id, user_id, menu="bal_cost")
+    elif code == "b_bal":
+        await send_owner_keys(bot, chat_id, user_id, menu="bal")
+    elif code == "b_cancel":
+        # Ожидание числа уже погашено общей уборкой — осталось вернуть счета.
+        await _notice(bot, chat_id, "Отменено.")
+        await send_owner_keys(bot, chat_id, user_id, menu="bal")
+    elif code == "b_api":
+        from .panel_main import send_api_panel
+        await send_api_panel(bot, chat_id, user_id)
     elif code in ("thoughts", "live_answer", "live_thoughts"):
         from .panel_main import flip_api_toggle
         await _notice(bot, chat_id, flip_api_toggle(code, user_id))

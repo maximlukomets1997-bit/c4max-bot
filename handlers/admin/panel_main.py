@@ -719,6 +719,17 @@ def _report_back_rows():
             _adm_back_row()]
 
 
+def _report_markup(chat_id: int, user_id: int):
+    """
+    Кнопки под отчётом. У владельца в личке их НЕТ (14.11.2026): отчёт
+    открывается из нижнего меню API, оно остаётся на месте со своим
+    «⬅️ Назад» — кнопки возврата под текстом были бы лишними.
+    """
+    if chat_id == user_id and api_toggles_below(user_id):
+        return None
+    return InlineKeyboardMarkup(_report_back_rows())
+
+
 async def send_daily_report_panel(bot, chat_id: int, user_id: int):
     """
     Кнопка «📊 Отчёт за вчера»: показывает ТОТ ЖЕ текст, что пришёл ночью
@@ -741,7 +752,7 @@ async def send_daily_report_panel(bot, chat_id: int, user_id: int):
     except Exception as e:
         logger.warning("⚠️ Не удалось посчитать расход с последней полуночи: %s", e)
 
-    await _send_panel_message(bot, chat_id, text, InlineKeyboardMarkup(_report_back_rows()))
+    await _send_panel_message(bot, chat_id, text, _report_markup(chat_id, user_id))
 
 
 async def send_weekly_report_panel(bot, chat_id: int, user_id: int):
@@ -765,7 +776,7 @@ async def send_weekly_report_panel(bot, chat_id: int, user_id: int):
     except Exception as e:
         logger.warning("⚠️ Не удалось посчитать расход с начала недели: %s", e)
 
-    await _send_panel_message(bot, chat_id, text, InlineKeyboardMarkup(_report_back_rows()))
+    await _send_panel_message(bot, chat_id, text, _report_markup(chat_id, user_id))
 
 
 
