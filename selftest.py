@@ -10784,7 +10784,7 @@ def check_owner_keys():
                      ["➖ склейка", f"🧩 Склейка: {batch}", "➕ склейка"]]
                     + by(band, 4)
                     + by([("✅ " if k == image else "") + i_label(k) for k in I_KEYS], 4)
-                    + [["📊 Вчера", "📅 Неделя", "💰 Счета", "⬅️ Назад"]])
+                    + [["💰 Счета", "⬅️ Назад"]])
 
         WANT_API = want_api()
 
@@ -10814,10 +10814,12 @@ def check_owner_keys():
         akb = pk.owner_keyboard("api", OWNER)
         expect(f"подменю «Настройки API»: надписи или ряды не те: {rows_of(akb)}",
                rows_of(akb) == WANT_API)
-        expect(f"подменю «Настройки API» не в шесть рядов по три-четыре кнопки: "
-               f"{[len(r) for r in rows_of(akb)]}",
+        # Последний ряд — две кнопки с 15.11.2026: отчёты о расходах ушли из
+        # него в подменю «🎛 Админ-панель», остались «💰 Счета» и «⬅️ Назад».
+        expect(f"подменю «Настройки API» не в шесть рядов (три, три, четыре, четыре, два, "
+               f"два): {[len(r) for r in rows_of(akb)]}",
                len(M_KEYS) != 6 or len(I_KEYS) != 2 or len(PROVS) != 2
-               or [len(r) for r in rows_of(akb)] == [3, 3, 4, 4, 2, 4])
+               or [len(r) for r in rows_of(akb)] == [3, 3, 4, 4, 2, 2])
         # Глубина стоит сразу за моделями СВОЕГО провайдера (макет 13.11.2026).
         flat8 = sum(rows_of(akb), [])
         lost8 = [prov for prov in PROVS if t_label(prov, 0) not in flat8]
@@ -10869,7 +10871,6 @@ def check_owner_keys():
         A_WORK = {"thoughts": "toggle_thoughts", "live_answer": "toggle_live_answer",
                   "live_thoughts": "toggle_live_thoughts", "batch_dec": "batch_dec",
                   "batch_info": "batch_info", "batch_inc": "batch_inc",
-                  "a_daily": "adm_daily_report", "a_weekly": "adm_weekly_report",
                   "a_bal": "bal:panel"}
         A_WORK.update({f"a_model:{k}": f"set_model:{k}" for k in M_KEYS})
         A_WORK.update({f"a_image:{k}": f"set_image_model:{k}" for k in I_KEYS})
@@ -11015,7 +11016,10 @@ def check_owner_keys():
         expect("глубина с последнего положения не вернулась на первое",
                hist.get_setting(c.THINKING_SETTING_PREFIX + prov, "") == levels[0][0])
 
-        # Отчёты и счета — свой экран отдельным сообщением; панель API остаётся.
+        # Счета — свой экран; панель API заново не приходит. Отчёты о расходах
+        # отсюда ушли в «🎛 Админ-панель» (15.11.2026, решение Максима) — но
+        # старые «📊 Вчера» и «📅 Неделя» с панели, оставшейся на экране,
+        # обязаны прислать тот же отчёт, а не уйти модели вопросом.
         seen8 = []
 
         def rec8(name):
@@ -11031,6 +11035,9 @@ def check_owner_keys():
             expect(f"нижняя «{label}» открыла не свой экран, прислала панель заново или ушла "
                    f"модели: {seen8}", seen8 == [name] and not keyboards(bot) and not asked
                    and bool(gone))
+        expect(f"отчёты о расходах вернулись в нижнее меню API: {rows_of(pk.owner_keyboard('api', OWNER))[-1]}",
+               not {"s_daily", "s_weekly"} & {pk._code_of(b) for b in
+                                              sum(rows_of(pk.owner_keyboard("api", OWNER)), [])})
         pm.send_daily_report_panel, pm.send_weekly_report_panel, pbal.send_balance_panel = saved_api_fn
 
         # «⬅️ Назад» — главная; /start после подменю — тоже главная.
@@ -11094,8 +11101,9 @@ def check_owner_keys():
         # ═══ 8б. Счета, «потрачено» и отчёты — в нижнем меню (14.11.2026) ═══
         # Экраны «💰 Счета», «✏️ Потрачено» и ввод числа у владельца в личке —
         # сообщения нижнего подменю: под ними кнопок нет, каждый шаг присылает
-        # экран заново. Ввод числа и его правила прежние. Отчёты «📊 Вчера» и
-        # «📅 Неделя» приходят без кнопок возврата: внизу остаётся меню API.
+        # экран заново. Ввод числа и его правила прежние. Отчёты о расходах
+        # приходят без кнопок возврата: внизу остаётся меню, из которого нажали
+        # (с 15.11.2026 — «🎛 Админ-панель»).
         from handlers.admin import panel_balance as pbal8
         BAL_SET = ["xiaomi_balance_usd", "image_balance_usd", "deepseek_cost_usd",
                    "xiaomi_cost_usd", "image_cost_usd"]
@@ -11222,11 +11230,12 @@ def check_owner_keys():
         bot, gone, _ = press(OWNER, "⬅️ К API", user_data=bud)
         rows, text, _ = last_keys(bot)
         expect(f"«⬅️ К API» не вернула панель API с её нижним меню: {rows}",
-               bool(rows) and rows[-1] == ["📊 Вчера", "📅 Неделя", "💰 Счета", "⬅️ Назад"]
+               bool(rows) and rows[-1] == ["💰 Счета", "⬅️ Назад"]
                and "УПРАВЛЕНИЕ МОДЕЛЯМИ" in text and not asked)
 
-        # Отчёты: у владельца в личке — без кнопок под текстом (меню API внизу
-        # остаётся); в остальных случаях возврат под сообщением на месте.
+        # Отчёты: у владельца в личке — без кнопок под текстом (подменю
+        # «🎛 Админ-панель» внизу остаётся); в остальных случаях возврат под
+        # сообщением на месте и ведёт в статистику — туда, где кнопки отчётов.
         for title, send in (("за вчера", pm.send_daily_report_panel),
                             ("за неделю", pm.send_weekly_report_panel)):
             bot = Bot()
@@ -11238,7 +11247,8 @@ def check_owner_keys():
             bot = Bot()
             asyncio.run(send(bot, MOD, MOD))
             expect(f"отчёт {title} не владельцу потерял кнопки возврата под сообщением",
-                   len(under(bot)) == 1 and "adm_open_api" in datas_of(under(bot)[0][3]))
+                   len(under(bot)) == 1 and "adm_open_stats" in datas_of(under(bot)[0][3])
+                   and "adm_open_api" not in datas_of(under(bot)[0][3]))
 
         # Кнопка под сообщением начинает ввод тем же текстом; чужой текст — модели.
         expect("кнопка счёта под сообщением собирает экран ввода не общим текстом с нижней",
@@ -11512,7 +11522,10 @@ def check_owner_keys():
         # С 20.10.2026 (решение Максима): тумблера «📰 Дайджест по понедельникам»
         # нет нигде — дайджест приходит всегда; на его месте отдельным рядом —
         # «🧹 Очистить ПАМЯТЬ», ушедшая из главной панели.
-        WANT_SERVICE = [["⬇️ Обновления", "💾 Копия базы"], ["📊 Дайджест недели"],
+        # С 15.11.2026 (решение Максима): вторым рядом — отчёты о расходах,
+        # переехавшие из подменю «📡 Настройки API» («📊 Вчера», «📅 Неделя»).
+        WANT_SERVICE = [["⬇️ Обновления", "💾 Копия базы"],
+                        ["📊 Расход вчера", "📅 Расход неделя"], ["📊 Дайджест недели"],
                         ["🧹 Очистить ПАМЯТЬ"], ["🔄 ПЕРЕЗАПУСК", "⬅️ Назад"]]
         skb = pk.owner_keyboard("service", OWNER)
         expect(f"подменю «🎛 Админ-панель»: надписи или ряды не те: {rows_of(skb)}",
@@ -11524,9 +11537,19 @@ def check_owner_keys():
                  + pk.SERVICE_KEYS if seen.setdefault(label, code) != code]
         expect(f"одна надпись у двух разных нижних кнопок: {clash}", not clash)
         old_texts = [b.text for row in pm._stats_keyboard().inline_keyboard for b in row]
-        for label in sum(WANT_SERVICE[:2], []):
+        for label in sum(WANT_SERVICE[:3], []):
             expect(f"«{label}» внизу есть, а под прежней панелью статистики — другая надпись",
                    label in old_texts)
+        # Отчёты о расходах: внизу и под панелью статистики — одна работа, а
+        # под панелью API их больше нет.
+        stats_datas = [b.callback_data for row in pm._stats_keyboard().inline_keyboard for b in row]
+        api_datas = datas_of(pm._build_api_keyboard(OWNER, full=True))
+        expect(f"кнопки отчётов о расходах не переехали под панель статистики: {stats_datas}",
+               {"adm_daily_report", "adm_weekly_report"} <= set(stats_datas)
+               and not {"adm_daily_report", "adm_weekly_report"} & set(api_datas))
+        expect("«📊 Расход вчера» и «📅 Расход неделя» внизу — не кнопки отчётов",
+               pk._code_of("📊 Расход вчера") == "s_daily"
+               and pk._code_of("📅 Расход неделя") == "s_weekly")
         for label in sum(WANT_SERVICE, []):
             expect(f"нижняя «{label}» не узнаётся — нажатие ушло бы модели",
                    pk._code_of(label) is not None)
@@ -11582,12 +11605,25 @@ def check_owner_keys():
         pu.send_updates_panel = _rec_call("updates")
         pd.send_digest_panel = _rec_call("digest")
         pm.send_db_backup = _rec_call("backup")
+        saved_reports = (pm.send_daily_report_panel, pm.send_weekly_report_panel)
+        pm.send_daily_report_panel = _rec_call("daily")
+        pm.send_weekly_report_panel = _rec_call("weekly")
         for label, name in (("⬇️ Обновления", "updates"), ("📊 Дайджест недели", "digest"),
-                            ("💾 Копия базы", "backup")):
+                            ("💾 Копия базы", "backup"), ("📊 Расход вчера", "daily"),
+                            ("📅 Расход неделя", "weekly")):
             calls.clear()
             bot, gone, _ = press(OWNER, label)
             expect(f"нижняя «{label}» не сделала того же, что кнопка под панелью статистики",
                    calls == [name] and not asked and bool(gone))
+            if name in ("daily", "weekly"):
+                # Отчёт — отдельным сообщением: подменю заново не приходит.
+                expect(f"нижняя «{label}» прислала подменю заново — отчёт должен прийти один",
+                       not keyboards(bot))
+        pm.send_daily_report_panel, pm.send_weekly_report_panel = saved_reports
+        for data, step in (("adm_daily_report", "send_daily_report_panel("),
+                           ("adm_weekly_report", "send_weekly_report_panel(")):
+            expect(f"кнопка отчёта под панелью статистики ({data}) шлёт отчёт не общим шагом",
+                   step in router_src[router_src.find(f'elif data == "{data}"'):][:400])
         # Дайджест по понедельникам — ВСЕГДА (20.10.2026, решение Максима):
         # тумблера нет ни внизу, ни в /adm, ни на сайте, а старая запись «0» в
         # базе отправку не гасит.
@@ -12760,9 +12796,8 @@ def check_owner_keys():
                       f"гасит; /start и запуск ставят панель; /adm владельца — это же одно "
                       f"сообщение с версией, раздел убирает, а сам в уборку панелей не "
                       f"попадает; подменю «Настройки API» — вся панель одним сообщением: "
-                      f"показ ответа, склейка, модели, глубина, отчёты и счета теми же шагами, "
-                      f"что под панелью; счета, «потрачено» и ввод числа — тоже внизу, отчёты "
-                      f"без кнопок возврата; "
+                      f"показ ответа, склейка, модели, глубина и счета теми же шагами, "
+                      f"что под панелью; счета, «потрачено» и ввод числа — тоже внизу; "
                       f"подменю «DDoS-Guard» — одно сообщение с панелью, те же шаги, улики "
                       f"и вопрос перед очисткой журнала; "
                       f"подменю «Викторина» — одно сообщение с панелью, кнопка только при "
@@ -12774,7 +12809,8 @@ def check_owner_keys():
                       f"список без одобренной, пустая — подменю базы, дубли с номером, "
                       f"листание, устаревшая кнопка; "
                       f"«🎛 Админ-панель» — это и статистика: цифры в сообщении с версией, "
-                      f"кнопки статистики внизу; "
+                      f"кнопки статистики внизу, там же отчёты о расходах за вчера и за "
+                      f"неделю — без кнопок возврата, старые кнопки из меню API узнаются; "
                       f"подменю «PROMPTы» — так же, с объявлением группам у «Сам в разговор», "
                       f"и держит его сама панель промптов одним сообщением; "
                       f"подменю «Логи бота» — развилка и два экрана логов одним сообщением, "

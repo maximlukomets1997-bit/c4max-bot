@@ -127,8 +127,8 @@ KEYS = (
 # панель раздела с её текстом (как у «🎮 Викторина»), под ней кнопок нет.
 # Шесть рядов по три-четыре кнопки собирает panel_main.api_keys_rows В МОМЕНТ
 # ОТПРАВКИ: показ ответа, склейка, модели текста (галочка у выбранной) вместе
-# с глубиной раздумий их провайдера (фаза луны), модели картинок, отчёты,
-# счета и «⬅️ Назад». Надписи
+# с глубиной раздумий их провайдера (фаза луны), модели картинок, счета и
+# «⬅️ Назад» (отчёты о расходах с 15.11.2026 — в «🎛 Админ-панель»). Надписи
 # короткие — в треть ширины длинные Telegram обрезал бы. Шаги — ТЕ ЖЕ, что у
 # кнопок под панелью (panel_main.flip_api_toggle / step_batch / set_text_model
 # / set_image_model / step_thinking). /start и перезапуск бота всегда ставят
@@ -136,8 +136,7 @@ KEYS = (
 # Здесь — только надписи без состояния; с состоянием узнаются по образцу
 # (_STATEFUL), модели и глубина — по panel_main.api_key_code.
 API_KEYS = (("➖ склейка", "batch_dec"), ("➕ склейка", "batch_inc"),
-            ("📊 Вчера", "a_daily"), ("📅 Неделя", "a_weekly"), ("💰 Счета", "a_bal"),
-            ("⬅️ Назад", "back"))
+            ("💰 Счета", "a_bal"), ("⬅️ Назад", "back"))
 
 # Подменю «⚙️ PROMPTы» (2026-10-18, решение Максима): переключатели и
 # регуляторы промптов — внизу (panel_prompts.flip_prompts_toggle /
@@ -179,8 +178,14 @@ PROMPTS_KEYS = tuple(key for row in PROMPTS_ROWS for key in row)
 # спрашивает, «✅ Да» ведёт на ту же ветку system_restart. Рядом до вечера
 # 18.10 стоял тумблер «⬇️ ОБНОВЛЕНИЕ»; самообновление теперь включено всегда
 # (jobs/update.py) — не возвращать.
+# «📊 Расход вчера» и «📅 Расход неделя» (15.11.2026, решение Максима) —
+# отчёты о расходах, переехали сюда из подменю «📡 Настройки API», где звались
+# «📊 Вчера» и «📅 Неделя». Слово «Расход» — чтобы не путать с соседним
+# «📊 Дайджест недели»: тот про жизнь чата, эти про деньги. Отчёт приходит
+# отдельным сообщением без кнопок под ним; это подменю остаётся внизу.
 SERVICE_ROWS = (
     (("⬇️ Обновления", "s_updates"), ("💾 Копия базы", "s_backup")),
+    (("📊 Расход вчера", "s_daily"), ("📅 Расход неделя", "s_weekly")),
     (("📊 Дайджест недели", "s_digest"),),
     (("🧹 Очистить ПАМЯТЬ", "wipe"),),
     (("🔄 ПЕРЕЗАПУСК", "restart"), ("⬅️ Назад", "back")),
@@ -302,8 +307,11 @@ _ALL_KEYS = (KEYS + API_KEYS + PROMPTS_KEYS + SERVICE_KEYS + MOD_KEYS + QUIZ_KEY
 # экране её нажатие отвечает, что очистки больше нет, а не уходит модели.
 # Кнопка глубины раздумий Xiaomi убрана 13.11.2026 (MiMo думает всегда) — со
 # старой панели на экране её нажатие отвечает об этом, а не уходит модели.
+# «📊 Вчера» и «📅 Неделя» стояли в подменю API до 15.11.2026 — со старой панели
+# на экране их нажатие присылает тот же отчёт, а не уходит модели вопросом.
 _LEGACY_LABELS = (("💬 Статистика", "adm"), ("🧹 Очистить журнал", "m_clearlog_gone"),
-                  ("🍚 🌕 Думает", "a_think_gone"), ("🍚 🌑 Выкл", "a_think_gone"))
+                  ("🍚 🌕 Думает", "a_think_gone"), ("🍚 🌑 Выкл", "a_think_gone"),
+                  ("📊 Вчера", "s_daily"), ("📅 Неделя", "s_weekly"))
 XIAOMI_THINK_GONE_TEXT = "🍚 Xiaomi теперь думает всегда — кнопки глубины у неё больше нет."
 MOD_CLEARLOG_GONE_TEXT = ("🧹 Очистки журнала модерации больше нет — старые записи "
                           "и улики бот убирает сам, ночной уборкой.")
@@ -619,6 +627,13 @@ async def _run(code: str, context, chat_id: int, user_id: int, text: str = "") -
     elif code == "s_digest":
         from .panel_digest import send_digest_panel
         await send_digest_panel(bot, chat_id, user_id)
+    elif code in ("s_daily", "s_weekly"):
+        # Отчёт о расходах — отдельным сообщением без кнопок под ним
+        # (panel_main._report_markup); сообщение с версией остаётся: оно
+        # держит нижние кнопки подменю.
+        from .panel_main import send_daily_report_panel, send_weekly_report_panel
+        await (send_daily_report_panel if code == "s_daily"
+               else send_weekly_report_panel)(bot, chat_id, user_id)
     elif code == "s_digest_auto":
         # Тумблера больше нет (20.10.2026): нажали старую кнопку с экрана —
         # говорим, что дайджест включён всегда, и ставим новое подменю.
@@ -686,12 +701,6 @@ async def _run(code: str, context, chat_id: int, user_id: int, text: str = "") -
             return
         await _notice(bot, chat_id, said)
         await send_owner_keys(bot, chat_id, user_id, menu="api")
-    elif code in ("a_daily", "a_weekly"):
-        # Отчёт — отдельным сообщением с кнопками под ним, как из-под панели;
-        # панель API остаётся: она держит нижние кнопки.
-        from .panel_main import send_daily_report_panel, send_weekly_report_panel
-        await (send_daily_report_panel if code == "a_daily"
-               else send_weekly_report_panel)(bot, chat_id, user_id)
     elif code == "a_bal":
         # У владельца экран счетов — сам с нижними кнопками (send_balance_panel
         # зовёт send_owner_keys(menu="bal")).
